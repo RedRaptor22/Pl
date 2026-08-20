@@ -175,7 +175,8 @@ function run(W){
   function reset(){
     P.Strokes.clear(); P.Guides.setActive(null); P.Guides.resources.length = 0;
     P.History.clear(); P.TOOL.mirror = null; P.Guides.isolate = true;
-    P.TOOL.sizeMM = 14; P.TOOL.autoGuide = false; P.TOOL.brush = 'round';
+    P.TOOL.sizeMM = 14; P.TOOL.eraserMM = 20;
+    P.TOOL.autoGuide = false; P.TOOL.brush = 'pen';
     P.VIEW.theta = 0.6; P.VIEW.phi = 1.1; P.VIEW.radius = 4; P.VIEW.roll = 0;
     P.VIEW.ortho = false; P.VIEW.focal = 50;
     P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true; P.applyCamera();
@@ -299,12 +300,20 @@ function run(W){
   /* ================= C.6 erase / vacuum ================= */
   group('C.6  Eraser and Vacuum');
   reset();
-  var erasePx = Math.max(4, P.worldToPx(0.06));
+  /* A curve is stored with two samples only if it is BUILT that way — a
+     two-point drag is densified on commit now — and the point of this case is
+     that the eraser cuts between samples, not only at them. */
+  P.TOOL.eraserMM = 60;
   pen([{x:CX-200,y:CY},{x:CX+200,y:CY}]);
+  var drawn2 = P.Strokes.list[0];
+  var sparse = P.Strokes.cloneWithPoints(drawn2,
+                 [drawn2.pts[0], drawn2.pts[drawn2.pts.length-1]]);
+  P.Strokes.clear(); P.Strokes.add(sparse);
   var s2 = P.Strokes.list[0], full = plen(s2);
   ck('sparse two-point curve', s2.pts.length === 2);
   var a2 = ts(s2.pts[0].p), b2 = ts(s2.pts[1].p);
-  P.setTool('erase'); P.TOOL.sizeMM = 120;
+  var erasePx = Math.max(4, P.worldToPx(P.Tools.eraserRadius()));
+  P.setTool('erase');
   pen([{x:(a2.x+b2.x)/2,y:(a2.y+b2.y)/2},{x:(a2.x+b2.x)/2+1,y:(a2.y+b2.y)/2}]);
   ck('a thin eraser splits even a two-point curve', P.Strokes.list.length === 2,
      'n=' + P.Strokes.list.length);
@@ -322,7 +331,7 @@ function run(W){
   var tiny = Math.max(2, erasePx*0.25);
   pen([{x:CX-tiny,y:CY},{x:CX,y:CY},{x:CX+tiny,y:CY}]);
   var c3 = ts(P.Strokes.list[0].pts[1].p);
-  P.setTool('erase'); P.TOOL.sizeMM = 120;
+  P.setTool('erase'); P.TOOL.eraserMM = 60;
   pen([{x:c3.x,y:c3.y},{x:c3.x+1,y:c3.y}]);
   ck('a fully covered curve is removed outright', P.Strokes.list.length === 0);
 
@@ -719,6 +728,106 @@ function run(W){
   var future = P.Doc.restore({format:'plume', version:999});
   ck('a newer file version is rejected', future === false);
 
+  /* ================= sampling density and nib tessellation ================= */
+  group('Curves are not polygons — sampling and cross-section');
+
+  /* A browser delivers one pointermove per frame, so a fast stroke arrives in
+     30-50px jumps and used to be stored exactly that way: a polyline with
+     visible corners. On commit the screen path is now resampled through a
+     centripetal Catmull-Rom, which passes through the samples the pen gave
+     and only fills in between them. */
+  reset(); P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+  var flick = [];
+  for(var fq=0; fq<=8; fq++) flick.push({x:CX-200+fq*50, y:CY+Math.sin(fq/8*Math.PI)*90});
+  pen(flick);
+  var fst = P.Strokes.list[0];
+  ck('a fast, sparsely-sampled stroke is filled in', fst.pts.length > flick.length*2,
+     flick.length + ' samples in, ' + fst.pts.length + ' points out');
+
+  var stepMax = 0, sPrev = ts(fst.pts[0].p);
+  for(var fi=1; fi<fst.pts.length; fi++){
+    var sNow = ts(fst.pts[fi].p);
+    stepMax = Math.max(stepMax, Math.hypot(sNow.x-sPrev.x, sNow.y-sPrev.y));
+    sPrev = sNow;
+  }
+  ck('...with no gap left longer than a few pixels', stepMax < 12,
+     'largest step ' + stepMax.toFixed(1) + 'px');
+
+  /* fidelity: the fill-in interpolates, it does not smooth. Every point the
+     pen actually reported must still lie on the stored curve. */
+  var offWorst = 0;
+  for(fq=0; fq<flick.length; fq++){
+    var want = flick[fq], bestD = Infinity;
+    for(fi=0; fi<fst.pts.length; fi++){
+      var got = ts(fst.pts[fi].p);
+      bestD = Math.min(bestD, Math.hypot(got.x-want.x, got.y-want.y));
+    }
+    offWorst = Math.max(offWorst, bestD);
+  }
+  ck('...and every sample the pen gave is still on the curve', offWorst < 1.5,
+     'worst ' + offWorst.toFixed(2) + 'px off');
+
+  /* Cross-section resolution follows the nib. A fixed 12 segments is smooth on
+     a 14mm pen and visibly faceted on a 200mm one, so the count is solved from
+     a fixed facet error instead. */
+  function ringSeg(mm){
+    P.Strokes.clear(); P.TOOL.sizeMM = mm; P.TOOL.brush = 'pen';
+    pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+    return P.Strokes.segOf(P.Strokes.list[0]);
+  }
+  var segSmall = ringSeg(4), segMid = ringSeg(40), segBig = ringSeg(200);
+  ck('a bigger nib is tessellated more finely',
+     segBig > segMid && segMid > segSmall,
+     segSmall + ' -> ' + segMid + ' -> ' + segBig + ' segments');
+  var errWorst = 0, errAt = 0;
+  [1, 4, 14, 40, 90, 200].forEach(function(mm){
+    var n = ringSeg(mm);
+    var rmm = P.Strokes.list[0].baseRadius * P.BRUSH.pen.wide / P.MM;
+    var e = (1 - Math.cos(Math.PI/n)) * rmm;      // facet depth, in mm
+    if(e > errWorst){ errWorst = e; errAt = mm; }
+  });
+  ck('so the facet error stays under a third of a millimetre up to a 200mm nib',
+     errWorst < 0.36, 'worst ' + errWorst.toFixed(3) + 'mm at ' + errAt + 'mm');
+
+  /* above that the segment ceiling takes over, and the guarantee becomes a
+     relative one — including the wide brush, whose nib is 3.2x the slider */
+  var relWorst = 0, relAt = '';
+  ['pen','wide'].forEach(function(bn2){
+    [200, 300].forEach(function(mm){
+      P.Strokes.clear(); P.TOOL.brush = bn2; P.TOOL.sizeMM = mm;
+      pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+      var n = P.Strokes.segOf(P.Strokes.list[0]);
+      var rel = 1 - Math.cos(Math.PI/n);
+      if(rel > relWorst){ relWorst = rel; relAt = bn2 + ' at ' + mm + 'mm'; }
+    });
+  });
+  ck('...and never worse than a third of a percent of the nib radius',
+     relWorst < 0.003, (relWorst*100).toFixed(3) + '%, worst on ' + relAt);
+  P.TOOL.sizeMM = 14; P.TOOL.brush = 'pen';
+
+  /* ================= the eraser is its own tool ================= */
+  group('C.6  The eraser has its own size');
+  function eraseBite(brushMM, eraserMM){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.TOOL.sizeMM = brushMM; P.TOOL.eraserMM = eraserMM;
+    pen([{x:CX-220,y:CY},{x:CX,y:CY},{x:CX+220,y:CY}]);
+    var before4 = plen(P.Strokes.list[0]);
+    P.setTool('erase');
+    pen([{x:CX,y:CY},{x:CX+1,y:CY}]);
+    var after4 = P.Strokes.list.reduce(function(a,b){ return a + plen(b); }, 0);
+    P.setTool('draw');
+    return P.worldToPx(before4 - after4);
+  }
+  var biteThin = eraseBite(6, 20), biteFat = eraseBite(200, 20);
+  ck('the brush size no longer decides how much the eraser takes',
+     Math.abs(biteThin - biteFat) < 2,
+     biteThin.toFixed(1) + 'px with a 6mm nib vs ' + biteFat.toFixed(1) + 'px with a 200mm one');
+  var biteBig = eraseBite(20, 120);
+  ck('...the eraser size does', biteBig > biteThin * 2,
+     '20mm eraser takes ' + biteThin.toFixed(1) + 'px, 120mm takes ' + biteBig.toFixed(1) + 'px');
+  reset();
+
   /* ================= geometry export ================= */
   group('Geometry export — OBJ and STL');
   /* Verified against the CURVE, not against the writers: a round brush swept
@@ -758,7 +867,7 @@ function run(W){
 
   reset();
   P.TOOL.autoGuide = false; P.TOOL.pressureOn = false; P.TOOL.stableOn = false;
-  P.TOOL.brush = 'round'; P.TOOL.sizeMM = 20; P.TOOL.opacity = 1;
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 20; P.TOOL.opacity = 1;
   P.TOOL.color.set('#c8323c');
   pen([{x:CX-160,y:CY},{x:CX-80,y:CY},{x:CX,y:CY},{x:CX+80,y:CY},{x:CX+160,y:CY}]);
   ck('a straight curve to export', P.Strokes.list.length === 1,
@@ -944,7 +1053,7 @@ function run(W){
   } finally {
     EXP.saveBlob = eRealSave;
   }
-  P.TOOL.pressureOn = true; P.TOOL.opacity = 1; P.TOOL.brush = 'round';
+  P.TOOL.pressureOn = true; P.TOOL.opacity = 1; P.TOOL.brush = 'pen';
 
   /* ================= compact / responsive ================= */
   group('Responsive layout');
@@ -1137,7 +1246,47 @@ function run(W){
   group('Brushes');
   reset();
   var names = Object.keys(P.BRUSH);
-  ck('ten brush profiles are defined', names.length === 10, names.join(', '));
+  ck('six brush profiles are defined', names.length === 6, names.join(', '));
+
+  /* No two brushes may be the same brush wearing another name — that is what
+     the old ten-entry set was: `pencil` was round at 0.7x and `chisel`,
+     `ribbon` and `wide` were three hard blades apart only in width. Compare
+     the profiles that actually shape the tube. */
+  var samey = [];
+  for(i=0;i<names.length;i++){
+    for(var j2=i+1;j2<names.length;j2++){
+      var A2 = P.BRUSH[names[i]], B2 = P.BRUSH[names[j2]];
+      var diff = Math.abs(A2.flat - B2.flat) > 0.15 ? 1 : 0;
+      if(Math.abs(A2.square - B2.square) > 0.25) diff++;
+      if(A2.taper !== B2.taper) diff++;
+      if(Math.max(A2.wide,B2.wide) / Math.min(A2.wide,B2.wide) > 1.3) diff++;
+      if(!!A2.glow !== !!B2.glow) diff++;
+      if(!diff) samey.push(names[i] + '=' + names[j2]);
+    }
+  }
+  ck('and no two of them are the same brush twice', samey.length === 0,
+     samey.join(', ') || 'all distinct');
+
+  /* a sketch drawn with a retired brush must reopen as the nearest nib, not
+     silently as the default */
+  var aliasBad = [];
+  ['round','pencil','taper','chisel','ribbon'].forEach(function(oldName){
+    var got = P.brushName(oldName);
+    if(!P.BRUSH[got]) aliasBad.push(oldName + '->' + got);
+  });
+  ck('retired brush names still resolve', aliasBad.length === 0,
+     aliasBad.join(', ') || 'round/pencil/taper/chisel/ribbon all map to a real nib');
+  ck('...and a curve saved as one loads as its replacement', (function(){
+    P.Strokes.clear();
+    P.TOOL.brush = 'pen';
+    pen([{x:CX-60,y:CY},{x:CX+60,y:CY}]);
+    var doc2 = P.Doc.serialize();
+    doc2.strokes[0].brush = 'chisel';                 // as an older build wrote it
+    P.Doc.restore(doc2);
+    return P.Strokes.list.length === 1 &&
+           P.Strokes.list[0].brush === P.BRUSH_ALIAS.chisel && !!P.Strokes.list[0].mesh;
+  })(), P.Strokes.list[0] && P.Strokes.list[0].brush);
+  reset();
   var uiBrushes = [];
   var btns = DD.querySelectorAll('#brushGrid button');
   for(i=0;i<btns.length;i++) uiBrushes.push(btns[i].dataset.brush);
@@ -1168,7 +1317,7 @@ function run(W){
   ck('glow is additive and unshaded (C.5)',
      P.Strokes.list[0].mesh.material.blending === THREE.AdditiveBlending &&
      P.Strokes.list[0].mesh.material.uniforms.uGlow.value === 1);
-  P.Strokes.clear(); P.TOOL.brush = 'round';
+  P.Strokes.clear(); P.TOOL.brush = 'pen';
   pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
   ck('other brushes stay on normal blending',
      P.Strokes.list[0].mesh.material.blending === THREE.NormalBlending);
@@ -1185,8 +1334,8 @@ function run(W){
     return (hi1-lo1)/((hi2-lo2)||1e-9);
   }
   ck('a square nib really changes the cross-section',
-     Math.abs(ringAspect('chisel') - ringAspect('round')) > 0.05);
-  P.TOOL.brush = 'round';
+     Math.abs(ringAspect('flat') - ringAspect('pen')) > 0.05);
+  P.TOOL.brush = 'pen';
 
   /* ================= lasso ================= */
   group('Lasso select');
@@ -1315,7 +1464,7 @@ function run(W){
     reset();
     P.VIEW.theta = 0.4; P.VIEW.phi = 1.2; P.applyCamera();
     P.TOOL.pressureOn = false; P.TOOL.pressureTarget = 'none'; P.TOOL.stableOn = false;
-    P.TOOL.brush = brush || 'round'; P.TOOL.sizeMM = 36;
+    P.TOOL.brush = brush || 'pen'; P.TOOL.sizeMM = 36;
     P.TOOL.color.set('#ffffff'); P.TOOL.opacity = op;
     P.ENV.bg.set('#000000'); P.applyEnv();
   }
@@ -1355,7 +1504,7 @@ function run(W){
 
   /* a reflection reverses handedness, which is exactly what breaks culling */
   inkSetup(1.0);
-  P.TOOL.brush = 'round'; P.TOOL.mirror = 'x';
+  P.TOOL.brush = 'pen'; P.TOOL.mirror = 'x';
   pen([{x:CX+70,y:CY-40},{x:CX+130,y:CY},{x:CX+190,y:CY+40}]);
   var shotM = shoot();
   ck('mirror produced both halves', P.Strokes.list.length === 2);
@@ -1493,7 +1642,7 @@ function run(W){
   });
   ck('no brush has a jagged silhouette', worstJag < 2,
      'worst ' + worstName + ' at ' + worstJag.toFixed(2) + '% (pencil grain was 9.90%)');
-  P.TOOL.brush = 'round'; P.TOOL.stableOn = true;
+  P.TOOL.brush = 'pen'; P.TOOL.stableOn = true;
   P.TOOL.pressureOn = true; P.TOOL.pressureTarget = 'size';
 
   /* ================= imported references (C.1) ================= */
@@ -1761,6 +1910,55 @@ function run(W){
        .distanceTo(lBefore) > 0.02);
   P.setTool('draw'); P.TOOL.stableOn = true;
 
+  /* THE DEFORM MUST RUN THE WAY THE STROKE RUNS. It used to pick the mesh's
+     longest bbox axis and always run it low-to-high, which is meaningless for
+     a cube or a sphere: the deform went along local +X whatever was drawn, and
+     the guide swept away from the pen. Measured by projecting every deformed
+     vertex onto the drawn chord — the mesh should span it, 0 to 1, not sit
+     behind the start at a negative t. */
+  function deformSpan(kind, dx, dy){
+    reset();
+    P.Guides.setActive(P.Guides.primitive(kind, 24, 1));
+    var g4 = P.Guides.active;
+    var cs = P.worldToScreen(P.Guides.centreOf(g4), {});
+    P.setTool('bend'); P.TOOL.stableOn = false;
+    pen([{x:cs.x-dx/2, y:cs.y-dy/2},
+         {x:cs.x,      y:cs.y},
+         {x:cs.x+dx/2, y:cs.y+dy/2}]);
+    P.TOOL.stableOn = true;
+    var bp = g4.bendPath;
+    if(!bp) return null;
+    var A4 = bp[0].clone(), B4 = bp[bp.length-1].clone();
+    var dir4 = B4.clone().sub(A4), L4 = dir4.length();
+    if(L4 < 1e-6) return null;
+    dir4.divideScalar(L4);
+    var attr4 = g4.mesh.geometry.attributes.position, v4 = new THREE.Vector3();
+    g4.mesh.updateMatrixWorld(true);
+    var lo4 = Infinity, hi4 = -Infinity, sum4 = 0;
+    for(var q4=0;q4<attr4.count;q4++){
+      v4.set(attr4.getX(q4), attr4.getY(q4), attr4.getZ(q4))
+        .applyMatrix4(g4.mesh.matrixWorld).sub(A4);
+      var t4 = v4.dot(dir4)/L4;
+      lo4 = Math.min(lo4, t4); hi4 = Math.max(hi4, t4); sum4 += t4;
+    }
+    return { lo:lo4, hi:hi4, mean:sum4/attr4.count };
+  }
+  var deformBad = [];
+  [['cube',240,0], ['sphere',240,0], ['tube',240,0], ['pyramid',240,0],
+   ['cube',-240,0], ['tube',0,240], ['sphere',-170,-170]].forEach(function(c){
+    var sp = deformSpan(c[0], c[1], c[2]);
+    if(!sp) { deformBad.push(c[0]+' not deformed'); return; }
+    if(sp.mean < 0.3 || sp.mean > 0.7)
+      deformBad.push(c[0]+'('+c[1]+','+c[2]+') mean t=' + sp.mean.toFixed(2));
+  });
+  ck('a deform bend follows the stroke, whatever the shape or direction',
+     deformBad.length === 0, deformBad.join('; ') || '7 cases, all centred on the stroke');
+  var sp1 = deformSpan('cube', 240, 0);
+  ck('...spanning it end to end rather than hanging off one end',
+     sp1 && sp1.lo > -0.15 && sp1.hi < 1.15,
+     sp1 ? 't ' + sp1.lo.toFixed(2) + '–' + sp1.hi.toFixed(2) : 'no span');
+  reset();
+
   /* ================= several guides on screen ================= */
   group('A.5  A saved guide stays visible while another is active');
   reset();
@@ -1842,6 +2040,64 @@ function run(W){
     return P.TOOL.sizeMM === P.TUNE.brushMaxMM;
   })(), P.TOOL.sizeMM + 'mm');
   P.TOOL.sizeMM = 14; P.UI.refresh();
+
+  /* ---- size and opacity are dragged, not just typed ----
+     FACT (brush panel docs): size and opacity are each "adjusted by sliding up
+     or down"; size runs 1-300mm. */
+  function dragOn(id, dy){
+    var el2 = rid(id), r2 = el2.getBoundingClientRect();
+    var x2 = r2.left + r2.width/2, y2 = r2.top + r2.height/2;
+    function pe(t, yy, btn){
+      el2.dispatchEvent(new W.PointerEvent(t, {pointerId:77, pointerType:'touch',
+        clientX:x2, clientY:yy, buttons:btn, bubbles:true, cancelable:true}));
+    }
+    pe('pointerdown', y2, 1);
+    pe('pointermove', y2 - dy/2, 1);
+    pe('pointermove', y2 - dy, 1);
+    pe('pointerup',   y2 - dy, 0);
+    el2.dispatchEvent(new W.MouseEvent('click', {bubbles:true, cancelable:true}));
+  }
+  reset(); P.UI.applyMode(); P.UI.closePopovers();
+  P.TOOL.sizeMM = 20; P.TOOL.opacity = 1; P.UI.refresh();
+  dragOn('sizeVal', 90);
+  var sizeUp = P.TOOL.sizeMM;
+  ck('dragging the size readout up makes the brush bigger', sizeUp > 22,
+     '20mm -> ' + sizeUp.toFixed(0) + 'mm');
+  ck('...and the drag is not also read as a tap', !rshown('keypad'));
+  dragOn('sizeVal', -90);
+  ck('dragging down makes it smaller again',
+     Math.abs(P.TOOL.sizeMM - 20) < 1.5, P.TOOL.sizeMM.toFixed(1) + 'mm');
+
+  P.TOOL.sizeMM = 290; P.UI.refresh();
+  dragOn('sizeVal', 200);
+  ck('the drag still respects the documented 1-300mm range',
+     P.TOOL.sizeMM === P.TUNE.brushMaxMM && P.TUNE.brushMaxMM === 300,
+     P.TOOL.sizeMM + 'mm');
+  P.TOOL.sizeMM = 14; P.UI.refresh();
+
+  dragOn('opacityVal', -120);
+  ck('dragging the opacity readout down makes it more transparent',
+     P.TOOL.opacity < 0.85, Math.round(P.TOOL.opacity*100) + '%');
+  dragOn('opacityVal', 400);
+  ck('...and it cannot be dragged past solid', P.TOOL.opacity === 1);
+
+  /* a still tap on the same control still types an exact value */
+  rid('sizeVal').click();
+  ck('a tap on the readout still opens the keypad', rshown('keypad'));
+  P.UI.closePopovers();
+
+  /* the eraser carries its own size, so the readout follows the tool in hand */
+  P.TOOL.sizeMM = 14; P.TOOL.eraserMM = 20;
+  P.setTool('erase'); P.UI.refresh();
+  ck('with the eraser in hand the readout shows the eraser',
+     rid('sizeVal').textContent === '20mm', rid('sizeVal').textContent);
+  dragOn('sizeVal', 90);
+  ck('...and dragging it resizes the eraser, not the brush',
+     P.TOOL.eraserMM > 22 && P.TOOL.sizeMM === 14,
+     'eraser ' + P.TOOL.eraserMM.toFixed(0) + 'mm, brush ' + P.TOOL.sizeMM + 'mm');
+  P.setTool('draw'); P.TOOL.eraserMM = 20; P.UI.refresh();
+  ck('and it hands the readout back to the brush',
+     rid('sizeVal').textContent === '14mm', rid('sizeVal').textContent);
 
   /* colour wheel */
   rid('brushColor').click();

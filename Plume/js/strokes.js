@@ -80,7 +80,7 @@ var FRAG = [
 ].join('\n');
 
 function makeMaterial(stroke, needsAlpha){
-  var cfg = BRUSH[stroke.brush] || BRUSH.round;
+  var cfg = cfgOf(stroke);
   var glow = cfg.glow ? 1 : 0;
   return new THREE.ShaderMaterial({
     uniforms: {
@@ -106,18 +106,31 @@ function makeMaterial(stroke, needsAlpha){
 }
 
 /* ---- brush profiles ------------------------------------------------------
-   FACT/PARTIAL: the docs never enumerate the brush list, beyond a round nib, a
-   tilt-sensitive flat nib, tapered ends, the v1.5 "Wide Brush to paint larger
-   areas faster", and a Glow material. The rest of these are built from the
-   same handful of cross-section parameters rather than invented wholesale:
+   WHAT IS DOCUMENTED, AND WHAT IS NOT. Feather's own brush list is not
+   published: support.feather.art enumerates the brush PANEL (size 1-300mm,
+   opacity 0-100%, a pressure toggle) but never the brushes themselves. Three
+   names are attested in sources we can reach — the "Wide Brush" added in 1.5
+   "to paint larger areas faster", the "wide and flat" brushes described as
+   planned, and the Glow material (C.5) — and the rest of the set here is an
+   inference from the same handful of cross-section parameters:
 
-     seg    cross-section resolution
      flat   ellipse ratio — 1 round, ->0 a blade
-     square 0 = ellipse, 1 = hard rectangular nib (marker/chisel)
+     square 0 = ellipse, 1 = hard rectangular nib
      taper  ends thin out over taperLength()
      wide   size multiplier
      glow   additive, unshaded
      caps   closed ends
+
+   SIX, NOT TEN. The previous set had ten entries and roughly six behaviours:
+   `pencil` was `round` at 0.7x, `ink` was `taper` with a 0.85 ellipse, and
+   `chisel`/`ribbon`/`wide` were three hard blades separated only by width. A
+   brush the user cannot tell apart from another one is a worse brush than no
+   brush, so the duplicates are gone and BRUSH_ALIAS below keeps every sketch
+   that used them loading — mapped to the nearest survivor, not to a default.
+
+   Every brush is CAPPED. Open ends were a nicer silhouette on the tapered
+   brushes, but back-face culling needs a closed manifold — and since a taper
+   shrinks to 15% of the nib anyway, its caps are far too small to see.
 
    There was also a `grain` parameter that jittered radius and alpha per point
    to fake a dry pencil tooth. It was measurably the only source of jagged
@@ -125,24 +138,66 @@ function makeMaterial(stroke, needsAlpha){
    =<0.8% for every other brush — so it is gone. Media texture belongs in a
    shader or a stamp, not in the tube's silhouette.
 
-   Every brush is CAPPED. Open ends were a nicer silhouette on the tapered
-   brushes, but back-face culling needs a closed manifold — and since a taper
-   shrinks to 15% of the nib anyway, its caps are far too small to see.
+   Cross-section RESOLUTION is no longer a per-brush constant; see segOf().
    ========================================================================== */
 var BRUSH = P.BRUSH = {
-  round:  { seg:12, flat:1.00, square:0.00, taper:0, caps:true, wide:1.0, glow:0 },
-  flat:   { seg:12, flat:0.22, square:0.35, taper:0, caps:true, wide:1.0, glow:0 },
-  taper:  { seg:12, flat:1.00, square:0.00, taper:1, caps:true, wide:1.0, glow:0 },
-  wide:   { seg:10, flat:0.14, square:0.50, taper:0, caps:true, wide:3.2, glow:0 },
-  marker: { seg:10, flat:0.42, square:0.85, taper:0, caps:true, wide:1.8, glow:0 },
-  ink:    { seg:12, flat:0.85, square:0.00, taper:1, caps:true, wide:0.9, glow:0 },
-  /* a fine, slightly flattened nib — distinct from round by size and section,
-     not by noise */
-  pencil: { seg:10, flat:0.72, square:0.15, taper:0, caps:true, wide:0.7, glow:0 },
-  chisel: { seg:8,  flat:0.16, square:1.00, taper:0, caps:true, wide:1.6, glow:0 },
-  ribbon: { seg:8,  flat:0.05, square:1.00, taper:0, caps:true, wide:2.6, glow:0 },
-  glow:   { seg:12, flat:1.00, square:0.00, taper:1, caps:true, wide:1.3, glow:1 }
+  /* the default: a plain round nib, crisp at both ends */
+  pen:    { flat:1.00, square:0.00, taper:0, caps:true, wide:1.0, glow:0 },
+  /* round, but thinning to a point at both ends — the calligraphic stroke */
+  ink:    { flat:1.00, square:0.00, taper:1, caps:true, wide:1.0, glow:0 },
+  /* FACT-adjacent: a "flat" brush is named among Feather's own. A blade nib,
+     so it is the one that reads differently as the pen tilts (C.3) */
+  flat:   { flat:0.22, square:0.30, taper:0, caps:true, wide:1.0, glow:0 },
+  /* hard rectangular nib, broader than the pen: chisel-tip marker */
+  marker: { flat:0.45, square:0.90, taper:0, caps:true, wide:1.7, glow:0 },
+  /* FACT: "Wide Brush ... paint larger areas faster and more easily" (1.5) */
+  wide:   { flat:0.12, square:0.60, taper:0, caps:true, wide:3.2, glow:0 },
+  /* FACT (C.5): "a Glow material enables glowing lines" */
+  glow:   { flat:1.00, square:0.00, taper:1, caps:true, wide:1.3, glow:1 }
 };
+
+/* Retired names -> the nearest surviving nib. Documents outlive brush sets;
+   a sketch drawn with `chisel` should reopen as the hard nib it was, not
+   silently as the default round one. */
+P.BRUSH_ALIAS = {
+  round:  'pen',      // identical
+  pencil: 'pen',      // was round at 0.7x
+  taper:  'ink',      // identical
+  chisel: 'marker',   // hard blade, 1.6x -> hard nib, 1.7x
+  ribbon: 'wide'      // flat tape, 2.6x -> flat blade, 3.2x
+};
+P.brushName = function(name){
+  if(BRUSH[name]) return name;
+  var alias = P.BRUSH_ALIAS[name];
+  return BRUSH[alias] ? alias : 'pen';
+};
+
+/* Every read of a stroke's profile goes through here, so a retired name from
+   an old document, a saved preset or a test fixture resolves instead of
+   throwing halfway through building geometry. */
+function cfgOf(stroke){
+  return BRUSH[stroke.brush] || BRUSH[P.BRUSH_ALIAS[stroke.brush]] || BRUSH.pen;
+}
+S.cfgOf = cfgOf;
+
+/* CROSS-SECTION RESOLUTION FOLLOWS THE NIB SIZE.
+   A fixed segment count per brush is wrong at both ends of a 1mm-300mm range:
+   12 segments is wasteful on a 1mm pen and visibly faceted on a 90mm one. The
+   facet error of an n-gon is (1 - cos(pi/n))*r, so solving that for a fixed
+   error in millimetres gives a count that keeps the silhouette equally smooth
+   at any size. 0.3mm is about a screen pixel at a normal working zoom.
+   Rounded up to a multiple of 4 so the squared-off sections keep their corners
+   on the diagonals, and clamped so a huge brush cannot run away with memory.
+   The ceiling is what a 200mm nib needs; past that the guarantee becomes a
+   relative one — a 48-gon is within 0.21% of its circle at any radius. */
+var SEG_ERR_MM = 0.3, SEG_MIN = 8, SEG_MAX = 48;
+function segOf(stroke){
+  var cfg = cfgOf(stroke);
+  var rmm = Math.max(0.25, stroke.baseRadius * cfg.wide / P.MM);
+  var n = Math.ceil(Math.PI / Math.sqrt(2 * SEG_ERR_MM / rmm));
+  return P.clamp(Math.ceil(n/4)*4, SEG_MIN, SEG_MAX);
+}
+S.segOf = segOf;
 
 /* Taper is measured in ARC LENGTH from each end, not as a fraction of the
    point count. A fraction would re-shade the whole stroke on every new sample
@@ -165,7 +220,7 @@ function shadeAt(stroke, i, arc){
   var pt = stroke.pts[i];
   var pr = P.clamp(pt.pressure, 0.02, 1);
   var mode = stroke.pressureTarget;
-  var cfg = BRUSH[stroke.brush];
+  var cfg = cfgOf(stroke);
   var rMul = cfg.wide, alpha = stroke.opacity, lift = 0;
 
   if(mode === 'size'    || mode === 'both') rMul *= 0.25 + 0.75*pr;
@@ -212,7 +267,7 @@ var DANG = 1e-3;
 
 function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
   var sh = shadeAt(stroke, i, arc);
-  var cfg = BRUSH[stroke.brush];
+  var cfg = cfgOf(stroke);
   var rx = Math.max(sh.radius, 1e-5);
   var ry = Math.max(sh.radius * cfg.flat, 1e-5);
   var pt = stroke.pts[i];
@@ -310,7 +365,7 @@ function buildGeometry(stroke){
   var pts = stroke.pts, n = pts.length;
   if(n === 0) return null;
 
-  var cfg = BRUSH[stroke.brush], seg = cfg.seg;
+  var cfg = cfgOf(stroke), seg = segOf(stroke);
 
   if(n === 1){
     var s0 = shadeAt(stroke, 0, null);
@@ -424,7 +479,7 @@ function ensureCapacity(L, needed){
 }
 
 LIVE.begin = function(stroke){
-  var cfg = BRUSH[stroke.brush], seg = cfg.seg;
+  var cfg = cfgOf(stroke), seg = segOf(stroke);
   var L = {
     seg: seg, caps: cfg.caps, capacity: 0, n: 0,
     pos: new Float32Array(0), nor: new Float32Array(0), col: new Float32Array(0),
@@ -500,7 +555,7 @@ LIVE.append = function(stroke){
 
   /* --- which rings can this sample have changed? --- */
   var first = Math.max(0, n-2);
-  if(BRUSH[stroke.brush].taper > 0){
+  if(cfgOf(stroke).taper > 0){
     var reach = taperLength(stroke), total = L.arc[n-1];
     while(first > 0 && (total - L.arc[first]) < reach) first--;
     /* the head taper is arc-length based and therefore already final */

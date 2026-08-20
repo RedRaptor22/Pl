@@ -92,7 +92,7 @@ function packStroke(st){
 function unpackStroke(d){
   return {
     id: P.uid(),
-    brush: P.BRUSH[d.brush] ? d.brush : 'round',
+    brush: P.brushName(d.brush),
     color: new THREE.Color(d.color),
     baseRadius: d.radius,
     opacity: d.opacity === undefined ? 1 : d.opacity,
@@ -295,7 +295,7 @@ D.restore = function(doc){
   }
   if(doc.tool){
     var T = P.TOOL;
-    if(P.BRUSH[doc.tool.brush]) T.brush = doc.tool.brush;
+    T.brush = P.brushName(doc.tool.brush);
     T.color.set(doc.tool.color);
     T.sizeMM = doc.tool.sizeMM; T.opacity = doc.tool.opacity;
     T.pressureOn = !!doc.tool.pressureOn;

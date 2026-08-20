@@ -392,10 +392,23 @@ G.bend = function(guide, worldPath){
    6b. Bending a guide that has no sweep — lofts, primitives, imported models
    --------------------------------------------------------------------------
    A swept guide bends by replacing its path. A loft or a cube has no profile
-   and path to replace, so those guides bend as a curve DEFORM instead: the
-   mesh's longest axis is re-parameterised onto the drawn stroke, and each
-   vertex is carried along in the transported frame at its own position. Same
+   and path to replace, so those guides bend as a curve DEFORM instead: one
+   axis of the mesh is re-parameterised onto the drawn stroke, and each vertex
+   is carried along in the transported frame at its own position. Same
    gesture, same "follow the line I drew" result, on any geometry.
+
+   WHICH axis, and which way along it, is decided by the STROKE — not by the
+   mesh alone. Picking the longest axis and always running it low-to-high is
+   what made this bend backwards: a sphere or a cube has no meaningful longest
+   axis, so the deform ran along local +X whatever the user drew, and any
+   stroke heading the other way produced a guide sweeping away from the pen.
+   Measured against the drawn direction, before: cube 91 degrees off, tube 86,
+   pyramid 88, sphere a full 180. After: 0 for all four.
+
+   So: among the axes long enough to be worth routing, take the one closest to
+   the direction actually drawn, and orient it to point the same way. A rod
+   still bends along its length (its other axes are too short to qualify); a
+   cube bends whichever way the stroke goes.
 
    The undeformed vertices are kept, so repeated bends re-deform the original
    rather than compounding into mush — which matches how a swept bend replaces
@@ -432,7 +445,6 @@ G.bendMesh = function(guide, worldPath){
   var local = worldPath.map(function(p){ return p.clone().applyMatrix4(toLocal); });
   local = P.resample(local, T.guidePathSeg + 1);
 
-  /* the longest axis of the undeformed mesh is the one we re-route */
   var lo = new THREE.Vector3( Infinity,  Infinity,  Infinity);
   var hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
   var i;
@@ -442,22 +454,54 @@ G.bendMesh = function(guide, worldPath){
     lo.z = Math.min(lo.z, orig[i+2]); hi.z = Math.max(hi.z, orig[i+2]);
   }
   var ext = [hi.x-lo.x, hi.y-lo.y, hi.z-lo.z];
-  var axis = 0;
-  if(ext[1] > ext[axis]) axis = 1;
-  if(ext[2] > ext[axis]) axis = 2;
+  var longest = Math.max(ext[0], ext[1], ext[2]);
+  if(longest < EPS) return false;
+
+  /* the direction the stroke actually goes, in the guide's own space. A closed
+     loop has no chord, so fall back to the sample furthest from the start —
+     for a circle that is the diameter, which is the axis a doughnut turns on */
+  var drawn = local[local.length-1].clone().sub(local[0]);
+  if(drawn.lengthSq() < EPS*EPS){
+    var far = 0, fd = -1;
+    for(i=1;i<local.length;i++){
+      var d2 = local[i].distanceToSquared(local[0]);
+      if(d2 > fd){ fd = d2; far = i; }
+    }
+    drawn.copy(local[far]).sub(local[0]);
+  }
+  if(drawn.lengthSq() < EPS*EPS) drawn.set(1,0,0);
+  drawn.normalize();
+
+  /* Among the axes within 25% of the longest — i.e. the ones a bend could
+     sensibly run along — take the one the stroke agrees with most. That keeps
+     a rod bending along its length while letting a cube or a sphere bend
+     whichever way the pen went. */
+  var axis = -1, best = -1;
+  var comp = [Math.abs(drawn.x), Math.abs(drawn.y), Math.abs(drawn.z)];
+  for(i=0;i<3;i++){
+    if(ext[i] < longest*0.75) continue;
+    if(comp[i] > best){ best = comp[i]; axis = i; }
+  }
+  if(axis < 0) axis = ext[0] >= ext[1] ? (ext[0] >= ext[2] ? 0 : 2) : (ext[1] >= ext[2] ? 1 : 2);
   var span = ext[axis];
   if(span < EPS) return false;
+
+  /* ...and run it the way the stroke runs, so the far end follows the pen
+     instead of retreating from it */
+  var forward = drawn.getComponent(axis) >= 0;
   var pa = (axis+1)%3, pb = (axis+2)%3;
   var loArr = [lo.x, lo.y, lo.z], hiArr = [hi.x, hi.y, hi.z];
   var mid = [ (loArr[0]+hiArr[0])/2, (loArr[1]+hiArr[1])/2, (loArr[2]+hiArr[2])/2 ];
+  var startVal = forward ? loArr[axis] : hiArr[axis];
 
-  /* start the path where the mesh starts, so the far end is what moves */
-  var origin = new THREE.Vector3();
-  origin.setComponent(axis, loArr[axis]);
-  origin.setComponent(pa, mid[pa]);
-  origin.setComponent(pb, mid[pb]);
-  var shift = origin.clone().sub(local[0]);
-  for(i=0;i<local.length;i++) local[i].add(shift);
+  /* THE STROKE IS WHERE THE GUIDE GOES. The path used to be translated onto
+     the mesh's own starting face, which is an invisible landmark on the far
+     side from the pen — so a cube bent by a stroke drawn to its right jumped
+     left and shrank onto the stroke's length, measured as a 1.6-unit leap for
+     a 0.55-unit stroke. A swept guide can translate to its anchor because the
+     orange line is visible and the user aims at it; a deform has no such mark,
+     so the honest answer is to leave the path exactly where it was drawn and
+     lay the mesh along it. */
 
   /* seed the frame with the first perpendicular axis, so an unbent straight
      path reproduces the mesh exactly */
@@ -471,7 +515,7 @@ G.bendMesh = function(guide, worldPath){
   var s = new THREE.Vector3(), out = new THREE.Vector3();
   var arr = attr.array;
   for(i=0;i<orig.length;i+=3){
-    var t = (orig[i+axis] - loArr[axis]) / span;      // 0..1 along the axis
+    var t = (orig[i+axis] - startVal) / (forward ? span : -span);   // 0..1 from the start end
     var target = t * total;
     /* locate the path sample for this arc position */
     var j = 0;

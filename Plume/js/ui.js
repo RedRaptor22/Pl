@@ -315,13 +315,15 @@ UI.init = function(){
   seg($('pressSeg'), 'p',     function(v){ TOOL.pressureTarget = v; });
 
   on($('size'), 'input', function(){
-    TOOL.sizeMM = parseFloat(this.value);
+    UI.setSize(parseFloat(this.value));
     UI.refresh();
   });
   on($('opacity'), 'input', function(){
     TOOL.opacity = parseFloat(this.value)/100;
     UI.refresh();
   });
+  dragValue($('sizeVal'),    'size');
+  dragValue($('opacityVal'), 'opacity');
   on($('btnPressure'), 'click', function(){ TOOL.pressureOn = !TOOL.pressureOn; UI.refresh(); });
   on($('colorPick'), 'input', function(){ TOOL.color.set(this.value); markSwatch(this.value); });
   on($('btnEyedrop'), 'click', function(){ P.setTool('eyedrop'); P.toast('Tap a curve to sample its colour'); });
@@ -526,9 +528,8 @@ UI.init = function(){
     $('slidePop').classList.toggle('hidden');
     UI.refresh();
   });
-  /* long-press or double-tap the size value to type an exact one */
-  on($('sizeVal'), 'click', function(){ openKeypad('size'); });
-  on($('opacityVal'), 'click', function(){ openKeypad('opacity'); });
+  /* tapping a readout types an exact value; dragging it is the slider —
+     both are wired in dragValue() above */
 
   initKeypad();
   initColorWheel();
@@ -621,8 +622,72 @@ function openKeypad(which){
   UI.refresh();
 }
 
+/* ==========================================================================
+   Size and opacity — drag the readout
+   --------------------------------------------------------------------------
+   FACT (brush panel docs): brush size "can be adjusted by sliding up or down",
+   and so can opacity; size runs 1mm-300mm and opacity 0-100%. So the readouts
+   are the slider — drag up for more, down for less — and a tap still opens the
+   keypad for an exact number. The popover sliders stay for mouse users.
+
+   Size moves geometrically rather than linearly: a millimetre matters at 2mm
+   and is invisible at 200mm, and a 300:1 range on a linear drag would make the
+   bottom of it unusable. Opacity is linear because 0-100% is already uniform.
+   ========================================================================== */
+var SIZE_PER_PX = 0.011, OPACITY_PER_PX = 0.004, DRAG_SLOP = 3;
+
+/* The size control edits whichever tool is in hand — the eraser carries its
+   own size, so switching to it re-points the readout rather than resizing the
+   brush underneath you. */
+UI.sizeKey  = function(){ return P.Tools.sizeTarget(); };
+UI.getSize  = function(){ return TOOL[UI.sizeKey()]; };
+UI.setSize  = function(v){
+  TOOL[UI.sizeKey()] = P.clamp(v, P.TUNE.brushMinMM, P.TUNE.brushMaxMM);
+};
+
+function dragValue(el, which){
+  if(!el) return;
+  var drag = null, ate = false, ateAt = 0;
+  el.classList.add('dragv');
+
+  /* No preventDefault on pointerdown: the tap has to survive as a click so a
+     still finger still opens the keypad. touch-action:none on .dragv is what
+     stops a touch drag from scrolling the panel instead. */
+  on(el, 'pointerdown', function(e){
+    drag = { y:e.clientY, moved:false,
+             from: which === 'size' ? UI.getSize() : TOOL.opacity };
+    try { el.setPointerCapture(e.pointerId); } catch(err){}
+  });
+  on(el, 'pointermove', function(e){
+    if(!drag) return;
+    var dy = drag.y - e.clientY;                       // up is more
+    if(!drag.moved && Math.abs(dy) < DRAG_SLOP) return;
+    drag.moved = true;
+    if(which === 'size') UI.setSize(drag.from * Math.exp(dy * SIZE_PER_PX));
+    else TOOL.opacity = P.clamp(drag.from + dy * OPACITY_PER_PX, 0.05, 1);
+    UI.refresh();
+  });
+  function end(e){
+    if(!drag) return;
+    /* A drag is not a tap. Swallow exactly the ONE click this gesture is about
+       to generate rather than everything for the next few hundred ms — a time
+       window also eats the deliberate tap that follows a quick adjustment. */
+    if(drag.moved){ ate = true; ateAt = performance.now(); }
+    drag = null;
+    try { el.releasePointerCapture(e.pointerId); } catch(err){}
+  }
+  on(el, 'pointerup', end);
+  on(el, 'pointercancel', end);
+  on(el, 'click', function(){
+    var swallow = ate && (performance.now() - ateAt) < 700;
+    ate = false;                       // and never hold it against a later tap
+    if(swallow) return;
+    openKeypad(which);
+  });
+}
+
 function keypadCurrent(){
-  return keypadFor === 'size' ? Math.round(TOOL.sizeMM)
+  return keypadFor === 'size' ? Math.round(UI.getSize())
                               : Math.round(TOOL.opacity*100);
 }
 function drawKeypad(){
@@ -633,7 +698,7 @@ function commitKeypad(){
   var v = parseFloat(keypadBuf);
   if(!isNaN(v)){
     if(keypadFor === 'size'){
-      TOOL.sizeMM = P.clamp(v, P.TUNE.brushMinMM, P.TUNE.brushMaxMM);
+      UI.setSize(v);
     } else {
       TOOL.opacity = P.clamp(v/100, 0.05, 1);
     }
@@ -1138,12 +1203,16 @@ UI.refresh = function(){
   $('selBar').classList.toggle('hidden', selCount === 0);
 
   /* the rail's size/opacity readouts, and their popover twins */
-  var sv = Math.round(TOOL.sizeMM) + 'mm';
+  var erasing = UI.sizeKey() === 'eraserMM';
+  var sv = Math.round(UI.getSize()) + 'mm';
   var ov = Math.round(TOOL.opacity*100) + '%';
   $('sizeVal').textContent = sv;
   $('opacityVal').textContent = ov;
   if($('sizeValPop'))    $('sizeValPop').textContent = sv;
   if($('opacityValPop')) $('opacityValPop').textContent = ov;
+  $('btnSize').setAttribute('data-tip', erasing
+    ? 'Eraser size — drag up or down, or tap the value to type one'
+    : 'Brush size — drag up or down, or tap the value to type one');
 
   /* the icons carry no text label now, so the mirror axis goes in the tooltip */
   var mir = $('btnMirror');
@@ -1182,7 +1251,7 @@ UI.refresh = function(){
   setOn($('btnInject'),    TOOL.mode === 'inject');
 
   /* brush readouts (they change when the injector samples) */
-  $('size').value = TOOL.sizeMM;
+  $('size').value = UI.getSize();
   $('opacity').value = Math.round(TOOL.opacity*100);
   $('colorPick').value = '#' + TOOL.color.getHexString();
   var bs = $('brushGrid').querySelectorAll('button');

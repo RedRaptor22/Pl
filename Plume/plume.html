@@ -212,6 +212,14 @@
   .vslider input[type=range]{width:74px;transform:rotate(-90deg);flex:0 0 auto;min-width:0;}
 
   /* brush-type popover, anchored to the rail */
+  /* a readout you can drag: Feather adjusts size and opacity by sliding up
+     or down on the value itself, so it needs to look and behave like a
+     control rather than a label — and never scroll the panel under a touch. */
+  .val.dragv{touch-action:none;cursor:ns-resize;user-select:none;
+    padding:2px 4px;border-radius:8px;background:var(--panel2);
+    align-self:stretch;text-align:center;box-sizing:border-box;}
+  .val.dragv:hover{background:var(--panel3);}
+
   #brushGrid{position:fixed;left:78px;top:50%;transform:translateY(-50%);
     background:var(--panel);border-radius:var(--rCard);box-shadow:var(--shadowLg);
     padding:8px;display:grid;grid-template-columns:repeat(2,1fr);gap:6px;z-index:26;}
@@ -522,9 +530,9 @@
     <button class="ico" id="brushType" data-tip="Brush type"><svg><use href="#i-brush"/></svg></button>
     <button id="brushColor" data-tip="Colour"></button>
     <div class="sep" style="width:100%"></div>
-    <button class="ico" id="btnSize" data-tip="Brush size — tap to type an exact value"><svg><use href="#i-size"/></svg></button>
+    <button class="ico" id="btnSize" data-tip="Brush size — drag up or down, or tap the value to type one"><svg><use href="#i-size"/></svg></button>
     <span class="val" id="sizeVal">14mm</span>
-    <button class="ico" id="btnOpacity" data-tip="Opacity"><svg><use href="#i-opacity"/></svg></button>
+    <button class="ico" id="btnOpacity" data-tip="Opacity — drag up or down, or tap the value to type one"><svg><use href="#i-opacity"/></svg></button>
     <span class="val" id="opacityVal">100%</span>
     <div class="sep" style="width:100%"></div>
     <button class="ico sm" id="btnPressure" data-tip="Pressure sensitivity"><svg><use href="#i-brush"/></svg></button>
@@ -541,7 +549,7 @@
 <!-- size / opacity slider popover, opened from the rail -->
 <div id="slidePop" class="panel hidden">
   <div class="row">
-    <input type="range" id="size" min="1" max="120" value="14">
+    <input type="range" id="size" min="1" max="300" value="14">
     <span class="val" id="sizeValPop">14mm</span>
   </div>
   <div class="row">
@@ -560,16 +568,12 @@
 
 <!-- brush-type popover -->
 <div id="brushGrid" class="hidden">
-  <button data-brush="round"  class="on" data-tip="Round"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="7" stroke-linecap="round"/></svg></button>
-  <button data-brush="flat"   data-tip="Flat — follows pen tilt"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="3.5" stroke-linecap="butt"/></svg></button>
-  <button data-brush="taper"  data-tip="Taper — thins at both ends"><svg viewBox="0 0 28 20"><path d="M3 10c6-4 16-4 22 0-6 4-16 4-22 0z" fill="currentColor" stroke="none"/></svg></button>
-  <button data-brush="ink"    data-tip="Ink — pressure-driven"><svg viewBox="0 0 28 20"><path d="M3 11c6-5 16 3 22-3" stroke-width="4" stroke-linecap="round"/></svg></button>
-  <button data-brush="pencil" data-tip="Pencil — fine, dry"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="2" stroke-linecap="round"/></svg></button>
-  <button data-brush="marker" data-tip="Marker — broad chisel"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="9" stroke-linecap="butt"/></svg></button>
-  <button data-brush="chisel" data-tip="Chisel — hard blade"><svg viewBox="0 0 28 20"><path d="M4 15 24 5" stroke-width="6" stroke-linecap="butt"/></svg></button>
-  <button data-brush="wide"   data-tip="Wide — large areas fast"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="13" stroke-linecap="butt"/></svg></button>
-  <button data-brush="ribbon" data-tip="Ribbon — flat tape"><svg viewBox="0 0 28 20"><path d="M3 7h22M3 13h22" stroke-width="2"/></svg></button>
-  <button data-brush="glow"   data-tip="Glow — emissive"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="4" stroke-linecap="round" opacity=".35"/><path d="M3 10h22" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+  <button data-brush="pen"    class="on" data-tip="Pen — round, crisp ends"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="6" stroke-linecap="round"/></svg></button>
+  <button data-brush="ink"    data-tip="Ink — round, thins to a point at both ends"><svg viewBox="0 0 28 20"><path d="M3 10c6-4 16-4 22 0-6 4-16 4-22 0z" fill="currentColor" stroke="none"/></svg></button>
+  <button data-brush="flat"   data-tip="Flat — blade nib, follows pen tilt"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="3" stroke-linecap="butt"/></svg></button>
+  <button data-brush="marker" data-tip="Marker — hard chisel nib, broader"><svg viewBox="0 0 28 20"><path d="M4 14 24 6" stroke-width="7" stroke-linecap="butt"/></svg></button>
+  <button data-brush="wide"   data-tip="Wide — paints large areas fast"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="13" stroke-linecap="butt"/></svg></button>
+  <button data-brush="glow"   data-tip="Glow — emissive, adds where it overlaps"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="5" stroke-linecap="round" opacity=".35"/><path d="M3 10h22" stroke-width="1.5" stroke-linecap="round"/></svg></button>
 </div>
 
 <!-- ==================== bottom context menu: guide tools ==================== -->

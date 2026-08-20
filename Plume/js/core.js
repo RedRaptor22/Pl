@@ -50,7 +50,7 @@ P.TUNE = {
                                //        dropped, so a long session cannot grow
                                //        the history without bound
   brushMinMM       : 1,        // FACT: minimum brush size changed 5mm -> 1mm
-  brushMaxMM       : 120
+  brushMaxMM       : 300      // FACT: the brush panel runs 1mm - 300mm
 };
 
 /* ---- small vector scratch ------------------------------------------------ */

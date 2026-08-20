@@ -123,6 +123,17 @@ function penMove(e){
     return;
   }
   if(holdOrigin && Math.hypot(e.clientX-holdOrigin.x, e.clientY-holdOrigin.y) > HOLD_SLOP) cancelHold();
+
+  /* COALESCED SAMPLES. A pen reports far faster than the display refreshes —
+     an S Pen at ~240Hz against a 60Hz frame — and the browser hands over one
+     pointermove per frame with the rest folded into it. Asking for them back
+     is the difference between a stroke sampled every 30px on a fast flick and
+     one sampled every 8px, and it costs nothing where it is unsupported. */
+  var co = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+  if(co && co.length > 1){
+    for(var i=0;i<co.length;i++) Tools.extend(co[i].clientX, co[i].clientY, co[i]);
+    return;
+  }
   Tools.extend(e.clientX, e.clientY, e);
 }
 

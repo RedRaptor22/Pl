@@ -15,9 +15,10 @@ var T = P.TUNE, S = P.Strokes, G = P.Guides;
 
 var TOOL = P.TOOL = {
   mode        : 'draw',      // draw|shape|guide|bend|erase|vacuum|select|eyedrop|inject
-  brush       : 'round',
+  brush       : 'pen',
   color       : new THREE.Color('#1b1c21'),   // dark ink on the light default scene
   sizeMM      : 14,
+  eraserMM    : 20,          // GUESS: the eraser has its OWN size — see stepErase()
   opacity     : 1,
   pressureOn  : true,        // FACT (C.3): pressure toggle lives in the Brush Panel
   pressureTarget : 'size',
@@ -35,6 +36,17 @@ function baseRadius(){
   return P.clamp(TOOL.sizeMM, T.brushMinMM, T.brushMaxMM) * P.MM * 0.5;
 }
 Tools.baseRadius = baseRadius;
+
+function eraserRadius(){
+  return P.clamp(TOOL.eraserMM, T.brushMinMM, T.brushMaxMM) * P.MM * 0.5;
+}
+Tools.eraserRadius = eraserRadius;
+
+/* Which size the size control edits: the eraser has one of its own, and the
+   readout follows the tool you are holding. */
+Tools.sizeTarget = function(){
+  return (TOOL.mode === 'erase' || TOOL.mode === 'vacuum') ? 'eraserMM' : 'sizeMM';
+};
 
 /* ==========================================================================
    Projection: screen sample -> world point
@@ -59,6 +71,92 @@ function projectSample(x, y){
 Tools.projectSample = projectSample;
 
 /* ==========================================================================
+   Sample density
+   --------------------------------------------------------------------------
+   A stroke is stored at whatever rate the platform delivers pointermove. That
+   is fine for a slow, considered line and poor for a fast one: at 60Hz a flick
+   across the screen lands samples 30-50px apart, and the tube drawn through
+   them is a visible polygon — the "low poly" look, which is a sampling problem
+   rather than a tessellation one.
+
+   Two answers, and both are needed. input.js asks the platform for the samples
+   it already coalesced away, which is the real fix on a pen that reports at
+   240Hz. This is the other half: on commit, a sparse screen path is resampled
+   through a CENTRIPETAL Catmull-Rom, which passes exactly through the points
+   the pen actually gave and only adds curvature between them. Nothing is
+   smoothed away — that is Stable Stroke's job, and it stays opt-in.
+   ========================================================================== */
+/* GUESS: 8px. The deviation of a chord from the curve it cuts is about
+   chord^2/8R, so an 8px step on a curve of even 30px radius is a quarter of a
+   pixel off — invisible — while halving the point count a 4px step would
+   store. Density is not free: it is carried by every undo step and every
+   exported triangle. */
+var MAX_STEP_PX = 8;
+
+function crPoint(p0, p1, p2, p3, t01, out){
+  /* Barry-Goldman with alpha = 0.5. Centripetal because the uniform form
+     loops and cusps when samples are unevenly spaced, which is exactly the
+     case here — a hand speeds up and slows down mid-stroke. */
+  function knot(ti, a, b){
+    var d = Math.sqrt(Math.hypot(b.x-a.x, b.y-a.y));
+    return ti + (d > 1e-6 ? d : 1e-3);
+  }
+  var t0 = 0, t1 = knot(t0,p0,p1), t2 = knot(t1,p1,p2), t3 = knot(t2,p2,p3);
+  if(t2 - t1 < 1e-9){ out.x = p1.x; out.y = p1.y; return out; }
+  var t = t1 + (t2 - t1) * t01;
+  function mix(a, b, ta, tb, o){
+    var f = (tb - ta) < 1e-9 ? 0 : (t - ta) / (tb - ta);
+    o.x = a.x + (b.x - a.x) * f; o.y = a.y + (b.y - a.y) * f;
+    return o;
+  }
+  var A1 = mix(p0,p1,t0,t1,{x:0,y:0}), A2 = mix(p1,p2,t1,t2,{x:0,y:0}),
+      A3 = mix(p2,p3,t2,t3,{x:0,y:0});
+  var B1 = mix(A1,A2,t0,t2,{x:0,y:0}), B2 = mix(A2,A3,t1,t3,{x:0,y:0});
+  return mix(B1,B2,t1,t2,out);
+}
+
+function densifyScreen(scr){
+  var n = scr.length;
+  if(n < 2) return scr;
+  var out = [scr[0]], i, k;
+  for(i=0;i<n-1;i++){
+    var p1 = scr[i], p2 = scr[i+1];
+    var p0 = scr[i-1] || p1, p3 = scr[i+2] || p2;
+    var d = Math.hypot(p2.x-p1.x, p2.y-p1.y);
+    var steps = Math.min(24, Math.ceil(d / MAX_STEP_PX));
+    for(k=1;k<steps;k++){
+      var f = k/steps, q = crPoint(p0, p1, p2, p3, f, {x:0,y:0});
+      out.push({ x:q.x, y:q.y,
+                 pressure: p1.pressure + (p2.pressure - p1.pressure)*f,
+                 tilt: f < 0.5 ? p1.tilt : p2.tilt });
+    }
+    out.push(p2);
+  }
+  return out;
+}
+
+/* Rebuild a committed curve from a denser screen path. Every added sample is
+   re-projected like a real one, so it lands on the guide rather than on a
+   chord across it — and a guide that refuses a sample still refuses it. */
+function densifyCurve(l){
+  if(!l.stroke || l.screen.length < 2) return;
+  var dense = densifyScreen(l.screen);
+  if(dense.length <= l.screen.length) return;
+
+  var world = [], normals = [], screen = [], i;
+  for(i=0;i<dense.length;i++){
+    var h = projectSample(dense[i].x, dense[i].y);
+    if(!h) continue;
+    world.push(h.point.clone()); normals.push(h.normal.clone()); screen.push(dense[i]);
+  }
+  if(world.length < 2) return;
+
+  l.world = world; l.normals = normals; l.screen = screen;
+  l.stroke.pts.length = 0;
+  for(i=0;i<world.length;i++) pushLivePoint(l.stroke, world[i], screen[i], normals[i]);
+}
+
+/* ==========================================================================
    Live stroke
    ========================================================================== */
 var live = null;
@@ -66,7 +164,7 @@ var live = null;
 function newStroke(){
   return {
     id: P.uid(),
-    brush: TOOL.brush,
+    brush: P.brushName(TOOL.brush),
     color: TOOL.color.clone(),
     baseRadius: baseRadius(),
     opacity: TOOL.opacity,
@@ -334,6 +432,9 @@ function finishCurve(l){
     }
   }
 
+  /* fill in what the platform did not report before the one exact rebuild */
+  densifyCurve(l);
+
   /* hand off from the growable live buffer to one exact batch rebuild, so a
      stored stroke never carries the incremental path's numerical drift */
   S.Live.finish(l.stroke);
@@ -580,7 +681,13 @@ function beginErase(x, y){
 
 function stepErase(x, y){
   if(!eraseSession) return;
-  var rPx = Math.max(4, P.worldToPx(baseRadius()));
+  /* THE ERASER IS NOT THE BRUSH. It used to take the brush's radius, so
+     picking a 90mm nib gave you a 90mm eraser and one tap took 36px of curve
+     out — "it erases a good chunk". The cut itself is exact (measured: the arc
+     removed equals the disc diameter to within a pixel at every size), so the
+     fix is the size, not the maths. Erasing keeps its own, smaller default and
+     the size control edits whichever of the two the active tool uses. */
+  var rPx = Math.max(4, P.worldToPx(eraserRadius()));
   if(TOOL.mode === 'vacuum'){
     var killed = S.vacuumAt(x, y);
     for(var i=0;i<killed.length;i++) eraseSession.removed.push(killed[i]);
