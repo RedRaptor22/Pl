@@ -491,7 +491,7 @@
 <!-- ============================ top left ============================ -->
 <div id="topleft" class="panel">
   <button class="ico" id="btnHome" data-tip="Reset view<br><i>F — or press-and-hold empty space</i>"><svg><use href="#i-grid"/></svg></button>
-  <button class="ico" id="btnExportTop" data-tip="Export — PNG or .plume file"><svg><use href="#i-export"/></svg></button>
+  <button class="ico" id="btnExportTop" data-tip="Export — PNG, OBJ/STL or .plume file"><svg><use href="#i-export"/></svg></button>
   <button class="ico" id="btnMenu" data-tip="Settings"><svg><use href="#i-menu"/></svg></button>
 </div>
 <div id="helpBtn" class="panel">
@@ -731,6 +731,8 @@
     <button class="small" id="btnImport" data-tip="Open a .plume.json sketch">Open</button>
     <button class="small" id="btnPNG">PNG</button>
     <button class="small" id="btnClear">Clear</button>
+    <button class="small" id="btnOBJ" data-tip="Export the geometry as .obj, with a .mtl for the colours.<br><i>Millimetres. Selection only, if anything is selected.</i>">OBJ</button>
+    <button class="small" id="btnSTL" data-tip="Export the geometry as binary .stl — for printing or CAD.<br><i>Millimetres, no colour.</i>">STL</button>
   </div>
   <div id="saveInfo" class="empty">Autosaves to this device.</div>
 </div>
@@ -824,6 +826,7 @@
 <script src="js/strokes.js"></script>
 <script src="js/guides.js"></script>
 <script src="js/import.js"></script>
+<script src="js/export.js"></script>
 <script src="js/doc.js"></script>
 <script src="js/tools.js"></script>
 <script src="js/app.js"></script>

@@ -280,10 +280,8 @@ UI.init = function(){
 
   on($('btnPNG'), 'click', function(){
     P.renderer.render(P.scene, P.cam());
-    var a = document.createElement('a');
-    a.download = 'plume-' + Date.now() + '.png';
-    a.href = P.renderer.domElement.toDataURL('image/png');
-    a.click();
+    P.Export.saveURL(P.renderer.domElement.toDataURL('image/png'),
+                     'plume-' + Date.now() + '.png');
   });
   on($('btnClear'), 'click', function(){
     var removed = S.list.slice(), guide = G.active;
@@ -466,6 +464,23 @@ UI.init = function(){
     P.Doc.download();
     P.toast('Exported .plume.json');
   });
+
+  /* Geometry out. With something selected this exports just that, which is
+     the same rule the rest of the app follows for a live selection. */
+  function exportGeometry(format, label){
+    var selOnly = P.Strokes.selection.length > 0;
+    var st;
+    try { st = P.Export.download(format, {selectionOnly:selOnly}); }
+    catch(err){ P.toast('Could not write that file'); return; }
+    if(!st){
+      P.toast(selOnly ? 'Nothing in the selection to export' : 'Nothing to export yet');
+      return;
+    }
+    P.toast('Exported ' + st.parts + (st.parts === 1 ? ' curve' : ' curves') +
+            ' as ' + label + ' — ' + st.triangles.toLocaleString() + ' triangles');
+  }
+  on($('btnOBJ'), 'click', function(){ exportGeometry('obj', '.obj + .mtl'); });
+  on($('btnSTL'), 'click', function(){ exportGeometry('stl', '.stl'); });
   on($('btnImport'), 'click', function(){ $('fileInput').click(); });
   on($('fileInput'), 'change', function(){
     var f = this.files && this.files[0];

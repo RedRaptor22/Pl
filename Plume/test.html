@@ -719,6 +719,233 @@ function run(W){
   var future = P.Doc.restore({format:'plume', version:999});
   ck('a newer file version is rejected', future === false);
 
+  /* ================= geometry export ================= */
+  group('Geometry export — OBJ and STL');
+  /* Verified against the CURVE, not against the writers: a round brush swept
+     along a straight line is a 12-sided prism, so its exported solid has a
+     volume that can be predicted from the polyline and the nib alone — and a
+     signed volume is positive only if every facet faces outward, which is the
+     one thing a slicer cannot recover for you. */
+  var EXP = P.Export;
+  var _l3 = new THREE.Line3(), _cp = new THREE.Vector3(), _pv = new THREE.Vector3();
+
+  function mmPolyline(st){
+    return st.pts.map(function(q){ return q.p.clone().multiplyScalar(1000); });
+  }
+  function distToPolyline(x, y, z, poly){
+    _pv.set(x, y, z);
+    var best = Infinity;
+    for(var i=0;i+1<poly.length;i++){
+      _l3.set(poly[i], poly[i+1]);
+      _l3.closestPointToPoint(_pv, true, _cp);
+      best = Math.min(best, _cp.distanceTo(_pv));
+    }
+    if(poly.length === 1) best = poly[0].distanceTo(_pv);
+    return best;
+  }
+  /* signed volume of a triangle soup: positive iff the solid is closed and
+     wound outward (divergence theorem on x -> x/3) */
+  function soupVolume(attr){
+    var v = 0;
+    for(var i=0;i<attr.count;i+=3){
+      var ax=attr.getX(i),   ay=attr.getY(i),   az=attr.getZ(i);
+      var bx=attr.getX(i+1), by=attr.getY(i+1), bz=attr.getZ(i+1);
+      var cx=attr.getX(i+2), cy=attr.getY(i+2), cz=attr.getZ(i+2);
+      v += (ax*(by*cz - bz*cy) + ay*(bz*cx - bx*cz) + az*(bx*cy - by*cx)) / 6;
+    }
+    return v;
+  }
+
+  reset();
+  P.TOOL.autoGuide = false; P.TOOL.pressureOn = false; P.TOOL.stableOn = false;
+  P.TOOL.brush = 'round'; P.TOOL.sizeMM = 20; P.TOOL.opacity = 1;
+  P.TOOL.color.set('#c8323c');
+  pen([{x:CX-160,y:CY},{x:CX-80,y:CY},{x:CX,y:CY},{x:CX+80,y:CY},{x:CX+160,y:CY}]);
+  ck('a straight curve to export', P.Strokes.list.length === 1,
+     P.Strokes.list[0].pts.length + ' points');
+
+  var eParts = EXP.collect();
+  var eStat  = EXP.stats(eParts);
+  ck('one exported object per curve', eParts.length === P.Strokes.list.length,
+     eParts.length + ' object(s), ' + eStat.triangles + ' triangles');
+  ck('the tube is actually tessellated', eStat.triangles > 100);
+
+  var eStroke = P.Strokes.list[0];
+  var ePoly = mmPolyline(eStroke);
+  var eRad = eStroke.baseRadius * 1000 * P.BRUSH[eStroke.brush].wide;
+  var eLen = 0;
+  for(var ei=1;ei<ePoly.length;ei++) eLen += ePoly[ei].distanceTo(ePoly[ei-1]);
+
+  var offLo = Infinity, offHi = 0;
+  for(ei=0;ei<eParts[0].pos.length;ei+=3){
+    var dOff = distToPolyline(eParts[0].pos[ei], eParts[0].pos[ei+1], eParts[0].pos[ei+2], ePoly);
+    offLo = Math.min(offLo, dOff); offHi = Math.max(offHi, dOff);
+  }
+  /* off by 1000x and this fails by three orders of magnitude, so it doubles as
+     the units check: a 20mm nib exports as a 10mm-radius tube, not 0.01 */
+  ck('every exported vertex sits on the nib radius, in millimetres',
+     offHi <= eRad*1.02 && offHi >= eRad*0.9,
+     'r ' + offLo.toFixed(2) + '–' + offHi.toFixed(2) + 'mm, nib ' + eRad.toFixed(2) + 'mm');
+
+  var eStl = EXP.stlBuffer(eParts);
+  ck('binary STL is exactly 84 + 50 bytes per triangle',
+     eStl.byteLength === 84 + eStat.triangles*50, eStl.byteLength + ' bytes');
+  ck('its header does not begin with "solid", or readers take it for ASCII',
+     String.fromCharCode.apply(null, new Uint8Array(eStl, 0, 5)).toLowerCase() !== 'solid');
+
+  var eBack = P.Import.parseSTL(eStl);
+  ck('the app reads its own binary STL back',
+     !!eBack && eBack.attributes.position.count === eStat.triangles*3);
+
+  var eVol = soupVolume(eBack.attributes.position);
+  /* a regular 12-gon of circumradius r has area 3r^2, and the caps are flat */
+  var eWant = 3 * eRad*eRad * eLen;
+  ck('the solid is wound outward, not inside out', eVol > 0,
+     (eVol/1000).toFixed(1) + ' cm^3');
+  ck('and its volume is the tube the curve describes',
+     Math.abs(eVol/eWant - 1) < 0.05,
+     'got ' + eVol.toFixed(0) + 'mm^3, predicted ' + eWant.toFixed(0));
+
+  var eAscii = EXP.stlSource(eParts, {name:'plume-test'});
+  ck('ASCII STL writes one facet per triangle',
+     (eAscii.match(/facet normal/g) || []).length === eStat.triangles);
+  var eAsciiGeom = P.Import.parseSTL(new W.TextEncoder().encode(eAscii).buffer);
+  ck('the app reads its own ASCII STL back',
+     !!eAsciiGeom && eAsciiGeom.attributes.position.count === eStat.triangles*3);
+
+  var eObjSrc = EXP.objSource(eParts, {name:'plume-test'});
+  ck('OBJ points at its material library', /^mtllib plume-test\.mtl$/m.test(eObjSrc.obj));
+  ck('one object block per curve',
+     (eObjSrc.obj.match(/^o /gm) || []).length === eParts.length);
+  var eObjGeom = P.Import.parseOBJ(eObjSrc.obj);
+  ck('the app reads its own OBJ back',
+     !!eObjGeom && eObjGeom.attributes.position.count === eStat.triangles*3);
+  /* two writers, written independently, describing one solid */
+  var eObjVol = soupVolume(eObjGeom.attributes.position);
+  ck('OBJ and STL describe the same solid',
+     Math.abs(eObjVol - eVol) / Math.abs(eVol) < 1e-3,
+     'delta ' + (100*Math.abs(eObjVol-eVol)/Math.abs(eVol)).toFixed(4) + '%');
+
+  ck('vertex colours are off by default', !/^v (-?[\d.]+ ){3}[\d.]/m.test(eObjSrc.obj));
+  var eVC = EXP.objSource(eParts, {name:'plume-test', vertexColors:true});
+  ck('...and add rgb to the v lines when asked', /^v (-?[\d.]+ ){5}[\d.]+$/m.test(eVC.obj));
+  ck('...without breaking the app\'s own reader',
+     P.Import.parseOBJ(eVC.obj).attributes.position.count === eStat.triangles*3);
+
+  /* colour and opacity travel in the .mtl */
+  P.TOOL.color.set('#3264c8'); P.TOOL.opacity = 0.5; P.TOOL.brush = 'marker';
+  pen([{x:CX-140,y:CY+90},{x:CX,y:CY+120},{x:CX+140,y:CY+80}]);
+  var eParts2 = EXP.collect();
+  var eSrc2 = EXP.objSource(eParts2, {name:'plume-test'});
+  ck('a second curve exports as a second object', eParts2.length === 2);
+  ck('one material per distinct colour',
+     (eSrc2.mtl.match(/^newmtl /gm) || []).length === 2,
+     (eSrc2.mtl.match(/^newmtl /gm) || []).join(' ').trim());
+  var eKd = /^newmtl plume_c8323c$[\s\S]*?^Kd ([\d.]+) ([\d.]+) ([\d.]+)$/m.exec(eSrc2.mtl);
+  ck('the material carries the curve colour', !!eKd &&
+     Math.abs(parseFloat(eKd[1]) - 200/255) < 1e-3 &&
+     Math.abs(parseFloat(eKd[2]) - 50/255) < 1e-3 &&
+     Math.abs(parseFloat(eKd[3]) - 60/255) < 1e-3,
+     eKd ? eKd.slice(1).join(', ') : 'no Kd');
+  ck('opacity travels as the material dissolve', /^newmtl plume_3264c8_a50$/m.test(eSrc2.mtl) &&
+     /^d 0\.5$/m.test(eSrc2.mtl));
+  ck('each object references its own material',
+     (eSrc2.obj.match(/^usemtl /gm) || []).length === 2);
+
+  /* selection, guides, and the empty case */
+  P.Strokes.setSelected(P.Strokes.list[1], true);
+  ck('a selection exports on its own',
+     EXP.collect({selectionOnly:true}).length === 1);
+  P.Strokes.clearSelection();
+
+  var eZ = EXP.collect({zUp:true})[0];
+  ck('zUp rolls Y-up over to Z-up for printing',
+     Math.abs(eZ.pos[1] + eParts[0].pos[2]) < 1e-3 &&
+     Math.abs(eZ.pos[2] - eParts[0].pos[1]) < 1e-3);
+
+  reset();
+  P.TOOL.autoGuide = true;
+  pen(circle(CX, CY, 60));
+  ck('a guide is not geometry, so it is left out', EXP.collect().length === 0);
+  ck('...but can be asked for', EXP.collect({guides:true}).length === 1);
+
+  /* Every brush, not just the round one: a solid is only printable if each
+     directed edge appears exactly once — i.e. the surface is closed AND every
+     face agrees with its neighbours. This is the check that caught the tube
+     walls being wound inside out, which nothing on screen made obvious. */
+  function partVolume(part){
+    var v = 0, pos = part.pos, tris = part.tris;
+    for(var i=0;i<tris.length;i+=3){
+      var a=tris[i]*3, b=tris[i+1]*3, c=tris[i+2]*3;
+      v += (pos[a]  *(pos[b+1]*pos[c+2] - pos[b+2]*pos[c+1]) +
+            pos[a+1]*(pos[b+2]*pos[c]   - pos[b]  *pos[c+2]) +
+            pos[a+2]*(pos[b]  *pos[c+1] - pos[b+1]*pos[c])) / 6;
+    }
+    return v;
+  }
+  function openEdges(part){
+    var seen = {}, tris = part.tris, i, k;
+    for(i=0;i<tris.length;i+=3){
+      var t = [tris[i], tris[i+1], tris[i+2]];
+      for(k=0;k<3;k++){
+        var key = t[k] + '>' + t[(k+1)%3];
+        seen[key] = (seen[key] || 0) + 1;
+      }
+    }
+    var bad = 0;
+    for(k in seen){
+      if(seen[k] !== 1) bad++;                       // two faces the same way round
+      var back = k.split('>');
+      if(!seen[back[1] + '>' + back[0]]) bad++;      // nothing on the other side
+    }
+    return bad;
+  }
+
+  reset();
+  P.TOOL.autoGuide = false; P.TOOL.stableOn = false; P.TOOL.pressureOn = true;
+  var eBrushes = Object.keys(P.BRUSH), eNotClosed = [], eInsideOut = [], eTri = 0;
+  for(var ebi=0;ebi<eBrushes.length;ebi++){
+    P.Strokes.clear(); P.History.clear();
+    P.TOOL.brush = eBrushes[ebi]; P.TOOL.sizeMM = 6 + ebi*5;
+    pen([{x:CX-170,y:CY-40},{x:CX-40,y:CY+30},{x:CX+70,y:CY-30},{x:CX+180,y:CY+40}]);
+    var ePart = EXP.collect()[0];
+    if(!ePart){ eNotClosed.push(eBrushes[ebi] + '(nothing)'); continue; }
+    eTri += ePart.tris.length/3;
+    if(openEdges(ePart)) eNotClosed.push(eBrushes[ebi] + '(' + openEdges(ePart) + ')');
+    if(partVolume(ePart) <= 0) eInsideOut.push(eBrushes[ebi]);
+  }
+  ck('every brush exports a closed surface, with no edge left open',
+     eNotClosed.length === 0, eNotClosed.join(' ') || eBrushes.length + ' brushes, ' + eTri + ' triangles');
+  ck('...and every one of them is wound outward, not inside out',
+     eInsideOut.length === 0, eInsideOut.join(' ') || 'all positive volume');
+
+  reset();
+  ck('an empty sketch exports nothing rather than a broken file',
+     EXP.collect().length === 0 && EXP.download('obj') === null);
+
+  /* the buttons, without actually writing files to the machine */
+  var eSaved = [], eRealSave = EXP.saveBlob;
+  EXP.saveBlob = function(blob, filename){ eSaved.push({name:filename, size:blob.size}); };
+  try {
+    P.TOOL.autoGuide = false;
+    pen([{x:CX-120,y:CY},{x:CX,y:CY+40},{x:CX+120,y:CY}]);
+    W.document.getElementById('btnOBJ').click();
+    ck('the OBJ button writes an .obj and its .mtl',
+       eSaved.length === 2 && /^plume-\d+\.obj$/.test(eSaved[0].name) &&
+       /^plume-\d+\.mtl$/.test(eSaved[1].name),
+       eSaved.map(function(f){ return f.name; }).join(' + '));
+    eSaved.length = 0;
+    W.document.getElementById('btnSTL').click();
+    var eTri = EXP.stats(EXP.collect()).triangles;
+    ck('the STL button writes one binary .stl',
+       eSaved.length === 1 && /^plume-\d+\.stl$/.test(eSaved[0].name) &&
+       eSaved[0].size === 84 + eTri*50,
+       eSaved.length ? eSaved[0].name + ', ' + eSaved[0].size + ' bytes' : 'nothing written');
+  } finally {
+    EXP.saveBlob = eRealSave;
+  }
+  P.TOOL.pressureOn = true; P.TOOL.opacity = 1; P.TOOL.brush = 'round';
+
   /* ================= compact / responsive ================= */
   group('Responsive layout');
   /* NB: the panels live in the iframe, so query W.document, not ours */

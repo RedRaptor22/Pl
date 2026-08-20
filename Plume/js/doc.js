@@ -439,14 +439,7 @@ D.exportBlob = function(){
 };
 
 D.download = function(name){
-  var url = URL.createObjectURL(D.exportBlob());
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = (name || 'sketch-' + Date.now()) + '.plume.json';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+  P.Export.saveBlob(D.exportBlob(), (name || 'sketch-' + Date.now()) + '.plume.json');
 };
 
 D.importFile = function(file){

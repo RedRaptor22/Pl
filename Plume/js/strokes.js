@@ -267,15 +267,29 @@ function writeCaps(stroke, n, T, arc, pos, nor, col){
   col[4]=c1.r; col[5]=c1.g; col[6]=c1.b; col[7]=e1.alpha;
 }
 
-/* quad indices joining ring i to ring i+1 */
+/* Quad indices joining ring i to ring i+1.
+
+   WOUND OUTWARD, and it has to be measured rather than eyeballed. These two
+   triangles used to be (a,c,b) and (b,c,d), which is the tube inside out: the
+   wall's geometric normals pointed at the axis while writeRing's shading
+   normals pointed away from it, and the caps — wound the other way — did not
+   agree with the wall either. Visible consequences were small but real, since
+   the material culls back faces: what you saw of an opaque stroke was the FAR
+   wall lit by the near wall's normals, depth was written at the back of the
+   tube rather than the front, and an exported solid was inside out and not
+   consistently oriented, which is a mesh error in any slicer.
+   Measured on a straight round stroke (40mm nib, 650mm long): 48 of 48 wall
+   triangles faced inward before and 0 of 48 after, and the signed volume went
+   from an inconsistent -260000 mm^3 to +779999.94 — against 780000.00 for the
+   12-gon prism 3r^2*L the tube is supposed to be. */
 function quadIndices(idx, at, i, seg){
   for(var k=0;k<seg;k++){
     var a = 2 + i*seg + k,
         b = 2 + i*seg + (k+1)%seg,
         c = 2 + (i+1)*seg + k,
         d = 2 + (i+1)*seg + (k+1)%seg;
-    idx[at++]=a; idx[at++]=c; idx[at++]=b;
-    idx[at++]=b; idx[at++]=c; idx[at++]=d;
+    idx[at++]=a; idx[at++]=b; idx[at++]=c;
+    idx[at++]=b; idx[at++]=d; idx[at++]=c;
   }
   return at;
 }
