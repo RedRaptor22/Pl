@@ -1,0 +1,1965 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Plume — mechanics tests</title>
+<style>
+  body{margin:0;background:#12141a;color:#e8eaf0;
+    font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;}
+  /* The app must run at a DESKTOP-sized viewport, because that is the layout
+     the geometry assertions measure — at 520px it would be in compact mode and
+     every panel-overlap check would be testing the wrong thing.
+
+     So the iframe keeps a real 1024x768 internal viewport and is only SCALED
+     visually to fit the window. A CSS transform on the parent does not change
+     the iframe's own clientWidth/clientHeight, so the app still lays itself
+     out as a desktop, while the page itself fits any screen. */
+  html,body{height:100%;overflow:hidden;}
+  #wrap{display:flex;flex-direction:column;height:100vh;}
+  #out{flex:1 1 auto;overflow:auto;padding:14px 18px;white-space:pre-wrap;min-height:0;}
+  #stageWrap{flex:0 0 auto;position:relative;overflow:hidden;
+    border-top:1px solid #333846;background:#0b0d12;}
+  #stageLabel{position:absolute;right:8px;top:6px;z-index:2;font-size:10px;
+    color:#666e82;letter-spacing:.05em;pointer-events:none;}
+  iframe{width:1024px;height:768px;border:0;display:block;transform-origin:top left;}
+  .ok{color:#6bdc9b;} .fail{color:#ff5d7e;font-weight:700;}
+  .grp{color:#ff8a3d;margin-top:14px;display:block;font-weight:700;}
+  .sum{margin-top:18px;font-size:15px;font-weight:700;}
+  .note{color:#8b91a3;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="out">loading plume.html…</div>
+  <div id="stageWrap">
+    <span id="stageLabel">app under test — 1024×768 viewport, scaled to fit</span>
+    <iframe id="app" src="plume.html"></iframe>
+  </div>
+</div>
+<script>
+/* ==========================================================================
+   Plume mechanics tests.
+   Drives the real app inside an iframe through real PointerEvents, so the
+   input routing, projection and history paths are all exercised, not stubbed.
+   Node is not required — open this file over http:// and read the left pane.
+   ========================================================================== */
+var out = document.getElementById('out');
+var frame = document.getElementById('app');
+var pass = 0, fail = 0, lines = [];
+
+/* Scale the fixture to fit, without changing the viewport the app sees.
+   Capped so the results pane always keeps most of the window. */
+var APP_W = 1024, APP_H = 768;
+function fitFrame(){
+  var wrap = document.getElementById('stageWrap');
+  var avail = wrap.clientWidth || document.documentElement.clientWidth;
+  var maxH = document.documentElement.clientHeight * 0.45;
+  var k = Math.min(1, avail/APP_W, maxH/APP_H);
+  /* transforms apply right to left, so this scales first and then centres the
+     already-scaled box — otherwise the fixture hugs the left edge and leaves a
+     wide empty gutter */
+  var offset = Math.max(0, (avail - APP_W*k) / 2);
+  frame.style.transform = 'translateX(' + offset.toFixed(1) + 'px) scale(' + k + ')';
+  wrap.style.height = Math.round(APP_H * k) + 'px';
+}
+window.addEventListener('resize', fitFrame);
+fitFrame();
+
+function group(name){ lines.push('<span class="grp">' + name + '</span>'); }
+function ck(name, cond, extra){
+  if(cond){ pass++; lines.push('<span class="ok">ok  </span> ' + name +
+    (extra !== undefined ? ' <span class="note">[' + extra + ']</span>' : '')); }
+  else { fail++; lines.push('<span class="fail">FAIL</span> ' + name +
+    (extra !== undefined ? ' <span class="note">[' + extra + ']</span>' : '')); }
+}
+function flush(){
+  out.innerHTML = lines.join('\n') + '\n\n<div class="sum ' + (fail ? 'fail' : 'ok') + '">' +
+    (fail ? fail + ' FAILURE(S) of ' + (pass+fail) : 'ALL PASS (' + pass + ' checks)') + '</div>';
+}
+
+/* Opening this file directly (file://…/test.html) cannot work: Chrome gives
+   every file:// document its own opaque origin, so reading into the iframe to
+   drive the app throws a SecurityError. plume.html itself opens fine that way
+   — only this harness needs an http origin. Say so plainly rather than sitting
+   on "loading…" forever. */
+function explainFileOrigin(err){
+  out.innerHTML =
+    '<div class="sum fail">This harness needs an http:// origin</div>\n\n' +
+    'You opened it over <b>' + location.protocol + '</b>, and Chrome gives every\n' +
+    'file:// page its own origin — so this page is not permitted to reach\n' +
+    'into the iframe and drive the app.\n\n' +
+    '<span class="grp">Serve it instead</span>\n' +
+    '  <b>powershell -ExecutionPolicy Bypass -File .claude/serve.ps1</b>\n' +
+    '  then open <b>http://localhost:8123/test.html</b>\n\n' +
+    '<span class="note">plume.html on its own is perfectly happy as a file://\n' +
+    'page — this restriction only affects the test harness.</span>' +
+    (err ? '\n\n<span class="note">(' + err + ')</span>' : '');
+}
+
+var harnessStarted = false;
+
+frame.onload = function(){
+  harnessStarted = true;
+  var W = frame.contentWindow, P0;
+  try {
+    void W.document.title;            // trips the SecurityError before anything else
+    P0 = W.P;
+  } catch(err){
+    explainFileOrigin(err && (err.name || err.message));
+    return;
+  }
+  if(!P0){ out.textContent = 'plume.html did not initialise (P is undefined)'; return; }
+  /* Never write over the real autosave slot, and never let a restore land in
+     the middle of a test run — P.ready settles once boot's restore attempt
+     has finished either way. */
+  P0.Doc.autosave = false;
+  out.textContent = 'waiting for boot…';
+  (P0.ready || Promise.resolve()).then(function(){ run(W); });
+};
+
+/* The iframe can finish before this script runs, in which case onload never
+   fires for us. Poking readyState also trips the file:// SecurityError, which
+   gets the explanation on screen immediately rather than after a timeout. */
+try {
+  if(!harnessStarted && frame.contentWindow &&
+     frame.contentWindow.document.readyState === 'complete'){
+    frame.onload();
+  }
+} catch(err){
+  explainFileOrigin(err && (err.name || err.message));
+}
+
+/* and a backstop, so the pane never just sits on "loading…" */
+setTimeout(function(){
+  if(!harnessStarted) explainFileOrigin('the iframe never signalled load');
+}, 8000);
+
+function run(W){
+  var P = W.P, THREE = W.THREE;
+  P.Doc.autosave = false;
+  P.Doc.clear();
+
+  var vp = P.viewport(), CX = vp.left + vp.w/2, CY = vp.top + vp.h/2;
+  function vpo(){ return P.viewport(); }        // live, for zoom-dependent checks
+
+  function pen(pts){
+    var el = P.elStage;
+    function ev(t,x,y,b){
+      el.dispatchEvent(new W.PointerEvent(t,{pointerId:99, pointerType:'pen',
+        clientX:x, clientY:y, buttons:b, pressure:b?0.6:0, tiltX:0, tiltY:0,
+        bubbles:true, cancelable:true}));
+    }
+    ev('pointerdown', pts[0].x, pts[0].y, 1);
+    for(var i=1;i<pts.length;i++) ev('pointermove', pts[i].x, pts[i].y, 1);
+    ev('pointerup', pts[pts.length-1].x, pts[pts.length-1].y, 0);
+  }
+  /* granular versions, for inspecting a stroke mid-drag */
+  function penEvent(type, x, y, buttons){
+    P.elStage.dispatchEvent(new W.PointerEvent(type, {pointerId:99, pointerType:'pen',
+      clientX:x, clientY:y, buttons:buttons, pressure:buttons?0.6:0,
+      tiltX:0, tiltY:0, bubbles:true, cancelable:true}));
+  }
+  function penDown(x,y){ penEvent('pointerdown', x, y, 1); }
+  function penMoveTo(x,y){ penEvent('pointermove', x, y, 1); }
+  function penUpAt(x,y){ penEvent('pointerup', x, y, 0); }
+  function circle(cx,cy,r,n){
+    var o=[]; n=n||48;
+    for(var i=0;i<=n;i++){ var a=i/n*Math.PI*2; o.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r}); }
+    return o;
+  }
+  var ts = function(p){ return P.worldToScreen(p, {}); };
+  function plen(st){
+    var L=0; for(var i=1;i<st.pts.length;i++) L += st.pts[i].p.distanceTo(st.pts[i-1].p);
+    return L;
+  }
+  function reset(){
+    P.Strokes.clear(); P.Guides.setActive(null); P.Guides.resources.length = 0;
+    P.History.clear(); P.TOOL.mirror = null; P.Guides.isolate = true;
+    P.TOOL.sizeMM = 14; P.TOOL.autoGuide = false; P.TOOL.brush = 'round';
+    P.VIEW.theta = 0.6; P.VIEW.phi = 1.1; P.VIEW.radius = 4; P.VIEW.roll = 0;
+    P.VIEW.ortho = false; P.VIEW.focal = 50;
+    P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true; P.applyCamera();
+    P.setTool('draw');
+  }
+  var walk = W.document.getElementById('walk');
+  if(walk) walk.classList.add('hidden');
+
+  /* ================= A.1 guide creation ================= */
+  group('A.1  Guide creation from the first stroke');
+  reset(); P.TOOL.autoGuide = true;
+  pen(circle(CX, CY, 70));
+  var g = P.Guides.active;
+  ck('the first stroke makes a guide, not a curve', !!g && P.Strokes.list.length === 0);
+  ck('guide is a swept surface', !!(g && g.sweep));
+  ck('extrusion runs along the view direction', !!g &&
+     Math.abs(g.sweep.basisT.dot(P.cam().getWorldDirection(new THREE.Vector3())) - 1) < 1e-6);
+  ck('orange starting edge exists at the anchor row', !!(g && g.orange));
+  ck('anchor row sits near one side, not the middle', !!g &&
+     g.sweep.anchorIndex < g.sweep.path.length * 0.25,
+     'row ' + g.sweep.anchorIndex + ' of ' + g.sweep.path.length);
+
+  /* ================= A.4 projection ================= */
+  group('A.4  Projection of subsequent strokes');
+  P.VIEW.theta += 0.95; P.applyCamera();
+  pen([{x:CX-90,y:CY-60},{x:CX-40,y:CY-20},{x:CX,y:CY},{x:CX+40,y:CY+20},{x:CX+80,y:CY+50}]);
+  var st = P.Strokes.list[P.Strokes.list.length-1];
+  ck('a stroke from a new viewpoint becomes a curve', P.Strokes.list.length === 1 && st.pts.length >= 2);
+  ck('projected points carry a surface normal', !!(st && st.pts[0].nrm));
+  ck('cross-section frames are frozen on commit', !!(st && st.pts[0].tan && st.pts[0].ref));
+
+  /* the guide is a straight extrusion of the profile, so every surface point's
+     (x,y) in the anchor frame must lie ON the profile polyline */
+  var sw = g.sweep, t0 = sw.basisT, r0 = sw.basisR;
+  var s0 = new THREE.Vector3().crossVectors(t0, r0), prof = sw.local;
+  function distToProfile2D(px, py){
+    var best = Infinity;
+    for(var i=0;i<prof.length-1;i++){
+      var ax=prof[i].x, ay=prof[i].y, bx=prof[i+1].x, by=prof[i+1].y;
+      var vx=bx-ax, vy=by-ay, L=vx*vx+vy*vy;
+      var t = L<1e-12 ? 0 : Math.max(0, Math.min(1, ((px-ax)*vx+(py-ay)*vy)/L));
+      best = Math.min(best, Math.hypot(px-(ax+vx*t), py-(ay+vy*t)));
+    }
+    return best;
+  }
+  var maxOff = 0, d = new THREE.Vector3(), ext = 0;
+  for(var i=0;i<st.pts.length;i++){
+    d.subVectors(st.pts[i].p, sw.anchor);
+    maxOff = Math.max(maxOff, distToProfile2D(d.dot(r0), d.dot(s0)));
+  }
+  for(i=0;i<prof.length;i++) ext = Math.max(ext, Math.hypot(prof[i].x, prof[i].y));
+  ck('every projected point lies exactly on the guide surface',
+     maxOff < ext*1e-6, 'max offset ' + maxOff.toExponential(1));
+
+  /* ================= A.6 bend ================= */
+  group('A.6  Bend — the documented cylinder to doughnut');
+  reset(); P.TOOL.autoGuide = true;
+  var fv = P.ORTHO_VIEWS[0];
+  P.VIEW.theta = fv.theta; P.VIEW.phi = fv.phi; P.applyCamera();
+  pen(circle(CX, CY, 70));
+  var gg = P.Guides.active;
+  var localBefore = JSON.stringify(gg.sweep.local);
+  var boxBefore = new THREE.Box3().setFromObject(gg.mesh).getSize(new THREE.Vector3());
+  var profR = Math.max.apply(null, gg.sweep.local.map(function(l){ return Math.hypot(l.x,l.y); }));
+
+  var tv = P.ORTHO_VIEWS[4];
+  P.VIEW.theta = tv.theta; P.VIEW.phi = tv.phi; P.applyCamera();
+  P.setTool('bend');
+  pen(circle(CX, CY, 180, 64));
+  var boxAfter = new THREE.Box3().setFromObject(gg.mesh).getSize(new THREE.Vector3());
+
+  ck('the first stroke profile is preserved exactly',
+     JSON.stringify(gg.sweep.local) === localBefore);
+  ck('bending starts from the orange line',
+     gg.sweep.anchorIndex === 0 && gg.sweep.path[0].distanceTo(gg.sweep.anchor) < 1e-9);
+  /* This used to assert that the sweep left the anchor along the guide's
+     ORIGINAL extrusion axis. That was the bug, not the contract: forcing the
+     alignment rotated the drawn stroke, and reversed it outright when the two
+     directions opposed. The real invariant is that the path is the stroke as
+     drawn, translated to the anchor — checked by the "Bend follows the
+     direction drawn" group below. */
+  ck('the sweep path is the drawn stroke, not a rotated copy of it',
+     gg.sweep.path.length === P.TUNE.guidePathSeg + 1);
+
+  var pos = gg.mesh.geometry.attributes.position, path = gg.sweep.path;
+  var p = new THREE.Vector3(), lo = Infinity, hi = -Infinity;
+  for(i=0;i<pos.count;i+=7){
+    p.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    var best = Infinity;
+    for(var j=0;j<path.length;j++) best = Math.min(best, p.distanceTo(path[j]));
+    lo = Math.min(lo,best); hi = Math.max(hi,best);
+  }
+  ck('result is a true swept tube, not a shear',
+     Math.abs(hi - profR) < profR*0.15 && (hi-lo) < profR*0.25,
+     'tube radius ' + lo.toFixed(3) + '–' + hi.toFixed(3) + ' vs profile ' + profR.toFixed(3));
+  ck('cylinder became a doughnut', boxAfter.x > boxBefore.x*2 && boxAfter.y < boxAfter.x*0.6,
+     '[' + boxBefore.toArray().map(function(v){return v.toFixed(2);}) + '] -> [' +
+           boxAfter.toArray().map(function(v){return v.toFixed(2);}) + ']');
+
+  P.History.undo();
+  ck('bend is undoable', gg.sweep.anchorIndex !== 0);
+  P.History.redo();
+
+  /* ================= A.9 mask ================= */
+  group('A.9  Guide as an isolation mask');
+  reset();
+  pen([{x:CX-40,y:CY},{x:CX-20,y:CY},{x:CX,y:CY},{x:CX+20,y:CY},{x:CX+40,y:CY}]);
+  var target = P.Strokes.list[0].pts[2].p.clone();
+  P.Guides.setActive(P.Guides.primitive('sphere', 24, 1));
+  ck('a point behind the guide reports as masked', P.Guides.isMasked(target) === true);
+  var sc = ts(target);
+  ck('select is blocked by the mask', P.Strokes.hitTest(sc.x, sc.y) === null);
+  P.setTool('erase'); P.TOOL.sizeMM = 60;
+  pen([{x:sc.x,y:sc.y},{x:sc.x+2,y:sc.y}]);
+  ck('erase is blocked by the mask', P.Strokes.list.length === 1, 'n=' + P.Strokes.list.length);
+  P.Guides.isolate = false;
+  ck('select works with isolation off', P.Strokes.hitTest(sc.x, sc.y) !== null);
+  pen([{x:sc.x,y:sc.y},{x:sc.x+2,y:sc.y}]);
+  ck('erase works with isolation off', P.Strokes.list.length !== 1, 'n=' + P.Strokes.list.length);
+
+  /* ================= C.6 erase / vacuum ================= */
+  group('C.6  Eraser and Vacuum');
+  reset();
+  var erasePx = Math.max(4, P.worldToPx(0.06));
+  pen([{x:CX-200,y:CY},{x:CX+200,y:CY}]);
+  var s2 = P.Strokes.list[0], full = plen(s2);
+  ck('sparse two-point curve', s2.pts.length === 2);
+  var a2 = ts(s2.pts[0].p), b2 = ts(s2.pts[1].p);
+  P.setTool('erase'); P.TOOL.sizeMM = 120;
+  pen([{x:(a2.x+b2.x)/2,y:(a2.y+b2.y)/2},{x:(a2.x+b2.x)/2+1,y:(a2.y+b2.y)/2}]);
+  ck('a thin eraser splits even a two-point curve', P.Strokes.list.length === 2,
+     'n=' + P.Strokes.list.length);
+  var kept = P.Strokes.list.reduce(function(s,x){ return s + plen(x); }, 0);
+  ck('the cut width matches the eraser diameter',
+     Math.abs(P.worldToPx(full-kept) - 2*erasePx) < erasePx*0.5,
+     'gap ' + P.worldToPx(full-kept).toFixed(1) + 'px vs ' + (2*erasePx).toFixed(1) + 'px');
+  ck('new endpoints carry interpolated data',
+     P.Strokes.list[0].pts[1].pressure > 0 && !!P.Strokes.list[0].pts[1].tan);
+  P.History.undo();
+  ck('the split is undoable', P.Strokes.list.length === 1 &&
+     Math.abs(plen(P.Strokes.list[0]) - full) < 1e-9);
+
+  reset();
+  var tiny = Math.max(2, erasePx*0.25);
+  pen([{x:CX-tiny,y:CY},{x:CX,y:CY},{x:CX+tiny,y:CY}]);
+  var c3 = ts(P.Strokes.list[0].pts[1].p);
+  P.setTool('erase'); P.TOOL.sizeMM = 120;
+  pen([{x:c3.x,y:c3.y},{x:c3.x+1,y:c3.y}]);
+  ck('a fully covered curve is removed outright', P.Strokes.list.length === 0);
+
+  reset();
+  pen([{x:CX-150,y:CY},{x:CX-75,y:CY},{x:CX,y:CY},{x:CX+75,y:CY},{x:CX+150,y:CY}]);
+  var v1 = ts(P.Strokes.list[0].pts[1].p);
+  P.setTool('vacuum');
+  pen([{x:v1.x,y:v1.y},{x:v1.x+1,y:v1.y}]);
+  ck('vacuum deletes the whole curve', P.Strokes.list.length === 0);
+  P.History.undo();
+  ck('vacuum is undoable', P.Strokes.list.length === 1);
+
+  /* ================= C.9 draw shape ================= */
+  group('C.9  Draw Shape');
+  reset(); P.setTool('shape');
+  var wob = [];
+  for(i=0;i<=20;i++) wob.push({x:CX-150+i*15, y:CY+Math.sin(i*1.7)*3});
+  pen(wob);
+  var sh = P.Strokes.list[0];
+  var A = sh.pts[0].p, B = sh.pts[sh.pts.length-1].p, ab = B.clone().sub(A), L = ab.length(), dev = 0;
+  for(i=0;i<sh.pts.length;i++) dev = Math.max(dev, sh.pts[i].p.clone().sub(A).cross(ab).length()/L);
+  ck('a nearly straight stroke snaps to a line', dev < L*0.005, 'dev/len ' + (dev/L).toExponential(1));
+
+  reset(); P.setTool('shape');
+  pen(circle(CX, CY, 90, 40));
+  var ci = P.Strokes.list[0];
+  /* a closed circle repeats its first point to shut the loop; counting it
+     twice would drag the centroid off centre and fake an ellipse */
+  var uniq = ci.pts.slice();
+  if(uniq.length > 1 && uniq[0].p.distanceTo(uniq[uniq.length-1].p) < 1e-9) uniq.pop();
+  var ctr = new THREE.Vector3();
+  for(i=0;i<uniq.length;i++) ctr.add(uniq[i].p);
+  ctr.multiplyScalar(1/uniq.length);
+  var rlo = Infinity, rhi = -Infinity;
+  for(i=0;i<uniq.length;i++){
+    var rr = uniq[i].p.distanceTo(ctr); rlo = Math.min(rlo,rr); rhi = Math.max(rhi,rr);
+  }
+  ck('a rough loop snaps to a perfect circle', (rhi-rlo) < rhi*0.01,
+     'radius ' + rlo.toFixed(4) + '–' + rhi.toFixed(4) + ', ' + uniq.length + ' pts');
+  ck('the fitted circle is closed', ci.pts.length === uniq.length + 1);
+
+  /* ================= C.10 mirror ================= */
+  group('C.10  Mirror');
+  reset(); P.TOOL.mirror = 'x';
+  pen([{x:CX+60,y:CY-40},{x:CX+90,y:CY-20},{x:CX+120,y:CY}]);
+  ck('mirror emits a second curve', P.Strokes.list.length === 2);
+  var m1 = P.Strokes.list[0].pts[0].p, m2 = P.Strokes.list[1].pts[0].p;
+  ck('mirrored across X only', Math.abs(m1.x+m2.x) < 1e-6 &&
+     Math.abs(m1.y-m2.y) < 1e-6 && Math.abs(m1.z-m2.z) < 1e-6);
+  P.History.undo();
+  ck('undo removes both halves', P.Strokes.list.length === 0);
+
+  /* ================= A.7 loft ================= */
+  group('A.7  Loft');
+  reset();
+  pen([{x:CX-120,y:CY-90},{x:CX-60,y:CY-110},{x:CX,y:CY-90}]);
+  pen([{x:CX-120,y:CY+90},{x:CX-60,y:CY+70},{x:CX,y:CY+90}]);
+  P.setTool('loft');
+  var LA = ts(P.Strokes.list[0].pts[1].p), LB = ts(P.Strokes.list[1].pts[1].p);
+  pen([{x:LA.x,y:LA.y}]); pen([{x:LB.x,y:LB.y}]);
+  ck('two curves picked in sequence', P.Tools.loftCount() === 2);
+  P.Tools.loftPreview(1);
+  ck('loft preview builds', !!P.stagedGuide);
+  var sharp = P.Tools.loftPreview(0);
+  var sharpBox = new THREE.Box3().setFromObject(sharp.mesh).getSize(new THREE.Vector3()).length();
+  var smooth = P.Tools.loftPreview(1);
+  var smoothBox = new THREE.Box3().setFromObject(smooth.mesh).getSize(new THREE.Vector3()).length();
+  ck('tension changes the surface', Math.abs(sharpBox - smoothBox) > 1e-6 || sharpBox > 0);
+  ck('loft commits to an active guide', P.Tools.loftCommit() &&
+     P.Guides.active && P.Guides.active.kind === 'loft');
+
+  /* ================= A.8 primitives ================= */
+  group('A.8  Primitives');
+  reset(); P.setTool('prim');
+  ck('primitive is staged at the origin', !!P.stagedGuide &&
+     P.stagedGuide.obj.position.length() === 0);
+  var kinds = P.Guides.PRIMITIVES;
+  ck('cube, pyramid, sphere and tube are all offered',
+     kinds.length === 4 && kinds.indexOf('cube') >= 0 && kinds.indexOf('pyramid') >= 0 &&
+     kinds.indexOf('sphere') >= 0 && kinds.indexOf('tube') >= 0, kinds.join(', '));
+  P.Tools.primPreview('tube', 6, 0);
+  ck('segment and taper sliders rebuild it',
+     P.stagedGuide.primSeg === 6 && P.stagedGuide.primTaper === 0);
+  P.Tools.primCommit();
+  ck('primitive commits to an active guide', P.Guides.active.kind === 'primitive');
+  ck('bend is unavailable on a primitive guide', !P.Guides.active.sweep);
+
+  /* ================= A.5 / A.10 guide lifecycle ================= */
+  group('A.5 / A.10  Guide lifecycle');
+  reset(); P.TOOL.autoGuide = true;
+  pen([{x:CX-60,y:CY-60},{x:CX,y:CY-30},{x:CX+60,y:CY-60}]);
+  ck('guide created', !!P.Guides.active);
+  P.Guides.setOpacity(null, 5);
+  ck('opacity can never reach fully opaque',
+     P.Guides.active.opacity === P.TUNE.guideOpacityMax, 'max ' + P.TUNE.guideOpacityMax);
+  P.Guides.setOpacity(null, 0);
+  ck('opacity can reach 0%', P.Guides.active.opacity === 0);
+  P.Tools.saveGuide();
+  ck('save moves it to resources and frees the slot',
+     P.Guides.resources.length === 1 && !P.Guides.active);
+  P.Tools.activateResource(P.Guides.resources[0]);
+  ck('a saved guide can be made active again', !!P.Guides.active);
+  P.Tools.closeGuide();
+  ck('close removes it', !P.Guides.active);
+  P.History.undo();
+  ck('close is undoable', !!P.Guides.active);
+
+  /* ================= B navigation ================= */
+  group('B  Navigation');
+  reset();
+  P.VIEW.theta = 0.3; P.VIEW.phi = 1.3; P.applyCamera();
+  ck('double-tap snaps to a named orthographic view',
+     typeof P.snapNearestOrtho() === 'string');
+  ck('six standard views exist', P.ORTHO_VIEWS.length === 6);
+  ck('projection toggles to orthographic',
+     P.toggleProjection() === 'Orthographic' && P.cam().isOrthographicCamera === true);
+  P.toggleProjection();
+  ck('and back to perspective', P.cam().isPerspectiveCamera === true);
+  P.VIEW.focal = 5; P.applyCamera();
+  ck('focal clamps at the documented 10mm floor', P.VIEW.focal === 10);
+  P.VIEW.focal = 9000; P.applyCamera();
+  ck('focal clamps at the documented 500mm ceiling', P.VIEW.focal === 500);
+  P.VIEW.focal = 50; P.applyCamera();
+  ck('one grid unit is 1000mm', Math.abs(1 / P.MM - 1000) < 1e-9);
+
+  /* ================= transforms ================= */
+  group('D.1  Joystick transform');
+  reset();
+  pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+  var s4 = P.Strokes.list[0], p0 = s4.pts[0].p.clone(), r4 = s4.baseRadius;
+  P.Strokes.setSelected(s4, true);
+  ck('selection becomes the transform target', P.Tools.transformTarget().kind === 'strokes');
+  P.Tools.beginTransform();
+  P.Tools.stepTransform(new THREE.Matrix4().makeTranslation(0.5,0,0));
+  P.Tools.endTransform();
+  ck('move translates the selection', Math.abs(s4.pts[0].p.x - (p0.x+0.5)) < 1e-6);
+  P.History.undo();
+  ck('transform is undoable', s4.pts[0].p.distanceTo(p0) < 1e-6);
+  var ctr2 = P.Tools.transformCentre();
+  P.Tools.beginTransform();
+  P.Tools.stepTransform(new THREE.Matrix4().makeTranslation(ctr2.x,ctr2.y,ctr2.z)
+    .multiply(new THREE.Matrix4().makeScale(2,2,2))
+    .multiply(new THREE.Matrix4().makeTranslation(-ctr2.x,-ctr2.y,-ctr2.z)));
+  P.Tools.endTransform();
+  ck('uniform scale also scales thickness', Math.abs(s4.baseRadius - r4*2) < 1e-9);
+
+  /* ================= C.4 cross-section persistence ================= */
+  group('C.4  Rotation preserves the cross-section');
+  reset();
+  pen([{x:CX-80,y:CY-40},{x:CX-20,y:CY},{x:CX+40,y:CY+10},{x:CX+90,y:CY-20}]);
+  var s5 = P.Strokes.list[0];
+  function sig(x){
+    var dd=[]; for(var m=0;m<x.pts.length;m++) for(var n2=m+1;n2<x.pts.length;n2++)
+      dd.push(x.pts[m].p.distanceTo(x.pts[n2].p)); return dd;
+  }
+  var before = sig(s5), rolls = s5.pts.map(function(q){ return q.roll; });
+  P.Strokes.transform([s5], new THREE.Matrix4().makeRotationY(1.1));
+  var after = sig(s5), drift = 0;
+  for(i=0;i<before.length;i++) drift = Math.max(drift, Math.abs(before[i]-after[i]));
+  var orth = 0;
+  for(i=0;i<s5.pts.length;i++) orth = Math.max(orth, Math.abs(s5.pts[i].tan.dot(s5.pts[i].ref)));
+  ck('shape is unchanged by rotation', drift < 1e-9, 'drift ' + drift.toExponential(1));
+  ck('frames stay orthonormal', orth < 1e-6, 'max |t·r| ' + orth.toExponential(1));
+  ck('roll is carried, not re-derived',
+     rolls.every(function(r,k){ return Math.abs(r - s5.pts[k].roll) < 1e-12; }));
+
+  /* ================= history ================= */
+  group('C.8  Undo / redo coverage');
+  reset();
+  ck('history starts empty', !P.History.canUndo() && !P.History.canRedo());
+  pen([{x:CX-40,y:CY},{x:CX,y:CY},{x:CX+40,y:CY}]);
+  ck('draw pushes a command', P.History.canUndo());
+  P.History.undo();
+  ck('undo empties the scene', P.Strokes.list.length === 0 && P.History.canRedo());
+  P.History.redo();
+  ck('redo restores it', P.Strokes.list.length === 1);
+  ck('undo depth is bounded', P.TUNE.undoDepth > 0);
+
+  /* ================= B.1 gestures ================= */
+  group('B.1  Gesture set');
+  function touch(type, id, x, y, b){
+    P.elStage.dispatchEvent(new W.PointerEvent(type, {pointerId:id, pointerType:'touch',
+      clientX:x, clientY:y, buttons: b === undefined ? 1 : b, pressure:0.5,
+      bubbles:true, cancelable:true}));
+  }
+  function tap(ids){
+    var k;
+    for(k=0;k<ids.length;k++) touch('pointerdown', ids[k], CX+k*40, CY);
+    for(k=0;k<ids.length;k++) touch('pointerup',   ids[k], CX+k*40, CY, 0);
+  }
+  function navReset(){
+    reset(); P.VIEW.pinned = false; P.killSpin(); P.cancelViewAnim();
+  }
+
+  navReset();
+  var th0 = P.VIEW.theta;
+  touch('pointerdown',1,CX,CY); touch('pointermove',1,CX+80,CY+30); touch('pointerup',1,CX+80,CY+30,0);
+  ck('one-finger swipe orbits', P.VIEW.theta !== th0);
+  ck('release leaves rotation momentum', P.tickSpin() === true);
+  P.killSpin();
+
+  navReset();
+  var rad0 = P.VIEW.radius;
+  touch('pointerdown',1,CX-60,CY); touch('pointerdown',2,CX+60,CY);
+  touch('pointermove',1,CX-120,CY); touch('pointermove',2,CX+120,CY);
+  touch('pointerup',1,CX-120,CY,0); touch('pointerup',2,CX+120,CY,0);
+  ck('pinch apart zooms in', P.VIEW.radius < rad0,
+     rad0.toFixed(2) + ' -> ' + P.VIEW.radius.toFixed(2));
+
+  navReset();
+  var piv0 = P.VIEW.pivot.clone();
+  touch('pointerdown',1,CX-40,CY); touch('pointerdown',2,CX+40,CY);
+  touch('pointermove',1,CX+30,CY); touch('pointermove',2,CX+110,CY);
+  touch('pointerup',1,CX+30,CY,0); touch('pointerup',2,CX+110,CY,0);
+  ck('two-finger swipe pans', P.VIEW.pivot.distanceTo(piv0) > 1e-6);
+  ck('panning pins the orbit point', P.VIEW.pinned === true);
+
+  navReset();
+  touch('pointerdown',1,CX-60,CY); touch('pointerdown',2,CX+60,CY);
+  touch('pointermove',1,CX,CY-60); touch('pointermove',2,CX,CY+60);
+  touch('pointerup',1,CX,CY-60,0); touch('pointerup',2,CX,CY+60,0);
+  ck('two-finger twist rolls the canvas', Math.abs(P.VIEW.roll) > 0.5);
+
+  navReset();
+  var foc0 = P.VIEW.focal;
+  touch('pointerdown',1,CX-60,CY); touch('pointerdown',2,CX,CY); touch('pointerdown',3,CX+60,CY);
+  touch('pointermove',1,CX-60,CY-120); touch('pointermove',2,CX,CY-120); touch('pointermove',3,CX+60,CY-120);
+  var focUp = P.VIEW.focal;
+  touch('pointerup',1,CX-60,CY-120,0); touch('pointerup',2,CX,CY-120,0); touch('pointerup',3,CX+60,CY-120,0);
+  ck('three-finger swipe up lengthens the lens', focUp > foc0,
+     foc0 + 'mm -> ' + focUp.toFixed(0) + 'mm');
+  ck('lens stays within 10-500mm', focUp >= P.TUNE.focalMin && focUp <= P.TUNE.focalMax);
+
+  navReset();
+  P.VIEW.theta = 0.35; P.VIEW.phi = 1.35; P.applyCamera();
+  tap([11]); tap([11]);
+  ck('one-finger double-tap snaps the view', P.viewAnimating() === true);
+  ck('and does not touch the projection', P.VIEW.ortho === false);
+  P.cancelViewAnim();
+
+  navReset();
+  tap([21,22,23]); tap([21,22,23]);
+  ck('three-finger double-tap flips to orthographic', P.VIEW.ortho === true);
+  tap([21,22,23]); tap([21,22,23]);
+  ck('and back again', P.VIEW.ortho === false);
+
+  navReset();
+  touch('pointerdown',31,CX-50,CY); touch('pointerdown',32,CX,CY); touch('pointerdown',33,CX+50,CY);
+  touch('pointerup',31,CX-50,CY,0); touch('pointerup',32,CX,CY,0); touch('pointerup',33,CX+50,CY,0);
+  touch('pointerdown',31,CX-50,CY); touch('pointerdown',32,CX,CY); touch('pointerdown',33,CX+50,CY);
+  touch('pointerup',33,CX+50,CY,0); touch('pointerup',31,CX-50,CY,0); touch('pointerup',32,CX,CY,0);
+  ck('fingers lifted one at a time still count as three', P.VIEW.ortho === true);
+
+  navReset();
+  touch('pointerdown',11,CX,CY); touch('pointermove',11,CX+90,CY+40); touch('pointerup',11,CX+90,CY+40,0);
+  touch('pointerdown',11,CX,CY); touch('pointermove',11,CX+90,CY+40); touch('pointerup',11,CX+90,CY+40,0);
+  ck('two swipes are not a double-tap', !P.viewAnimating());
+  P.killSpin();
+
+  navReset();
+  tap([11]); tap([21,22,23]);
+  ck('mismatched finger counts are not a double-tap',
+     P.VIEW.ortho === false && !P.viewAnimating());
+
+  /* ================= palm rejection ================= */
+  group('Palm rejection');
+  navReset();
+  /* pin the pivot: committing the pen stroke would otherwise recentre the view
+     automatically, which moves theta for reasons that have nothing to do with
+     the palm this test is about */
+  P.VIEW.pinned = true;
+  touch('pointerdown',41,CX-100,CY);
+  var thPalm = P.VIEW.theta;
+  P.elStage.dispatchEvent(new W.PointerEvent('pointerdown',{pointerId:42, pointerType:'pen',
+    clientX:CX, clientY:CY, buttons:1, pressure:0.6, bubbles:true, cancelable:true}));
+  touch('pointermove',41,CX-40,CY+60);
+  ck('a palm cannot orbit while the pen is down', P.VIEW.theta === thPalm);
+  P.elStage.dispatchEvent(new W.PointerEvent('pointerup',{pointerId:42, pointerType:'pen',
+    clientX:CX, clientY:CY, buttons:0, pressure:0, bubbles:true, cancelable:true}));
+  touch('pointermove',41,CX+60,CY+120);
+  ck('and stays blocked after the pen lifts', P.VIEW.theta === thPalm);
+  touch('pointerup',41,CX+60,CY+120,0);
+  touch('pointerdown',41,CX,CY); touch('pointermove',41,CX+70,CY);
+  ck('a genuinely new touch orbits again', P.VIEW.theta !== thPalm);
+  touch('pointerup',41,CX+70,CY,0);
+
+  /* ================= persistence ================= */
+  group('Document — save, restore, export');
+
+  function buildScene(){
+    reset();
+    P.TOOL.autoGuide = true;
+    pen(circle(CX, CY, 60));                       // makes a guide
+    P.setTool('draw');
+    P.VIEW.theta += 0.7; P.applyCamera();
+    pen([{x:CX-80,y:CY-40},{x:CX-20,y:CY},{x:CX+50,y:CY+20},{x:CX+90,y:CY-10}]);
+    pen([{x:CX-70,y:CY+60},{x:CX,y:CY+80},{x:CX+70,y:CY+55}]);
+    P.Tools.saveGuide();                           // one guide into resources
+    P.TOOL.autoGuide = true;
+    pen(circle(CX, CY, 40));                       // and a fresh active guide
+    P.ENV.bg.set('#1a2030'); P.applyEnv();
+    P.TOOL.sizeMM = 27; P.TOOL.color.set('#39c2c9'); P.TOOL.brush = 'flat';
+  }
+
+  function snapshot(){
+    return {
+      strokes: P.Strokes.list.map(function(st){
+        return {
+          brush:st.brush, color:st.color.getHexString(), r:st.baseRadius,
+          op:st.opacity, target:st.pressureTarget,
+          pts:st.pts.map(function(q){
+            return [q.p.x,q.p.y,q.p.z, q.tan?q.tan.x:0, q.tan?q.tan.y:0, q.tan?q.tan.z:0,
+                    q.ref?q.ref.x:0, q.ref?q.ref.y:0, q.ref?q.ref.z:0,
+                    q.roll, q.pressure];
+          })
+        };
+      }),
+      guide: P.Guides.active && P.Guides.active.sweep ? {
+        local: P.Guides.active.sweep.local.map(function(l){ return [l.x,l.y,l.z]; }),
+        path:  P.Guides.active.sweep.path.map(function(p){ return [p.x,p.y,p.z]; }),
+        ai:    P.Guides.active.sweep.anchorIndex,
+        anchor:P.Guides.active.sweep.anchor.toArray()
+      } : null,
+      resources: P.Guides.resources.length,
+      bg: P.ENV.bg.getHexString(),
+      tool: [P.TOOL.brush, P.TOOL.sizeMM, P.TOOL.color.getHexString()]
+    };
+  }
+
+  function maxDelta(a, b){
+    if(a.strokes.length !== b.strokes.length) return Infinity;
+    var worst = 0;
+    for(var i=0;i<a.strokes.length;i++){
+      var A = a.strokes[i], B = b.strokes[i];
+      if(A.pts.length !== B.pts.length) return Infinity;
+      if(A.brush !== B.brush || A.color !== B.color) return Infinity;
+      worst = Math.max(worst, Math.abs(A.r - B.r));
+      for(var j=0;j<A.pts.length;j++){
+        for(var k=0;k<A.pts[j].length;k++){
+          worst = Math.max(worst, Math.abs(A.pts[j][k] - B.pts[j][k]));
+        }
+      }
+    }
+    if(!!a.guide !== !!b.guide) return Infinity;
+    if(a.guide){
+      if(a.guide.ai !== b.guide.ai) return Infinity;
+      if(a.guide.path.length !== b.guide.path.length) return Infinity;
+      for(i=0;i<a.guide.path.length;i++){
+        for(var m=0;m<3;m++) worst = Math.max(worst, Math.abs(a.guide.path[i][m]-b.guide.path[i][m]));
+      }
+      for(i=0;i<a.guide.local.length;i++){
+        for(m=0;m<3;m++) worst = Math.max(worst, Math.abs(a.guide.local[i][m]-b.guide.local[i][m]));
+      }
+    }
+    return worst;
+  }
+
+  buildScene();
+  var before = snapshot();
+  ck('scene built for the round trip',
+     before.strokes.length >= 2 && !!before.guide && before.resources === 1,
+     before.strokes.length + ' curves, ' + before.resources + ' saved guide');
+
+  var json = JSON.stringify(P.Doc.serialize());
+  ck('serialises to JSON', json.length > 100, (json.length/1024).toFixed(1) + ' KB');
+
+  P.Doc.clear();
+  ck('clear empties the scene', P.Strokes.list.length === 0 && !P.Guides.active);
+
+  var ok = P.Doc.restore(JSON.parse(json));
+  ck('restores without error', ok === true);
+  var after = snapshot();
+  /* the format quantises to 1e-6 of a world unit, i.e. a micrometre */
+  ck('geometry round-trips within quantisation', maxDelta(before, after) <= 1.01e-6,
+     'max delta ' + maxDelta(before, after).toExponential(1));
+  ck('saved guide resources survive', after.resources === before.resources);
+  ck('background survives', after.bg === before.bg);
+  ck('brush settings survive',
+     after.tool[0] === before.tool[0] && after.tool[1] === before.tool[1] &&
+     after.tool[2] === before.tool[2]);
+  ck('a restored guide is still bendable', !!(P.Guides.active && P.Guides.active.sweep));
+  ck('history is cleared by a restore, not left dangling', !P.History.canUndo());
+
+  var tv2 = P.ORTHO_VIEWS[4];
+  P.VIEW.theta = tv2.theta; P.VIEW.phi = tv2.phi; P.applyCamera();
+  P.setTool('bend');
+  pen(circle(CX, CY, 150, 48));
+  ck('and bending it actually works after a reload',
+     P.Guides.active.sweep.anchorIndex === 0);
+  ck('that bend is itself undoable', P.History.canUndo());
+
+  var badDoc = P.Doc.restore({format:'notplume', version:1});
+  ck('a foreign file is rejected', badDoc === false);
+  var future = P.Doc.restore({format:'plume', version:999});
+  ck('a newer file version is rejected', future === false);
+
+  /* ================= compact / responsive ================= */
+  group('Responsive layout');
+  /* NB: the panels live in the iframe, so query W.document, not ours */
+  var D = W.document;
+  ck('the sheet panels exist', !!D.getElementById('brush') && !!D.getElementById('tools'));
+  P.UI.openSheet('brush');
+  ck('opening a sheet marks it open', D.getElementById('brush').classList.contains('open'));
+  P.UI.openSheet('tools');
+  ck('opening another closes the first',
+     !D.getElementById('brush').classList.contains('open') &&
+     D.getElementById('tools').classList.contains('open'));
+  ck('back closes the open sheet', P.UI.closeTopSheet() === true);
+  ck('and reports nothing left to close', P.UI.closeTopSheet() === false);
+  ck('the dock exists for the compact layout', !!D.getElementById('dock'));
+  ck('back also unwinds selection and history', typeof P.onBack === 'function');
+
+  /* Force the compact layout and measure it for real. Transitions are pinned
+     off first: these are layout assertions, and racing a 200ms slide makes
+     them flaky (and never resolves at all in a tab that is not compositing). */
+  (function compactLayout(){
+    var kill = D.createElement('style');
+    kill.textContent = '*{transition:none !important;animation:none !important}';
+    D.head.appendChild(kill);
+
+    /* the compact rules are gated on the body class, not a media query, so
+       they can be exercised at any viewport width */
+    var wasCompact = P.UI.compact;
+    D.body.classList.add('compact');
+    P.UI.compact = true;
+    var sheetIds = ['tools','brush','joy','stagePanel'];
+    for(var s=0;s<sheetIds.length;s++){
+      D.getElementById(sheetIds[s]).classList.remove('open','hidden');
+    }
+
+    function rect(id){ return D.getElementById(id).getBoundingClientRect(); }
+    var vh = W.document.documentElement.clientHeight;
+    var vw = W.document.documentElement.clientWidth;
+
+    var parked = [], ids = sheetIds;
+    for(var i=0;i<ids.length;i++) if(rect(ids[i]).top < vh-1) parked.push(ids[i]);
+    ck('closed sheets park off-screen', parked.length === 0, parked.join(',') || 'all clear');
+
+    P.UI.openSheet('brush');
+    var b = rect('brush');
+    ck('an open sheet is on-screen and clears the dock',
+       b.top < vh-80 && b.bottom <= vh-30, 'top=' + b.top.toFixed(0));
+    ck('an open sheet is height-capped', b.height <= vh*0.58, 'h=' + b.height.toFixed(0));
+
+    P.UI.openSheet('tools');
+    ck('opening one sheet parks the other', rect('brush').top >= vh-1);
+    /* only the VISIBLE buttons have a touch target — each toggle pair keeps
+       its partner in the DOM but hidden behind a repeat tap */
+    var tb = Array.from(D.getElementById('tools').querySelectorAll('button[data-tool]'))
+               .filter(function(b){ return b.getBoundingClientRect().width > 0; });
+    var small = 0;
+    for(i=0;i<tb.length;i++){
+      var rr = tb[i].getBoundingClientRect();
+      if(rr.height < 44 || rr.width < 44) small++;
+    }
+    ck('compact tool buttons meet a 44px target', small === 0 && tb.length > 0,
+       tb.length + ' visible buttons');
+    ck('toggle pairs stay merged when compact', tb.length === 4,
+       tb.map(function(b){ return b.dataset.tool; }).join(','));
+
+    var dk = rect('dock');
+    ck('dock is pinned to the bottom', Math.abs(dk.bottom - vh) < 2);
+    ck('context bar clears the dock', rect('ctx').bottom <= dk.top + 1);
+    ck('no horizontal overflow when compact',
+       W.document.documentElement.scrollWidth <= vw + 1);
+
+    P.UI.closeTopSheet();
+    kill.remove();
+    D.body.classList.toggle('compact', wasCompact);
+    P.UI.compact = wasCompact;
+    P.UI.applyMode();
+  })();
+
+  /* ================= finger-first gestures ================= */
+  group('Finger-first input');
+  var savedFinger = P.Input.fingerPen;
+
+  navReset();
+  P.Input.fingerPen = true;
+  P.TOOL.autoGuide = false;
+  P.setTool('draw');
+  P.Strokes.clear(); P.History.clear();
+  /* one finger draws when finger-pen is on */
+  touch('pointerdown', 61, CX-60, CY);
+  touch('pointermove', 61, CX,    CY);
+  touch('pointermove', 61, CX+60, CY);
+  touch('pointerup',   61, CX+60, CY, 0);
+  ck('one finger draws a curve in finger mode', P.Strokes.list.length === 1,
+     'n=' + P.Strokes.list.length);
+
+  /* two fingers orbit rather than pan */
+  navReset(); P.Input.fingerPen = true; P.VIEW.pinned = true;
+  var th2 = P.VIEW.theta, piv2 = P.VIEW.pivot.clone();
+  touch('pointerdown', 71, CX-50, CY); touch('pointerdown', 72, CX+50, CY);
+  touch('pointermove', 71, CX-50+70, CY); touch('pointermove', 72, CX+50+70, CY);
+  touch('pointerup', 71, CX+20, CY, 0); touch('pointerup', 72, CX+120, CY, 0);
+  ck('two fingers orbit in finger mode', Math.abs(P.VIEW.theta - th2) > 1e-6);
+  ck('and do not pan', P.VIEW.pivot.distanceTo(piv2) < 1e-9);
+  P.killSpin();
+
+  /* three fingers pan */
+  navReset(); P.Input.fingerPen = true;
+  var piv3 = P.VIEW.pivot.clone();
+  touch('pointerdown', 81, CX-60, CY); touch('pointerdown', 82, CX, CY);
+  touch('pointerdown', 83, CX+60, CY);
+  touch('pointermove', 81, CX-60, CY-70); touch('pointermove', 82, CX, CY-70);
+  touch('pointermove', 83, CX+60, CY-70);
+  touch('pointerup', 81, CX-60, CY-70, 0); touch('pointerup', 82, CX, CY-70, 0);
+  touch('pointerup', 83, CX+60, CY-70, 0);
+  ck('three fingers pan in finger mode', P.VIEW.pivot.distanceTo(piv3) > 1e-6);
+
+  /* a second finger mid-stroke abandons the stroke and starts navigating */
+  navReset(); P.Input.fingerPen = true; P.VIEW.pinned = true;
+  P.Strokes.clear(); P.History.clear();
+  P.setTool('draw'); P.TOOL.autoGuide = false;
+  touch('pointerdown', 91, CX-40, CY);
+  touch('pointermove', 91, CX,    CY);
+  var th4 = P.VIEW.theta;
+  touch('pointerdown', 92, CX+80, CY);          // second finger lands
+  ck('a second finger cancels the stroke in progress', P.Strokes.list.length === 0);
+  touch('pointermove', 91, CX+40, CY);
+  touch('pointermove', 92, CX+160, CY);
+  ck('and both fingers then drive navigation', Math.abs(P.VIEW.theta - th4) > 1e-6);
+  touch('pointerup', 91, CX+40, CY, 0); touch('pointerup', 92, CX+160, CY, 0);
+  P.killSpin();
+
+  P.Input.fingerPen = savedFinger;
+
+  /* ================= panel layout / the menu collision ================= */
+  group('Layout — panels must not sit on top of each other');
+  var DD = W.document;
+  function rct(id){ return DD.getElementById(id).getBoundingClientRect(); }
+  function shown(id){ return !DD.getElementById(id).classList.contains('hidden'); }
+  function zi(id){ return parseInt(W.getComputedStyle(DD.getElementById(id)).zIndex,10) || 0; }
+  function boxesOverlap(a,b){
+    return !(a.right<=b.left || b.right<=a.left || a.bottom<=b.top || b.bottom<=a.top);
+  }
+  function scan(ids){
+    var clash = [];
+    for(var i=0;i<ids.length;i++) for(var j=i+1;j<ids.length;j++){
+      if(!shown(ids[i]) || !shown(ids[j])) continue;
+      if(boxesOverlap(rct(ids[i]), rct(ids[j]))) clash.push(ids[i]+'/'+ids[j]);
+    }
+    return clash;
+  }
+
+  reset();
+  P.UI.applyMode();
+  var base = ['topleft','viewInfo','tools','brush','ctx'];
+  ck('no panels overlap at rest', scan(base).length === 0, scan(base).join(', ') || 'clean');
+
+  /* the reported bug: the settings menu used to sit exactly on the brush rail */
+  P.UI.setMenu(true);
+  var mm = rct('sysMenu'), bb = rct('brush');
+  ck('settings menu opens', shown('sysMenu'));
+  ck('menu no longer shares the brush rail origin',
+     !(Math.abs(mm.left-bb.left) < 2 && Math.abs(mm.top-bb.top) < 2),
+     'menu@'+mm.left.toFixed(0)+','+mm.top.toFixed(0)+' brush@'+bb.left.toFixed(0)+','+bb.top.toFixed(0));
+  ck('menu stacks above the rails', zi('sysMenu') > zi('brush'),
+     'z '+zi('sysMenu')+' vs '+zi('brush'));
+  ck('a scrim sits between them', shown('scrim') &&
+     zi('scrim') < zi('sysMenu') && zi('scrim') > zi('brush'));
+  ck('menu controls are laid out, not collapsed',
+     rct('optFinger').width > 10 && rct('focal').width > 10);
+  P.UI.setMenu(false);
+  ck('menu closes again', !shown('sysMenu') && !shown('scrim'));
+
+  DD.getElementById('btnStage').click();
+  ck('stage panel clears the tool rail', scan(base.concat(['stagePanel'])).length === 0,
+     scan(base.concat(['stagePanel'])).join(', ') || 'clean');
+  DD.getElementById('btnStage').click();
+
+  ck('joystick is hidden while nothing is selected', !shown('joy'));
+  reset();
+  pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  P.onSceneChange();
+  ck('joystick appears when there is something to move', shown('joy'));
+  ck('and still does not overlap anything', scan(base.concat(['joy'])).length === 0,
+     scan(base.concat(['joy'])).join(', ') || 'clean');
+  P.Strokes.clearSelection(); P.onSceneChange();
+  ck('joystick hides again', !shown('joy'));
+
+  /* ================= brushes ================= */
+  group('Brushes');
+  reset();
+  var names = Object.keys(P.BRUSH);
+  ck('ten brush profiles are defined', names.length === 10, names.join(', '));
+  var uiBrushes = [];
+  var btns = DD.querySelectorAll('#brushGrid button');
+  for(i=0;i<btns.length;i++) uiBrushes.push(btns[i].dataset.brush);
+  var missing = names.filter(function(n){ return uiBrushes.indexOf(n) < 0; });
+  ck('every brush has a button', missing.length === 0, missing.join(',') || 'all present');
+
+  var broken = [];
+  names.forEach(function(bn){
+    P.Strokes.clear();
+    P.TOOL.brush = bn;
+    pen([{x:CX-90,y:CY-30},{x:CX-30,y:CY},{x:CX+30,y:CY+18},{x:CX+90,y:CY-14}]);
+    var st = P.Strokes.list[0];
+    if(!st || !st.mesh){ broken.push(bn+':no mesh'); return; }
+    var pos = st.mesh.geometry.attributes.position;
+    var nor = st.mesh.geometry.attributes.normal;
+    if(pos.count < 8) broken.push(bn+':too few verts');
+    for(var q=0;q<pos.count*3;q++){
+      if(!isFinite(pos.array[q])){ broken.push(bn+':NaN pos'); break; }
+    }
+    for(q=0;q<nor.count*3;q++){
+      if(!isFinite(nor.array[q])){ broken.push(bn+':NaN normal'); break; }
+    }
+  });
+  ck('every brush builds finite geometry', broken.length === 0, broken.join(', ') || '10/10');
+
+  P.Strokes.clear(); P.TOOL.brush = 'glow';
+  pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+  ck('glow is additive and unshaded (C.5)',
+     P.Strokes.list[0].mesh.material.blending === THREE.AdditiveBlending &&
+     P.Strokes.list[0].mesh.material.uniforms.uGlow.value === 1);
+  P.Strokes.clear(); P.TOOL.brush = 'round';
+  pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+  ck('other brushes stay on normal blending',
+     P.Strokes.list[0].mesh.material.blending === THREE.NormalBlending);
+
+  function ringAspect(bn){
+    P.Strokes.clear(); P.TOOL.brush = bn;
+    pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+    var pos = P.Strokes.list[0].mesh.geometry.attributes.position;
+    var lo1=1e9,hi1=-1e9,lo2=1e9,hi2=-1e9;
+    for(var q=2;q<12;q++){
+      lo1=Math.min(lo1,pos.getY(q)); hi1=Math.max(hi1,pos.getY(q));
+      lo2=Math.min(lo2,pos.getZ(q)); hi2=Math.max(hi2,pos.getZ(q));
+    }
+    return (hi1-lo1)/((hi2-lo2)||1e-9);
+  }
+  ck('a square nib really changes the cross-section',
+     Math.abs(ringAspect('chisel') - ringAspect('round')) > 0.05);
+  P.TOOL.brush = 'round';
+
+  /* ================= lasso ================= */
+  group('Lasso select');
+  reset();
+  pen([{x:CX-140,y:CY-60},{x:CX-90,y:CY-60},{x:CX-40,y:CY-60}]);
+  pen([{x:CX+40,y:CY+70},{x:CX+90,y:CY+70},{x:CX+140,y:CY+70}]);
+  ck('two curves to choose between', P.Strokes.list.length === 2);
+  P.setTool('lasso');
+  pen([{x:CX-200,y:CY-120},{x:CX+10,y:CY-120},{x:CX+10,y:CY-10},
+       {x:CX-200,y:CY-10},{x:CX-200,y:CY-120}]);
+  ck('the loop takes only what is inside it', P.Strokes.selection.length === 1,
+     'selected ' + P.Strokes.selection.length);
+  P.History.undo();
+  ck('lasso selection is undoable', P.Strokes.selection.length === 0);
+  P.setTool('draw');
+
+  /* ================= smooth ================= */
+  group('Smooth');
+  reset();
+  var zig = [];
+  for(i=0;i<=24;i++) zig.push({x:CX-160+i*13, y:CY+(i%2?16:-16)});
+  pen(zig);
+  var zs = P.Strokes.list[0];
+  function rough(st){
+    var t = 0;
+    for(var q=1;q<st.pts.length-1;q++){
+      t += st.pts[q].p.clone().multiplyScalar(2)
+             .sub(st.pts[q-1].p).sub(st.pts[q+1].p).length();
+    }
+    return t;
+  }
+  var r0 = rough(zs), hist0 = P.History.idx;
+  P.setTool('smooth'); P.TOOL.sizeMM = 90;
+  for(i=0;i<6;i++) pen(zig);
+  var passes = P.History.idx - hist0;
+  ck('smoothing relaxes the curve', rough(zs) < r0*0.5,
+     r0.toFixed(3) + ' -> ' + rough(zs).toFixed(3));
+  ck('each drag is its own undo step', passes === 6, passes + ' recorded');
+  for(i=0;i<passes;i++) P.History.undo();
+  ck('undoing them all restores the original exactly', Math.abs(rough(zs) - r0) < 1e-9);
+  P.setTool('draw'); P.TOOL.sizeMM = 14;
+
+  /* ================= duplicate / groups ================= */
+  group('Duplicate and groups');
+  reset();
+  pen([{x:CX-60,y:CY-40},{x:CX,y:CY-40},{x:CX+60,y:CY-40}]);
+  pen([{x:CX-60,y:CY+40},{x:CX,y:CY+40},{x:CX+60,y:CY+40}]);
+  P.Strokes.list.forEach(function(st){ P.Strokes.setSelected(st, true); });
+  P.Tools.duplicateSelection();
+  ck('duplicate copies the selection', P.Strokes.list.length === 4);
+  ck('the copies become the new selection', P.Strokes.selection.length === 2);
+  ck('the copy is offset, not coincident',
+     P.Strokes.list[2].pts[0].p.distanceTo(P.Strokes.list[0].pts[0].p) > 1e-6);
+  P.History.undo();
+  ck('duplicate is undoable', P.Strokes.list.length === 2);
+
+  P.Strokes.clearSelection();
+  P.Strokes.list.forEach(function(st){ P.Strokes.setSelected(st, true); });
+  P.Tools.groupSelection();
+  ck('grouping tags the members', !!P.Strokes.list[0].group &&
+     P.Strokes.list[0].group === P.Strokes.list[1].group);
+  P.Strokes.clearSelection();
+  P.Tools.selectWithGroup(P.Strokes.list[0]);
+  ck('picking one member selects the group', P.Strokes.selection.length === 2);
+  var gjson = JSON.stringify(P.Doc.serialize());
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(gjson));
+  ck('groups survive a save/load round trip',
+     !!P.Strokes.list[0].group && P.Strokes.list[0].group === P.Strokes.list[1].group);
+  P.Strokes.list.forEach(function(st){ P.Strokes.setSelected(st, true); });
+  P.Tools.ungroupSelection();
+  ck('ungroup clears the tag', !P.Strokes.list[0].group);
+  P.History.undo();
+  ck('ungroup is undoable', !!P.Strokes.list[0].group);
+
+  /* ================= render correctness ==================
+     These render and read the framebuffer, because the bug they guard against
+     was invisible to every structural check: a translucent stroke blended its
+     own far wall through its near one, so it came out ~1.4x too dense and the
+     error compounded as strokes were layered.                              */
+  group('Render — layering and transparency');
+
+  function shoot(){
+    P.renderer.render(P.scene, P.cam());
+    var s = P.renderer.domElement;
+    var c = W.document.createElement('canvas');
+    c.width = s.width; c.height = s.height;
+    c.getContext('2d').drawImage(s, 0, 0);
+    return {d:c.getContext('2d').getImageData(0,0,c.width,c.height).data, w:c.width, h:c.height};
+  }
+  /* brightest sample in a small box around a world point, so we read the tube
+     body and not an antialiased edge */
+  function probe(img, worldPt){
+    var sp = P.worldToScreen(worldPt, {});
+    var vpo = P.viewport();
+    var sx = Math.round((sp.x-vpo.left)/vpo.w*img.w);
+    var sy = Math.round((sp.y-vpo.top)/vpo.h*img.h);
+    var bv = -1;
+    for(var dy=-3;dy<=3;dy++) for(var dx=-3;dx<=3;dx++){
+      var q = ((sy+dy)*img.w + (sx+dx))*4;
+      if(q < 0 || q >= img.d.length) continue;
+      var v = img.d[q]+img.d[q+1]+img.d[q+2];
+      if(v > bv) bv = v;
+    }
+    return Math.round(bv/3);
+  }
+  function midOf(st){ return st.pts[Math.floor(st.pts.length/2)].p.clone(); }
+
+  /* One "brightest pixel in a box" sample is noisy — which facet of the tube
+     it catches depends on the angle. Average several points along the stroke
+     for a stable brightness estimate. */
+  function meanLevel(st){
+    var img = shoot(), n = 0, sum = 0;
+    var N = st.pts.length;
+    var samples = Math.min(9, N);          // works for a 2-point stroke too
+    for(var s=0; s<samples; s++){
+      var q = Math.round((s + 0.5)/samples * (N-1));
+      var lv = probe(img, st.pts[P.clamp(q, 0, N-1)].p.clone());
+      if(lv > 0){ sum += lv; n++; }
+    }
+    return n ? sum/n : 0;
+  }
+
+  var savedBg = P.ENV.bg.clone();
+  function inkSetup(op, brush){
+    reset();
+    P.VIEW.theta = 0.4; P.VIEW.phi = 1.2; P.applyCamera();
+    P.TOOL.pressureOn = false; P.TOOL.pressureTarget = 'none'; P.TOOL.stableOn = false;
+    P.TOOL.brush = brush || 'round'; P.TOOL.sizeMM = 36;
+    P.TOOL.color.set('#ffffff'); P.TOOL.opacity = op;
+    P.ENV.bg.set('#000000'); P.applyEnv();
+  }
+  var inkPath = [{x:CX-160,y:CY-30},{x:CX-60,y:CY},{x:CX+60,y:CY+18},{x:CX+160,y:CY-10}];
+
+  inkSetup(1.0); pen(inkPath);
+  var opaqueLevel = meanLevel(P.Strokes.list[0]);
+  ck('an opaque stroke renders solid', opaqueLevel > 120,
+     'level ' + opaqueLevel.toFixed(0));
+
+  inkSetup(0.5); pen(inkPath);
+  var halfLevel = meanLevel(P.Strokes.list[0]);
+  var ratio = halfLevel / opaqueLevel;
+  /* 0.50 is correct; 0.69 was the double-sided self-blend. The gate sits well
+     below that signature but loose enough to survive sampling noise. */
+  ck('a 50% stroke renders at ~50%, not blended with its own back wall',
+     ratio > 0.40 && ratio < 0.62,
+     'ratio ' + ratio.toFixed(3) + ' (0.69 when double-sided)');
+
+  ck('strokes cull back faces', P.Strokes.list[0].mesh.material.side === THREE.FrontSide);
+
+  /* every brush must survive culling — a wrongly wound tube would vanish */
+  inkSetup(1.0);
+  var invisible = [];
+  Object.keys(P.BRUSH).forEach(function(bn){
+    P.Strokes.clear();
+    P.TOOL.brush = bn;
+    pen(inkPath);
+    var lvl = probe(shoot(), midOf(P.Strokes.list[0]));
+    if(lvl < 60) invisible.push(bn + ':' + lvl);
+  });
+  ck('no brush is culled inside-out', invisible.length === 0,
+     invisible.join(', ') || 'all 10 visible');
+  ck('every brush is a closed tube', Object.keys(P.BRUSH).every(function(bn){
+    return P.BRUSH[bn].caps === true;
+  }));
+
+  /* a reflection reverses handedness, which is exactly what breaks culling */
+  inkSetup(1.0);
+  P.TOOL.brush = 'round'; P.TOOL.mirror = 'x';
+  pen([{x:CX+70,y:CY-40},{x:CX+130,y:CY},{x:CX+190,y:CY+40}]);
+  var shotM = shoot();
+  ck('mirror produced both halves', P.Strokes.list.length === 2);
+  var origLvl = probe(shotM, midOf(P.Strokes.list[0]));
+  var reflLvl = probe(shotM, midOf(P.Strokes.list[1]));
+  ck('the mirrored half survives back-face culling', reflLvl > origLvl*0.7,
+     'original ' + origLvl + ' vs mirrored ' + reflLvl);
+  P.TOOL.mirror = null;
+
+  /* the in-progress stroke must not change appearance when the pen lifts */
+  inkSetup(1.0);
+  penDown(inkPath[0].x, inkPath[0].y);
+  for(i=1;i<inkPath.length;i++) penMoveTo(inkPath[i].x, inkPath[i].y);
+  var liveMesh = P.Strokes.group.children[P.Strokes.group.children.length-1];
+  var liveSt = liveMesh && liveMesh.userData.stroke;
+  var duringDrag = liveSt ? probe(shoot(), midOf(liveSt)) : -1;
+  var liveSide = liveMesh.material.side, liveTr = liveMesh.material.transparent;
+  penUpAt(inkPath[inkPath.length-1].x, inkPath[inkPath.length-1].y);
+  var committed = probe(shoot(), midOf(P.Strokes.list[0]));
+  ck('live and committed materials match',
+     liveSide === P.Strokes.list[0].mesh.material.side &&
+     liveTr === P.Strokes.list[0].mesh.material.transparent);
+  ck('the stroke does not jump in appearance on pen-up',
+     Math.abs(duringDrag - committed) < 12, duringDrag + ' -> ' + committed);
+
+  /* coincident tubes: retracing the same line must not shimmer */
+  function speckleBox(img){
+    var vpo = P.viewport();
+    var ax = Math.round((CX-170-vpo.left)/vpo.w*img.w), bx = Math.round((CX+170-vpo.left)/vpo.w*img.w);
+    var ay = Math.round((CY-60-vpo.top)/vpo.h*img.h),  by = Math.round((CY+60-vpo.top)/vpo.h*img.h);
+    var sp=0, lit=0;
+    for(var y=Math.max(1,ay); y<Math.min(img.h-1,by); y++){
+      for(var x=Math.max(1,ax); x<Math.min(img.w-1,bx); x++){
+        var q=(y*img.w+x)*4, l=(y*img.w+x-1)*4, rr=(y*img.w+x+1)*4;
+        var v=img.d[q]+img.d[q+1]+img.d[q+2];
+        if(v>90) lit++;
+        var vl=img.d[l]+img.d[l+1]+img.d[l+2], vr=img.d[rr]+img.d[rr+1]+img.d[rr+2];
+        if(Math.abs(v-vl)>60 && Math.abs(v-vr)>60 && Math.sign(v-vl)===Math.sign(v-vr)) sp++;
+      }
+    }
+    return lit ? sp/lit : 0;
+  }
+  inkSetup(1.0); pen(inkPath);
+  var sp1 = speckleBox(shoot());
+  pen(inkPath); pen(inkPath); pen(inkPath);
+  var sp4 = speckleBox(shoot());
+  ck('retracing the same line four times adds no z-fighting speckle',
+     sp4 <= sp1 + 0.005,
+     (sp1*100).toFixed(2) + '% -> ' + (sp4*100).toFixed(2) + '%');
+
+  P.ENV.bg.copy(savedBg); P.applyEnv();
+  P.TOOL.opacity = 1; P.TOOL.stableOn = true; P.TOOL.pressureOn = true;
+  P.TOOL.pressureTarget = 'size';
+
+  /* ================= bend direction ================= */
+  group('A.6  Bend follows the direction drawn');
+  function bendTrial(dx, dy, label){
+    reset();
+    P.TOOL.autoGuide = true; P.TOOL.stableOn = false;
+    var fv2 = P.ORTHO_VIEWS[0];
+    P.VIEW.theta = fv2.theta; P.VIEW.phi = fv2.phi; P.applyCamera();
+    pen([{x:CX-40,y:CY-70},{x:CX,y:CY-70},{x:CX+40,y:CY-70}]);
+    var gg2 = P.Guides.active;
+    var tv3 = P.ORTHO_VIEWS[4];
+    P.VIEW.theta = tv3.theta; P.VIEW.phi = tv3.phi; P.applyCamera();
+    P.setTool('bend');
+    pen([{x:CX,y:CY},{x:CX+dx/2,y:CY+dy/2},{x:CX+dx,y:CY+dy}]);
+    var pth = gg2.sweep.path;
+    var a2 = P.worldToScreen(pth[0],{}), b2 = P.worldToScreen(pth[pth.length-1],{});
+    var drawn = Math.atan2(dy,dx), got = Math.atan2(b2.y-a2.y, b2.x-a2.x);
+    var err = Math.abs(((got-drawn+Math.PI*3)%(Math.PI*2))-Math.PI)*57.3;
+    ck('bend sweeps the way it was drawn — ' + label, err < 20,
+       err.toFixed(0) + ' deg off');
+    P.TOOL.stableOn = true;
+  }
+  bendTrial( 160,   0, 'right');
+  bendTrial(-160,   0, 'left');
+  bendTrial(   0, 160, 'down');
+  bendTrial(   0,-160, 'up');
+
+  /* the doughnut must not depend on where the circle starts */
+  function doughnutBox(startAngle){
+    reset();
+    P.TOOL.autoGuide = true; P.TOOL.stableOn = false;
+    var fv3 = P.ORTHO_VIEWS[0];
+    P.VIEW.theta = fv3.theta; P.VIEW.phi = fv3.phi; P.applyCamera();
+    pen(circle(CX, CY, 70));
+    var gd = P.Guides.active;
+    var tv4 = P.ORTHO_VIEWS[4];
+    P.VIEW.theta = tv4.theta; P.VIEW.phi = tv4.phi; P.applyCamera();
+    P.setTool('bend');
+    var ring = [];
+    for(var q=0;q<=64;q++){
+      var ang = startAngle + q/64*Math.PI*2;
+      ring.push({x:CX+Math.cos(ang)*180, y:CY+Math.sin(ang)*180});
+    }
+    pen(ring);
+    P.TOOL.stableOn = true;
+    return new THREE.Box3().setFromObject(gd.mesh).getSize(new THREE.Vector3());
+  }
+  var d0 = doughnutBox(0), d90 = doughnutBox(Math.PI/2);
+  ck('the doughnut is the same wherever the circle starts',
+     Math.abs(d0.x-d90.x) < 0.1 && Math.abs(d0.y-d90.y) < 0.1,
+     '[' + d0.toArray().map(function(v){return v.toFixed(2);}) + '] vs [' +
+           d90.toArray().map(function(v){return v.toFixed(2);}) + ']');
+
+  /* ================= brush smoothness ================= */
+  group('Brush geometry is smooth along its length');
+  reset();
+  P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.pressureTarget = 'none';
+  P.TOOL.sizeMM = 36;
+  var longPath = [];
+  for(i=0;i<=60;i++) longPath.push({x:CX-300+i*10, y:CY});
+  var worstJag = 0, worstName = '';
+  Object.keys(P.BRUSH).forEach(function(bn){
+    P.Strokes.clear();
+    P.TOOL.brush = bn;
+    pen(longPath);
+    var st2 = P.Strokes.list[0], seg2 = P.BRUSH[bn].seg;
+    var pos2 = st2.mesh.geometry.attributes.position, radii = [];
+    for(var k=0;k<st2.pts.length;k++){
+      var ctr2 = st2.pts[k].p, sum = 0;
+      for(var s2=0;s2<seg2;s2++){
+        var o2 = 2 + k*seg2 + s2;
+        sum += Math.sqrt(Math.pow(pos2.getX(o2)-ctr2.x,2) +
+                         Math.pow(pos2.getY(o2)-ctr2.y,2) +
+                         Math.pow(pos2.getZ(o2)-ctr2.z,2));
+      }
+      radii.push(sum/seg2);
+    }
+    var mean2 = radii.reduce(function(a,b){return a+b;},0)/radii.length, jag = 0;
+    for(k=1;k<radii.length-1;k++) jag += Math.abs(2*radii[k]-radii[k-1]-radii[k+1]);
+    jag = (jag/Math.max(1,radii.length-2))/mean2*100;
+    if(jag > worstJag){ worstJag = jag; worstName = bn; }
+  });
+  ck('no brush has a jagged silhouette', worstJag < 2,
+     'worst ' + worstName + ' at ' + worstJag.toFixed(2) + '% (pencil grain was 9.90%)');
+  P.TOOL.brush = 'round'; P.TOOL.stableOn = true;
+  P.TOOL.pressureOn = true; P.TOOL.pressureTarget = 'size';
+
+  /* ================= imported references (C.1) ================= */
+  group('C.1  Imported images and models as guides');
+
+  var objSrc = ['v 0 0 0','v 1 0 0','v 0 1 0','v 0 0 1','vn 0 0 1','vn 0 1 0',
+                'f 1 2 3','f 1//1 2//1 4//2','f 2 3 4','f 1 3 4'].join('\n');
+  var og = P.Import.parseOBJ(objSrc);
+  ck('OBJ parses', !!og && og.attributes.position.count === 12);
+  ck('OBJ fans an n-gon', (function(){
+    var q2 = P.Import.parseOBJ(['v 0 0 0','v 1 0 0','v 1 1 0','v 0 1 0','f 1 2 3 4'].join('\n'));
+    return q2 && q2.attributes.position.count === 6;
+  })());
+  ck('OBJ handles negative indices', (function(){
+    var q3 = P.Import.parseOBJ(['v 0 0 0','v 1 0 0','v 0 1 0','f -3 -2 -1'].join('\n'));
+    return q3 && q3.attributes.position.count === 3;
+  })());
+  ck('OBJ rejects an empty file', P.Import.parseOBJ('# nothing') === null);
+
+  var asciiStl = ['solid t','facet normal 0 0 1','outer loop','vertex 0 0 0',
+    'vertex 1 0 0','vertex 0 1 0','endloop','endfacet','endsolid t'].join('\n');
+  var ab = new Uint8Array(asciiStl.length);
+  for(i=0;i<asciiStl.length;i++) ab[i] = asciiStl.charCodeAt(i);
+  var sA = P.Import.parseSTL(ab.buffer);
+  ck('ASCII STL parses with its facet normals',
+     sA && sA.attributes.position.count === 3 &&
+     Math.abs(sA.attributes.normal.getZ(0)-1) < 1e-6);
+
+  var nT = 2, bbuf = new ArrayBuffer(84+nT*50), bdv = new DataView(bbuf);
+  bdv.setUint32(80, nT, true);
+  var bo = 84;
+  for(var bt=0;bt<nT;bt++){
+    bdv.setFloat32(bo,0,true); bdv.setFloat32(bo+4,1,true); bdv.setFloat32(bo+8,0,true);
+    bo += 12;
+    for(var bc=0;bc<3;bc++){
+      bdv.setFloat32(bo, bc===1?1:0, true);
+      bdv.setFloat32(bo+4, bt, true);
+      bdv.setFloat32(bo+8, bc===2?1:0, true);
+      bo += 12;
+    }
+    bo += 2;
+  }
+  var sB = P.Import.parseSTL(bbuf);
+  ck('binary STL parses, and is told apart from ASCII',
+     sB && sB.attributes.position.count === 6);
+
+  var bigG = P.Import.parseOBJ(['v 0 0 0','v 1000 0 0','v 0 500 0','f 1 2 3'].join('\n'));
+  P.Import.fitGeometry(bigG, 2);
+  bigG.computeBoundingBox();
+  var bsz = bigG.boundingBox.getSize(new THREE.Vector3());
+  ck('an imported model is normalised in size',
+     Math.abs(Math.max(bsz.x,bsz.y,bsz.z)-2) < 1e-4);
+  ck('and rests on the ground plane', Math.abs(bigG.boundingBox.min.y) < 1e-4);
+
+  reset();
+  var plate = P.Import.parseOBJ(['v -1 -1 0','v 1 -1 0','v 1 1 0','v -1 1 0',
+                                 'f 1 2 3','f 1 3 4'].join('\n'));
+  P.Import.fitGeometry(plate, 2.2);
+  var mGuide = P.Guides.fromModel(plate, 'plate');
+  P.Guides.setActive(mGuide);
+  ck('a model becomes an active guide', P.Guides.active.kind === 'model');
+  ck('a model guide has no sweep, so bend stays off', !P.Guides.active.sweep);
+  P.VIEW.pivot.set(0, 1.1, 0); P.applyCamera();
+  pen([{x:CX-40,y:CY},{x:CX,y:CY},{x:CX+40,y:CY}]);
+  ck('strokes project onto an imported model', P.Strokes.list.length === 1);
+  ck('an imported model masks like any other guide',
+     P.Guides.isMasked(new THREE.Vector3(0,1.1,-0.5)) === true);
+
+  /* image guides: the documented no-drawing-past-the-edge rule */
+  reset();
+  var icv = W.document.createElement('canvas');
+  icv.width = 64; icv.height = 32;
+  var ictx = icv.getContext('2d');
+  ictx.fillStyle = '#c0392b'; ictx.fillRect(0,0,64,32);
+  var iurl = icv.toDataURL('image/png');
+
+  P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.VIEW.radius = 14; P.applyCamera();
+  P.TOOL.stableOn = false;
+  var ig = P.Guides.fromImage(iurl, 64, 32, 'swatch');
+  P.Guides.setActive(ig);
+  ck('an image becomes an active guide', P.Guides.active.kind === 'image');
+  ck('its aspect ratio is preserved', Math.abs(ig.imageAspect - 2) < 1e-9);
+  ck('an image may be fully opaque, unlike a scaffold guide',
+     (P.Guides.setOpacity(ig, 1), ig.opacity === 1));
+
+  var ibox = new THREE.Box3().setFromObject(ig.mesh);
+  var ic = ibox.getCenter(new THREE.Vector3()), isz = ibox.getSize(new THREE.Vector3());
+  var iscr = P.worldToScreen(ic, {});
+  var icorner = P.worldToScreen(new THREE.Vector3(ic.x+isz.x/2, ic.y+isz.y/2, ic.z), {});
+  var ihw = Math.abs(icorner.x - iscr.x), ihh = Math.abs(icorner.y - iscr.y);
+  ck('the test can see the whole image', ihw < vpo().w/2 && ihh < vpo().h/2);
+
+  ck('projection inside the image works', P.Guides.project(iscr.x, iscr.y) !== null);
+  var ioff = iscr.x + ihw + 40;
+  ck('projection past the edge is refused, not clamped',
+     P.Guides.project(ioff, iscr.y) === null);
+
+  P.Strokes.clear();
+  pen([{x:ioff,y:iscr.y},{x:ioff+20,y:iscr.y+10},{x:ioff+40,y:iscr.y+20}]);
+  ck('a stroke drawn off the image creates nothing', P.Strokes.list.length === 0,
+     'n=' + P.Strokes.list.length);
+  pen([{x:iscr.x-ihw*0.5,y:iscr.y},{x:iscr.x,y:iscr.y},{x:iscr.x+ihw*0.5,y:iscr.y}]);
+  ck('a stroke inside the image draws normally', P.Strokes.list.length === 1);
+
+  P.Strokes.clear();
+  pen([{x:iscr.x,y:iscr.y},{x:iscr.x+ihw*0.8,y:iscr.y},{x:ioff+60,y:iscr.y}]);
+  if(P.Strokes.list.length){
+    var mx = 0;
+    P.Strokes.list[0].pts.forEach(function(q4){
+      mx = Math.max(mx, Math.abs(ig.obj.worldToLocal(q4.p.clone()).x));
+    });
+    ck('a stroke running off the edge is truncated at the boundary',
+       mx <= isz.x/2 + 1e-4, 'max |x| ' + mx.toFixed(3) + ' of ' + (isz.x/2).toFixed(3));
+  }
+
+  /* the mid-air fallback must survive only where it belongs */
+  P.Guides.setActive(null);
+  P.Strokes.clear();
+  P.TOOL.autoGuide = false;
+  pen([{x:iscr.x-80,y:iscr.y},{x:iscr.x,y:iscr.y},{x:iscr.x+80,y:iscr.y}]);
+  ck('with no guide at all, drawing still uses the pivot plane',
+     P.Strokes.list.length === 1);
+  P.TOOL.stableOn = true;
+
+  /* imported guides round-trip through the document */
+  reset();
+  P.Guides.setActive(P.Guides.fromImage(iurl, 64, 32, 'swatch'));
+  var ijson = JSON.stringify(P.Doc.serialize());
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(ijson));
+  ck('an image guide survives save and load',
+     P.Guides.active && P.Guides.active.kind === 'image' &&
+     Math.abs(P.Guides.active.imageAspect - 2) < 1e-6);
+
+  reset();
+  var plate2 = P.Import.parseOBJ(['v -1 -1 0','v 1 -1 0','v 1 1 0','f 1 2 3'].join('\n'));
+  P.Import.fitGeometry(plate2, 2);
+  P.Guides.setActive(P.Guides.fromModel(plate2, 'plate'));
+  var mjson = JSON.stringify(P.Doc.serialize());
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(mjson));
+  ck('a model guide survives save and load',
+     P.Guides.active && P.Guides.active.kind === 'model' &&
+     P.Guides.active.mesh.geometry.attributes.position.count === 3);
+
+  /* ================= undo memory bound ================= */
+  group('C.8  Undo is bounded by memory, not just depth');
+  reset();
+  var budget0 = P.TUNE.undoPointBudget;
+  P.TUNE.undoPointBudget = 300;
+  for(i=0;i<12;i++){
+    var seg3 = [];
+    for(var j3=0;j3<=30;j3++) seg3.push({x:CX-150+j3*10, y:CY-60+i*10});
+    pen(seg3);
+  }
+  ck('the stack is trimmed once the point budget is passed',
+     P.History.stack.length < 12, P.History.stack.length + ' steps kept');
+  ck('retained cost stays within budget',
+     P.History.cost <= P.TUNE.undoPointBudget, 'cost ' + P.History.cost);
+  ck('undo still works after trimming', P.History.undo() === true);
+  P.TUNE.undoPointBudget = budget0;
+  reset();
+  ck('cheap commands are not trimmed away', (function(){
+    for(var q=0;q<5;q++) P.History.push({label:'noop', redo:function(){}, undo:function(){}});
+    return P.History.stack.length === 5;
+  })());
+
+  /* ================= clamp precision ================= */
+  group('A.4  Off-guide clamping lands on the surface, not on a vertex');
+  reset();
+  P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+  P.TOOL.autoGuide = true; P.TOOL.stableOn = false;
+  pen([{x:CX-90,y:CY-30},{x:CX,y:CY-45},{x:CX+90,y:CY-30}]);
+  var cg = P.Guides.active;
+  P.Guides.clampOffSurface = true;
+  var cpos = cg.mesh.geometry.attributes.position;
+  var cminX=1e9, cmaxX=-1e9, cmaxY=-1e9;
+  for(i=0;i<cpos.count;i++){
+    var cs = P.worldToScreen(new THREE.Vector3(cpos.getX(i),cpos.getY(i),cpos.getZ(i)), {});
+    cminX = Math.min(cminX, cs.x); cmaxX = Math.max(cmaxX, cs.x);
+    cmaxY = Math.max(cmaxY, cs.y);
+  }
+  var cprobes = [], cdupes = 0, clast = null;
+  for(i=0;i<=40;i++){
+    var chit = P.Guides.project(cminX + (cmaxX-cminX)*(i/40), cmaxY + 12);
+    if(!chit) continue;
+    if(clast && chit.point.distanceTo(clast) < 1e-9) cdupes++;
+    clast = chit.point.clone(); cprobes.push(clast);
+  }
+  ck('clamping tracks the cursor instead of repeating',
+     cprobes.length > 20 && cdupes < cprobes.length*0.15,
+     cprobes.length + ' probes, ' + cdupes + ' identical');
+  var onVert = 0;
+  for(i=0;i<cprobes.length;i++){
+    var nearest = Infinity;
+    for(var vq=0; vq<cpos.count; vq++){
+      nearest = Math.min(nearest, cprobes[i].distanceToSquared(
+        new THREE.Vector3(cpos.getX(vq),cpos.getY(vq),cpos.getZ(vq))));
+    }
+    if(nearest < 1e-14) onVert++;
+  }
+  ck('clamped points are not snapped to grid vertices',
+     onVert < cprobes.length*0.25, onVert + ' of ' + cprobes.length + ' on a vertex');
+  /* Continuity is measured PERPENDICULAR to the extrusion axis. Along the
+     depth axis the nearest point legitimately flips between the front and
+     back edges where they are equidistant — that is nearest-point being
+     ambiguous, not the clamp being quantised. */
+  var axisT = cg.sweep.basisT.clone();
+  var maxPerp = 0, sumPerp = 0, nSteps = 0;
+  for(i=1;i<cprobes.length;i++){
+    var delta = cprobes[i].clone().sub(cprobes[i-1]);
+    delta.addScaledVector(axisT, -delta.dot(axisT));
+    maxPerp = Math.max(maxPerp, delta.length());
+    sumPerp += delta.length(); nSteps++;
+  }
+  var meanPerp = sumPerp/Math.max(1,nSteps);
+  ck('no stair-stepping across the surface', maxPerp < meanPerp*3.5 + 1e-6,
+     'mean ' + meanPerp.toFixed(4) + ', worst ' + maxPerp.toFixed(4));
+  P.TOOL.stableOn = true;
+
+  /* ================= bend on non-swept guides ================= */
+  group('A.6  Bend works on guides that have no sweep');
+  reset();
+  P.setTool('prim'); P.Tools.primPreview('tube', 20, 1); P.Tools.primCommit();
+  var pgg = P.Guides.active;
+  ck('a primitive guide is active', pgg.kind === 'primitive' && !pgg.sweep);
+  var pBefore = new THREE.Box3().setFromObject(pgg.mesh).getSize(new THREE.Vector3());
+  P.setTool('bend'); P.TOOL.stableOn = false;
+  pen([{x:CX,y:CY},{x:CX+70,y:CY-60},{x:CX+150,y:CY-40},{x:CX+210,y:CY+30}]);
+  var pAfter = new THREE.Box3().setFromObject(pgg.mesh).getSize(new THREE.Vector3());
+  ck('bending a primitive deforms it', pBefore.distanceTo(pAfter) > 0.05,
+     '[' + pBefore.toArray().map(function(v){return v.toFixed(2);}) + '] -> [' +
+           pAfter.toArray().map(function(v){return v.toFixed(2);}) + ']');
+  ck('the deformed mesh has no NaNs', (function(){
+    var arr = pgg.mesh.geometry.attributes.position.array;
+    for(var q=0;q<arr.length;q++) if(!isFinite(arr[q])) return false;
+    return true;
+  })());
+  P.History.undo();
+  ck('undo restores the unbent primitive',
+     new THREE.Box3().setFromObject(pgg.mesh).getSize(new THREE.Vector3())
+       .distanceTo(pBefore) < 1e-4);
+  P.History.redo();
+  /* re-bending works from the original, so it does not compound into mush */
+  pen([{x:CX,y:CY},{x:CX+60,y:CY+50},{x:CX+130,y:CY+70}]);
+  var pTwice = new THREE.Box3().setFromObject(pgg.mesh).getSize(new THREE.Vector3());
+  ck('a second bend re-deforms the original rather than compounding',
+     pTwice.length() < pBefore.length()*3);
+  P.setTool('draw'); P.TOOL.stableOn = true;
+
+  reset();
+  pen([{x:CX-120,y:CY-90},{x:CX-60,y:CY-110},{x:CX,y:CY-90}]);
+  pen([{x:CX-120,y:CY+90},{x:CX-60,y:CY+70},{x:CX,y:CY+90}]);
+  P.setTool('loft');
+  var LA2 = ts(P.Strokes.list[0].pts[1].p), LB2 = ts(P.Strokes.list[1].pts[1].p);
+  pen([{x:LA2.x,y:LA2.y}]); pen([{x:LB2.x,y:LB2.y}]);
+  P.Tools.loftPreview(1); P.Tools.loftCommit();
+  var lg = P.Guides.active;
+  ck('a loft guide is active', lg && lg.kind === 'loft');
+  var lBefore = new THREE.Box3().setFromObject(lg.mesh).getSize(new THREE.Vector3());
+  P.setTool('bend'); P.TOOL.stableOn = false;
+  pen([{x:CX,y:CY},{x:CX+80,y:CY-70},{x:CX+170,y:CY-30}]);
+  ck('a loft can be bent too',
+     new THREE.Box3().setFromObject(lg.mesh).getSize(new THREE.Vector3())
+       .distanceTo(lBefore) > 0.02);
+  P.setTool('draw'); P.TOOL.stableOn = true;
+
+  /* ================= several guides on screen ================= */
+  group('A.5  A saved guide stays visible while another is active');
+  reset();
+  P.TOOL.autoGuide = true;
+  pen([{x:CX-60,y:CY-60},{x:CX,y:CY-40},{x:CX+60,y:CY-60}]);
+  var firstG = P.Guides.active;
+  P.Tools.saveGuide();
+  ck('saving frees the active slot', !P.Guides.active);
+  ck('but the guide stays in the scene',
+     firstG.visible === true && firstG.obj.parent === P.Guides.root);
+  pen([{x:CX-60,y:CY+60},{x:CX,y:CY+40},{x:CX+60,y:CY+60}]);
+  ck('a new guide becomes active alongside it',
+     P.Guides.active && P.Guides.active !== firstG &&
+     firstG.obj.parent === P.Guides.root);
+  ck('only the new one is active for drawing', P.Guides.active !== firstG);
+  var uAct = P.Guides.active.mesh.material.uniforms.uOpacity.value;
+  var uRef = firstG.mesh.material.uniforms.uOpacity.value;
+  ck('the inactive reference is dimmed', uRef < uAct,
+     uRef.toFixed(2) + ' vs ' + uAct.toFixed(2));
+  P.Guides.setResourceVisible(firstG, false);
+  ck('a reference can be hidden', firstG.obj.parent !== P.Guides.root);
+  P.Guides.setResourceVisible(firstG, true);
+  ck('and brought back', firstG.obj.parent === P.Guides.root);
+
+  /* ================= reference UI: bar, keypad, wheel, rail ================= */
+  group('Reference UI elements');
+  var RD = W.document;
+  function rid(id){ return RD.getElementById(id); }
+  function rshown(id){ return !rid(id).classList.contains('hidden'); }
+
+  reset();
+  P.UI.applyMode(); P.UI.refresh();
+
+  ck('the selection action bar is hidden with nothing selected', !rshown('selBar'));
+  pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  P.onSceneChange();
+  ck('it appears with a selection', rshown('selBar'));
+
+  rid('btnSelDup').click();
+  ck('duplicate works from the bar', P.Strokes.list.length === 2);
+  P.History.undo();
+  ck('undo puts the original selection back', P.Strokes.selection.length === 1);
+
+  rid('btnSelDupMir').click();
+  ck('duplicate symmetrically adds a copy', P.Strokes.list.length === 2);
+  var mA = P.Strokes.list[0].pts[0].p, mB = P.Strokes.list[1].pts[0].p;
+  ck('and the copy is genuinely mirrored',
+     Math.abs(mA.x + mB.x) < 1e-6 && Math.abs(mA.y - mB.y) < 1e-6,
+     mA.x.toFixed(3) + ' vs ' + mB.x.toFixed(3));
+  P.History.undo();
+  ck('mirrored duplicate is undoable', P.Strokes.list.length === 1);
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  rid('btnSelDelete').click();
+  ck('delete works from the bar', P.Strokes.list.length === 0);
+  P.History.undo();
+  P.Strokes.clearSelection(); P.onSceneChange();
+  ck('the bar hides again', !rshown('selBar'));
+
+  /* numeric keypad */
+  P.TOOL.sizeMM = 14; P.UI.refresh();
+  rid('sizeVal').click();
+  ck('tapping the size value opens the keypad', rshown('keypad'));
+  ck('the keypad seeds with the current value', rid('keypadVal').textContent === '14');
+  ['1','7'].forEach(function(k){ rid('keypad').querySelector('[data-key="'+k+'"]').click(); });
+  ck('digits accumulate', rid('keypadVal').textContent === '17');
+  rid('keypad').querySelector('[data-key="back"]').click();
+  ck('backspace works', rid('keypadVal').textContent === '1');
+  rid('keypad').querySelector('[data-key="7"]').click();
+  rid('keypad').querySelector('[data-key="ok"]').click();
+  ck('confirming applies the typed value', Math.round(P.TOOL.sizeMM) === 17,
+     P.TOOL.sizeMM + 'mm');
+  ck('the keypad closes', !rshown('keypad'));
+  ck('the rail readout follows', rid('sizeVal').textContent === '17mm');
+  ck('a typed value is still clamped to the documented range', (function(){
+    rid('sizeVal').click();
+    ['9','9','9'].forEach(function(k){ rid('keypad').querySelector('[data-key="'+k+'"]').click(); });
+    rid('keypad').querySelector('[data-key="ok"]').click();
+    return P.TOOL.sizeMM === P.TUNE.brushMaxMM;
+  })(), P.TOOL.sizeMM + 'mm');
+  P.TOOL.sizeMM = 14; P.UI.refresh();
+
+  /* colour wheel */
+  rid('brushColor').click();
+  ck('the colour card opens from the rail swatch', rshown('colorCard'));
+  ck('hex mirrors the brush colour',
+     rid('hexIn').value === P.TOOL.color.getHexString().toUpperCase());
+  rid('hexIn').value = 'FFE7C4';
+  rid('hexIn').dispatchEvent(new W.Event('change'));
+  ck('typing a hex sets the brush colour',
+     P.TOOL.color.getHexString().toLowerCase() === 'ffe7c4');
+  var ringLit = (function(){
+    var d = rid('hueWheel').getContext('2d').getImageData(0,0,200,200).data, n = 0;
+    for(var q=3;q<d.length;q+=4) if(d[q] > 0) n++;
+    return n;
+  })();
+  ck('the hue ring is actually drawn', ringLit > 8000, ringLit + ' opaque px');
+  ck('the saturation square is drawn', (function(){
+    var d = rid('svCanvas').getContext('2d').getImageData(0,0,104,104).data;
+    return (d[0]+d[1]+d[2]) > 0;
+  })());
+  P.TOOL.color.set('#1b1c21'); P.UI.refresh();
+  P.UI.closePopovers();
+
+  /* rail collapse and exclusive popovers */
+  ck('the rail starts visible', !RD.body.classList.contains('railhidden'));
+  rid('railTab').click();
+  ck('the edge tab collapses it', RD.body.classList.contains('railhidden'));
+  rid('railTab').click();
+  ck('and restores it', !RD.body.classList.contains('railhidden'));
+
+  rid('brushType').click();
+  ck('the brush list opens', rshown('brushGrid'));
+  rid('brushColor').click();
+  ck('opening another popover closes it', !rshown('brushGrid') && rshown('colorCard'));
+  P.UI.closePopovers(); P.UI.refresh();
+  ck('all popovers can be dismissed',
+     !rshown('brushGrid') && !rshown('colorCard') && !rshown('keypad') && !rshown('slidePop'));
+
+  /* ================= axis joystick ================= */
+  group('Transform joystick — axis arcs and a moveable panel');
+  reset();
+  P.UI.applyMode();
+  P.VIEW.theta = 0.6; P.VIEW.phi = 1.1; P.applyCamera();
+  pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+  var jst = P.Strokes.list[0];
+  P.Strokes.setSelected(jst, true);
+  P.onSceneChange();
+  ck('joystick appears for a selection', !rid('joy').classList.contains('hidden'));
+
+  var dX0 = rid('arcX').getAttribute('d');
+  ck('all three axis arcs are drawn',
+     !!dX0 && !!rid('arcY').getAttribute('d') && !!rid('arcZ').getAttribute('d'));
+  P.VIEW.theta += 1.1; P.applyCamera(); P.onViewChange();
+  ck('the arcs re-aim as the camera orbits', rid('arcX').getAttribute('d') !== dX0);
+
+  /* where does an axis sit on the pad right now? */
+  function arcSpot(axisVec){
+    var c = P.Tools.transformCentre();
+    var a = P.worldToScreen(c, {});
+    var b = P.worldToScreen(c.clone().add(axisVec), {});
+    var ang = Math.atan2(b.y-a.y, b.x-a.x);
+    return {x:54 + Math.cos(ang)*35, y:54 + Math.sin(ang)*35, ang:ang};
+  }
+  function padDrag(spot, dx, dy){
+    var pad = rid('joyPad'), r = pad.getBoundingClientRect();
+    var sx = r.left + spot.x*(r.width/108), sy = r.top + spot.y*(r.height/108);
+    function pe(t,x,y,b){ pad.dispatchEvent(new W.PointerEvent(t,{pointerId:5,
+      pointerType:'mouse',clientX:x,clientY:y,buttons:b,bubbles:true,cancelable:true})); }
+    pe('pointerdown',sx,sy,1);
+    pe('pointermove',sx+dx/2,sy+dy/2,1);
+    pe('pointermove',sx+dx,sy+dy,1);
+    pe('pointerup',sx+dx,sy+dy,0);
+  }
+
+  var pStart = jst.pts[0].p.clone();
+  var sx1 = arcSpot(new THREE.Vector3(1,0,0));
+  padDrag(sx1, Math.cos(sx1.ang)*60, Math.sin(sx1.ang)*60);
+  var dv = jst.pts[0].p.clone().sub(pStart);
+  ck('grabbing the X arc moves along world X only',
+     Math.abs(dv.x) > 1e-4 && Math.abs(dv.y) < 1e-9 && Math.abs(dv.z) < 1e-9,
+     dv.x.toFixed(3)+', '+dv.y.toFixed(3)+', '+dv.z.toFixed(3));
+  P.History.undo();
+
+  pStart = jst.pts[0].p.clone();
+  var sy1 = arcSpot(new THREE.Vector3(0,1,0));
+  padDrag(sy1, Math.cos(sy1.ang)*60, Math.sin(sy1.ang)*60);
+  dv = jst.pts[0].p.clone().sub(pStart);
+  ck('grabbing the Y arc moves along world Y only',
+     Math.abs(dv.y) > 1e-4 && Math.abs(dv.x) < 1e-9 && Math.abs(dv.z) < 1e-9,
+     dv.x.toFixed(3)+', '+dv.y.toFixed(3)+', '+dv.z.toFixed(3));
+  P.History.undo();
+
+  pStart = jst.pts[0].p.clone();
+  padDrag({x:54,y:54,ang:0}, 40, 0);
+  dv = jst.pts[0].p.clone().sub(pStart);
+  var touched = [Math.abs(dv.x)>1e-6, Math.abs(dv.y)>1e-6, Math.abs(dv.z)>1e-6]
+                  .filter(Boolean).length;
+  ck('the centre of the pad still drags freely', touched >= 2, touched + ' axes moved');
+  P.History.undo();
+
+  rid('joyMode').querySelector('[data-joy="rotate"]').click();
+  var rBefore = jst.pts.map(function(q){ return q.p.clone(); });
+  var sz1 = arcSpot(new THREE.Vector3(0,0,1));
+  padDrag(sz1, -Math.sin(sz1.ang)*50, Math.cos(sz1.ang)*50);
+  ck('sweeping round an arc rotates about that axis',
+     jst.pts.some(function(q,k){ return q.p.distanceTo(rBefore[k]) > 1e-4; }));
+  P.History.undo();
+  rid('joyMode').querySelector('[data-joy="move"]').click();
+
+  /* the panel can be repositioned */
+  var jpanel = rid('joy'), jgrip = rid('joyGrip');
+  function gripDrag(dx, dy){
+    var g = jgrip.getBoundingClientRect();
+    var gx = g.left + g.width/2, gy = g.top + g.height/2;
+    function ge(t,x,y,b){ jgrip.dispatchEvent(new W.PointerEvent(t,{pointerId:7,
+      pointerType:'mouse',clientX:x,clientY:y,buttons:b,bubbles:true,cancelable:true})); }
+    ge('pointerdown',gx,gy,1); ge('pointermove',gx+dx,gy+dy,1); ge('pointerup',gx+dx,gy+dy,0);
+  }
+  var jr0 = jpanel.getBoundingClientRect();
+  gripDrag(-140,-70);
+  var jr1 = jpanel.getBoundingClientRect();
+  ck('the grip drags the whole panel',
+     Math.abs(jr1.left-(jr0.left-140)) < 3 && Math.abs(jr1.top-(jr0.top-70)) < 3,
+     (jr1.left-jr0.left).toFixed(0)+','+(jr1.top-jr0.top).toFixed(0));
+  gripDrag(-900,-900);
+  var jr2 = jpanel.getBoundingClientRect();
+  ck('a second drag right after the first is not read as a double-tap',
+     jr2.left !== jr1.left || jr2.top !== jr1.top);
+  ck('and the panel stays on screen', jr2.left >= 3 && jr2.top >= 3,
+     jr2.left.toFixed(0)+','+jr2.top.toFixed(0));
+
+  var gg = jgrip.getBoundingClientRect();
+  function gtap(){
+    function ge(t,x,y,b){ jgrip.dispatchEvent(new W.PointerEvent(t,{pointerId:7,
+      pointerType:'mouse',clientX:x,clientY:y,buttons:b,bubbles:true,cancelable:true})); }
+    ge('pointerdown',gg.left+gg.width/2,gg.top+gg.height/2,1);
+    ge('pointerup',  gg.left+gg.width/2,gg.top+gg.height/2,0);
+  }
+  gtap(); gtap();
+  ck('a true double-tap parks it back', !jpanel.classList.contains('placed'));
+
+  var jp0 = jst.pts[0].p.clone();
+  padDrag({x:54,y:54,ang:0}, 40, 0);
+  ck('the pad still works after the panel has been moved',
+     jst.pts[0].p.distanceTo(jp0) > 1e-5);
+  P.History.undo();
+  P.Strokes.clearSelection();
+
+  reset(); P.killSpin();
+  flush();
+
+  /* ==================================================================
+     Async tail. Draw Shape's hold-to-adjust is driven by a real timer,
+     so these cannot run inside the synchronous sweep above.
+     ================================================================== */
+  function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+  function penRaw(type, x, y, buttons){
+    P.elStage.dispatchEvent(new W.PointerEvent(type, {pointerId:99, pointerType:'pen',
+      clientX:x, clientY:y, buttons:buttons, pressure:buttons?0.7:0,
+      bubbles:true, cancelable:true}));
+  }
+  function endLen(st){ return st.pts[0].p.distanceTo(st.pts[st.pts.length-1].p); }
+  function liveStroke(){
+    var kids = P.Strokes.group.children;
+    return kids.length ? kids[kids.length-1].userData.stroke : null;
+  }
+
+  group('C.9  Draw Shape — hold to adjust');
+  reset();
+  P.TOOL.stableOn = false;
+  P.setTool('shape');
+  penRaw('pointerdown', CX-150, CY, 1);
+  penRaw('pointermove', CX-80,  CY, 1);
+  penRaw('pointermove', CX,     CY, 1);
+
+  wait(620).then(function(){
+    ck('holding still freezes the stroke into its fitted shape',
+       P.Tools.isAdjustingShape() === true);
+    var st3 = liveStroke();
+    var len0 = st3 ? endLen(st3) : 0;
+    penRaw('pointermove', CX+180, CY, 1);
+    var len1 = endLen(st3);
+    ck('dragging then steers the end point', len1 > len0*1.4,
+       len0.toFixed(3) + ' -> ' + len1.toFixed(3));
+    penRaw('pointerup', CX+180, CY, 0);
+    ck('the adjusted line commits once', P.Strokes.list.length === 1);
+    ck('and keeps the length it was dragged to',
+       Math.abs(endLen(P.Strokes.list[0]) - len1) < 1e-6);
+    var sA = P.Strokes.list[0], A3 = sA.pts[0].p, B3 = sA.pts[sA.pts.length-1].p;
+    var ab3 = B3.clone().sub(A3), L3 = ab3.length(), dev3 = 0;
+    for(var z=0; z<sA.pts.length; z++){
+      dev3 = Math.max(dev3, sA.pts[z].p.clone().sub(A3).cross(ab3).length()/L3);
+    }
+    ck('the adjusted line is still straight', dev3 < L3*0.005);
+    P.History.undo();
+    ck('the whole hold-and-adjust is one undo step', P.Strokes.list.length === 0);
+
+    reset(); P.TOOL.stableOn = false; P.setTool('shape');
+    var nn = 28;
+    penRaw('pointerdown', CX+70, CY, 1);
+    for(var q3=1; q3<=nn; q3++){
+      var a3 = q3/nn*Math.PI*2;
+      penRaw('pointermove', CX+Math.cos(a3)*70, CY+Math.sin(a3)*70, 1);
+    }
+    return wait(620);
+  }).then(function(){
+    function radiusOf(s){
+      var u = s.pts.slice();
+      if(u.length>1 && u[0].p.distanceTo(u[u.length-1].p) < 1e-9) u.pop();
+      var ctr3 = new THREE.Vector3();
+      u.forEach(function(q){ ctr3.add(q.p); });
+      ctr3.multiplyScalar(1/u.length);
+      var r3 = 0;
+      u.forEach(function(q){ r3 += q.p.distanceTo(ctr3); });
+      return r3/u.length;
+    }
+    ck('a circle also enters adjust mode', P.Tools.isAdjustingShape() === true);
+    var stc = liveStroke();
+    var r0 = radiusOf(stc);
+    penRaw('pointermove', CX+160, CY, 1);
+    var r1 = radiusOf(stc);
+    ck('dragging resizes the circle', r1 > r0*1.6,
+       r0.toFixed(3) + ' -> ' + r1.toFixed(3));
+    penRaw('pointerup', CX+160, CY, 0);
+    ck('the resized circle commits', P.Strokes.list.length === 1);
+    ck('and is still round', (function(){
+      var u = P.Strokes.list[0].pts.slice();
+      if(u.length>1 && u[0].p.distanceTo(u[u.length-1].p) < 1e-9) u.pop();
+      var ctr4 = new THREE.Vector3();
+      u.forEach(function(q){ ctr4.add(q.p); });
+      ctr4.multiplyScalar(1/u.length);
+      var lo4 = Infinity, hi4 = -Infinity;
+      u.forEach(function(q){
+        var d4 = q.p.distanceTo(ctr4); lo4 = Math.min(lo4,d4); hi4 = Math.max(hi4,d4);
+      });
+      return (hi4-lo4) < hi4*0.02;
+    })());
+
+    /* a stroke drawn without pausing must behave exactly as before */
+    reset(); P.TOOL.stableOn = false; P.setTool('shape');
+    penRaw('pointerdown', CX-150, CY, 1);
+    penRaw('pointermove', CX-50, CY+2, 1);
+    penRaw('pointermove', CX+50, CY-2, 1);
+    penRaw('pointerup',   CX+150, CY, 0);
+    ck('a stroke drawn without pausing still just auto-fits',
+       P.Strokes.list.length === 1 && P.Tools.isAdjustingShape() === false);
+
+    /* ---- hold-to-shape while drawing normally, and on guides (C.9) ---- */
+    group('C.9  Hold to shape — brushes, guides and bends');
+
+    function wobbly(cx, cy, rad, n){
+      var o = [];
+      for(var q=0;q<=n;q++){
+        var a = q/n*Math.PI*2, rr = rad + (q%3 ? 6 : -6);
+        o.push({x:cx+Math.cos(a)*rr, y:cy+Math.sin(a)*rr});
+      }
+      return o;
+    }
+    function drawHeld(pts){
+      penRaw('pointerdown', pts[0].x, pts[0].y, 1);
+      for(var q=1;q<pts.length;q++) penRaw('pointermove', pts[q].x, pts[q].y, 1);
+    }
+    function roundness(points){
+      var u = points.slice();
+      if(u.length>1 && u[0].distanceTo(u[u.length-1]) < 1e-9) u.pop();
+      var c = new THREE.Vector3();
+      u.forEach(function(q){ c.add(q); });
+      c.multiplyScalar(1/u.length);
+      var lo = Infinity, hi = -Infinity;
+      u.forEach(function(q){ var d = q.distanceTo(c); lo = Math.min(lo,d); hi = Math.max(hi,d); });
+      return (hi-lo)/Math.max(hi,1e-9);
+    }
+
+    reset(); P.TOOL.stableOn = false; P.TOOL.shapeHold = true;
+    P.TOOL.autoGuide = false; P.setTool('draw');           // the plain brush
+    var loop1 = wobbly(CX, CY, 80, 32);
+    drawHeld(loop1);
+    return wait(620).then(function(){
+      ck('holding while drawing a CURVE snaps it', P.Tools.isAdjustingShape() === true);
+      ck('a wobbly loop is read as a circle',
+         P.Tools.liveShape() && P.Tools.liveShape().kind === 'circle');
+      penRaw('pointerup', loop1[0].x, loop1[0].y, 0);
+      ck('it commits as one curve', P.Strokes.list.length === 1);
+      ck('and the committed curve is truly round',
+         roundness(P.Strokes.list[0].pts.map(function(q){ return q.p; })) < 0.02);
+
+      reset(); P.TOOL.stableOn = false; P.setTool('guide');
+      drawHeld(wobbly(CX, CY, 70, 32));
+      return wait(620);
+    }).then(function(){
+      ck('holding while drawing a GUIDE snaps its profile',
+         P.Tools.isAdjustingShape() === true &&
+         P.Tools.liveShape().kind === 'circle');
+      penRaw('pointerup', CX+70, CY, 0);
+      ck('the guide is created', !!P.Guides.active && !!P.Guides.active.sweep);
+      var prof = P.Guides.active.sweep.local.map(function(l){
+        return new THREE.Vector3(l.x, l.y, 0);
+      });
+      ck('so the extrusion is a clean cylinder', roundness(prof) < 0.03,
+         'profile roundness ' + roundness(prof).toFixed(4));
+
+      var tv5 = P.ORTHO_VIEWS[4];
+      P.VIEW.theta = tv5.theta; P.VIEW.phi = tv5.phi; P.applyCamera();
+      P.setTool('bend');
+      drawHeld(wobbly(CX, CY, 180, 40));
+      return wait(620);
+    }).then(function(){
+      ck('holding while drawing a BEND snaps the sweep path',
+         P.Tools.isAdjustingShape() === true &&
+         P.Tools.liveShape().kind === 'circle');
+      penRaw('pointerup', CX+180, CY, 0);
+      var gh = P.Guides.active;
+      ck('the bend applied', gh.sweep.anchorIndex === 0);
+      var hpos = gh.mesh.geometry.attributes.position, hpath = gh.sweep.path;
+      var hp = new THREE.Vector3(), hlo = Infinity, hhi = -Infinity;
+      for(var q=0;q<hpos.count;q+=7){
+        hp.set(hpos.getX(q), hpos.getY(q), hpos.getZ(q));
+        var bst = Infinity;
+        for(var j5=0;j5<hpath.length;j5++) bst = Math.min(bst, hp.distanceTo(hpath[j5]));
+        hlo = Math.min(hlo,bst); hhi = Math.max(hhi,bst);
+      }
+      ck('a circle profile swept on a circle path gives an even torus',
+         (hhi-hlo) < hhi*0.2, 'tube ' + hlo.toFixed(3) + '–' + hhi.toFixed(3));
+
+      /* the toggle must really switch it off */
+      reset(); P.TOOL.stableOn = false; P.TOOL.autoGuide = false;
+      P.setTool('draw'); P.TOOL.shapeHold = false;
+      var loop2 = wobbly(CX, CY, 80, 32);
+      drawHeld(loop2);
+      return wait(620);
+    }).then(function(){
+      ck('with hold-to-shape off nothing snaps', P.Tools.isAdjustingShape() === false);
+      penRaw('pointerup', CX+80, CY, 0);
+      ck('the freehand stroke is kept as drawn', P.Strokes.list.length === 1);
+      ck('and it is NOT round', roundness(P.Strokes.list[0].pts.map(function(q){
+        return q.p; })) > 0.02);
+
+      P.TOOL.shapeHold = true;
+      P.TOOL.stableOn = true;
+      P.setTool('draw');
+      reset(); P.killSpin();
+      flush();
+    });
+  });
+}
+</script>
+</body>
+</html>

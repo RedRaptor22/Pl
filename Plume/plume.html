@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Plume</title>
+<style>
+  /* ======================================================================
+     Visual language, taken from Feather's own UI:
+       · light-first — white cards floating over the canvas, no borders
+       · large radii (22px cards, 14px controls, circular swatches)
+       · soft diffuse shadow instead of outlines
+       · abstract monochrome line icons, never filled pictograms
+       · ACTIVE = near-black fill, not a colour accent
+       · options live in floating cards with icon grids and toggle+value pairs
+     The dark variant is the same language inverted, and follows the canvas
+     background automatically (see applyEnv) the way Feather's does.
+     ====================================================================== */
+  :root{
+    --bg:#eceaf3;
+    --panel:#ffffff;
+    --panel2:#f2f2f6;
+    --panel3:#e7e7ee;
+    --ink:#1b1c21;
+    --dim:#8a8b96;
+    --dim2:#a9aab4;
+    --line:rgba(18,18,34,.08);
+    --active:#1b1c21;
+    --onActive:#ffffff;
+    --accent:#ff8a3d;
+    --blue:#5b9dff;
+    --green:#4cc38a;
+    --red:#f2545b;
+    --shadow:0 8px 26px rgba(22,22,48,.14), 0 1px 3px rgba(22,22,48,.08);
+    --shadowLg:0 18px 48px rgba(22,22,48,.20), 0 2px 6px rgba(22,22,48,.10);
+    --rCard:22px;
+    --rBtn:14px;
+  }
+  body.dark{
+    --bg:#15161b;
+    --panel:#232429;
+    --panel2:#2b2c33;
+    --panel3:#34353d;
+    --ink:#f0f0f5;
+    --dim:#9698a4;
+    --dim2:#71737e;
+    --line:rgba(255,255,255,.09);
+    --active:#f0f0f5;
+    --onActive:#1b1c21;
+    --shadow:0 8px 26px rgba(0,0,0,.42), 0 1px 3px rgba(0,0,0,.3);
+    --shadowLg:0 18px 48px rgba(0,0,0,.55), 0 2px 6px rgba(0,0,0,.35);
+  }
+
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--ink);
+    font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,sans-serif;
+    user-select:none;-webkit-user-select:none;overscroll-behavior:none;}
+
+  /* a canvas is a replaced element: with inset:0 and width:auto its used size
+     falls back to the drawing buffer, so the two chase each other */
+  #stage{position:fixed;inset:0;width:100%;height:100%;touch-action:none;display:block;}
+
+  #overlay{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:4;}
+  #lassoPath{fill:rgba(91,157,255,.14);stroke:var(--blue);stroke-width:1.5;
+    stroke-dasharray:6 4;display:none;}
+
+  /* 4 overlay · 5 chrome · 20 sheets · 28 docked · 30 modal · 40 walkthrough
+     50 toast · 60 tooltip */
+  .panel{position:fixed;background:var(--panel);border-radius:var(--rCard);
+    box-shadow:var(--shadow);z-index:5;}
+  .hidden{display:none !important;}
+  body.hideui .panel:not(#toast),body.hideui #overlay{display:none !important;}
+
+  /* ---------------------------- buttons ---------------------------- */
+  button{font:inherit;color:var(--ink);background:transparent;border:0;
+    border-radius:var(--rBtn);padding:6px 10px;min-height:32px;cursor:pointer;
+    white-space:nowrap;transition:background .13s,color .13s;}
+  button:hover{background:var(--panel2);}
+  button:active{transform:scale(.96);}
+  /* Active is a FILLED glyph on a soft tint, not a hard black pill — that is
+     what the reference does, and a black pill fights the white cards. */
+  button.on{background:var(--panel3);color:var(--ink);}
+  button.on:hover{background:var(--panel3);}
+  button.on svg{fill:currentColor;stroke:currentColor;}
+  button.on svg [fill="none"]{fill:currentColor;}
+  /* the few genuinely inverted controls opt in */
+  button.solid,button.solid:hover{background:var(--active);color:var(--onActive);}
+  button:disabled{opacity:.3;cursor:default;}
+  button.small{padding:5px 9px;min-height:30px;font-size:12px;}
+  button.filled{background:var(--panel2);}
+  button.filled:hover{background:var(--panel3);}
+
+  /* icon buttons — square, icon-only, tooltip carries the name */
+  .ico{width:38px;height:38px;padding:0;display:inline-flex;align-items:center;
+    justify-content:center;border-radius:12px;}
+  .ico svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.5;
+    stroke-linecap:round;stroke-linejoin:round;}
+  .ico.sm{width:32px;height:32px;border-radius:10px;}
+  .ico.sm svg{width:17px;height:17px;}
+
+  .rowbar{display:flex;align-items:center;gap:2px;}
+  .col{display:flex;flex-direction:column;gap:8px;}
+  .row{display:flex;gap:8px;align-items:center;}
+  .grow{flex:1 1 auto;min-width:0;}
+  .div{width:1px;align-self:stretch;background:var(--line);margin:6px 4px;flex:0 0 1px;}
+  .sep{height:1px;background:var(--line);margin:3px 0;}
+
+  h4{margin:0;font-size:10px;text-transform:uppercase;letter-spacing:.1em;
+    color:var(--dim2);font-weight:700;}
+  label.lab{color:var(--dim2);font-size:10px;text-transform:uppercase;
+    letter-spacing:.08em;font-weight:600;}
+  .val{color:var(--dim);min-width:42px;text-align:right;font-size:11px;
+    font-variant-numeric:tabular-nums;}
+
+  /* tabs with an underline indicator, as in the Lighting / Import cards */
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);}
+  .tabs button{flex:1 1 0;border-radius:0;background:transparent;color:var(--dim);
+    padding:8px 4px;min-height:36px;position:relative;font-size:12px;}
+  .tabs button:hover{background:transparent;color:var(--ink);}
+  .tabs button.on{background:transparent;color:var(--ink);font-weight:600;}
+  .tabs button.on::after{content:"";position:absolute;left:12%;right:12%;bottom:-1px;
+    height:2px;background:var(--ink);border-radius:2px;}
+
+  /* a grid of option icons, 4 across */
+  .igrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+  .igrid button{width:100%;height:40px;border-radius:12px;background:var(--panel2);}
+  .igrid button:hover{background:var(--panel3);}
+  .igrid button.on{background:var(--active);color:var(--onActive);}
+
+  /* the "Off / 16" toggle-and-value pair */
+  .pair{display:flex;align-items:center;gap:6px;background:var(--panel2);
+    border-radius:12px;padding:3px 3px 3px 10px;}
+  .pair span{font-size:11px;color:var(--dim);min-width:26px;
+    font-variant-numeric:tabular-nums;}
+
+  input[type=range]{-webkit-appearance:none;appearance:none;height:22px;
+    background:transparent;flex:1 1 60px;min-width:44px;}
+  input[type=range]::-webkit-slider-runnable-track{height:4px;background:var(--panel3);
+    border-radius:3px;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;
+    margin-top:-6px;border-radius:50%;background:var(--panel);
+    box-shadow:0 1px 4px rgba(0,0,0,.28);}
+  input[type=range]::-moz-range-track{height:4px;background:var(--panel3);border-radius:3px;}
+  input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;border:0;
+    background:var(--panel);box-shadow:0 1px 4px rgba(0,0,0,.28);}
+  input[type=color]{width:30px;height:30px;padding:0;border:0;border-radius:50%;
+    background:transparent;cursor:pointer;flex:0 0 auto;overflow:hidden;}
+  input[type=color]::-webkit-color-swatch-wrapper{padding:0;}
+  input[type=color]::-webkit-color-swatch{border:0;border-radius:50%;
+    box-shadow:0 0 0 1px var(--line);}
+
+  .sw{width:19px;height:19px;border-radius:50%;border:0;cursor:pointer;padding:0;
+    min-height:0;flex:0 0 auto;box-shadow:0 0 0 1px var(--line);}
+  .sw.on{box-shadow:0 0 0 2px var(--panel),0 0 0 4px var(--ink);}
+
+  /* ============================ top left ============================ */
+  #topleft{top:12px;left:12px;padding:5px;display:flex;gap:2px;align-items:center;}
+  #helpBtn{top:12px;left:160px;padding:5px;}
+
+  /* edge tab that collapses the brush rail, as in the reference */
+  #railTab{position:fixed;left:0;top:50%;transform:translateY(-50%);
+    width:20px;height:46px;padding:0;border-radius:0 12px 12px 0;
+    display:flex;align-items:center;justify-content:center;z-index:6;
+    background:var(--panel);box-shadow:var(--shadow);color:var(--dim);}
+  #railTab svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.9;
+    stroke-linecap:round;stroke-linejoin:round;transition:transform .18s;}
+  body.railhidden #railTab svg{transform:rotate(180deg);}
+  /* #brush is vertically centred, so its hidden state has to keep the -50% Y */
+  body.railhidden #brush{transform:translate(-135%,-50%);opacity:0;pointer-events:none;}
+  body.railhidden #undoPill{transform:translateX(-135%);opacity:0;pointer-events:none;}
+  #brush{transition:transform .2s ease,opacity .2s ease;}
+  #undoPill{left:12px;bottom:14px;padding:5px;display:flex;gap:2px;
+    transition:transform .2s ease,opacity .2s ease;}
+
+  #slidePop{padding:12px;width:212px;z-index:31;box-shadow:var(--shadowLg);
+    display:flex;flex-direction:column;gap:10px;}
+
+  /* ============================ tool pill ===========================
+     Six icons, because Draw/Select/Erase each toggle to their partner on a
+     repeat tap (spec D.1) — the partners stay in the DOM and reappear in the
+     compact grid, where there is room for all of them. */
+  #tools{top:12px;right:12px;padding:5px;display:flex;gap:2px;align-items:center;}
+  /* Only one of each toggle pair is ever shown — Draw/Shape, Select/Lasso,
+     Erase/Vacuum share an icon and swap on a repeat tap (spec D.1). The
+     partner stays in the DOM so the tool is still directly addressable. */
+  #tools .alt{display:none;}
+  /* a small dot marks the icons that hide a second mode */
+  #tools button[data-tool="draw"],#tools button[data-tool="shape"],
+  #tools button[data-tool="select"],#tools button[data-tool="lasso"],
+  #tools button[data-tool="erase"],#tools button[data-tool="vacuum"]{position:relative;}
+  #tools button[data-tool="draw"]::after,#tools button[data-tool="shape"]::after,
+  #tools button[data-tool="select"]::after,#tools button[data-tool="lasso"]::after,
+  #tools button[data-tool="erase"]::after,#tools button[data-tool="vacuum"]::after{
+    content:"";position:absolute;right:5px;bottom:5px;width:3px;height:3px;
+    border-radius:50%;background:var(--dim2);}
+  #tools button.on::after{background:var(--onActive);opacity:.55;}
+
+  /* ============================ brush rail ==========================
+     Deliberately narrow: colour, size, opacity, pressure, sampler. Brush TYPE
+     is a popover, the way Feather keeps the rail to one column. */
+  #brush{left:12px;top:50%;transform:translateY(-50%);padding:8px;width:58px;
+    display:flex;flex-direction:column;gap:6px;align-items:center;
+    max-height:calc(100vh - 120px);overflow:visible;}
+  #brushHead{display:none;}
+  #brushBody{display:flex;flex-direction:column;gap:8px;align-items:center;width:100%;}
+  #brushColor{width:34px;height:34px;border-radius:50%;padding:0;min-height:0;
+    box-shadow:0 0 0 1px var(--line), inset 0 0 0 3px var(--panel);}
+  .vstack{display:flex;flex-direction:column;align-items:center;gap:2px;width:100%;}
+  .vstack .val{min-width:0;text-align:center;font-size:9.5px;}
+  /* vertical sliders, so the rail can stay one column wide */
+  .vslider{height:74px;width:32px;display:flex;align-items:center;justify-content:center;}
+  .vslider input[type=range]{width:74px;transform:rotate(-90deg);flex:0 0 auto;min-width:0;}
+
+  /* brush-type popover, anchored to the rail */
+  #brushGrid{position:fixed;left:78px;top:50%;transform:translateY(-50%);
+    background:var(--panel);border-radius:var(--rCard);box-shadow:var(--shadowLg);
+    padding:8px;display:grid;grid-template-columns:repeat(2,1fr);gap:6px;z-index:26;}
+  #brushGrid.hidden{display:none !important;}
+  #brushGrid button{width:42px;height:38px;border-radius:11px;background:var(--panel2);
+    display:flex;align-items:center;justify-content:center;padding:0;min-height:0;}
+  #brushGrid button:hover{background:var(--panel3);}
+  #brushGrid button.on{background:var(--active);color:var(--onActive);}
+  #brushGrid svg{width:22px;height:16px;stroke:currentColor;fill:none;stroke-width:1.4;}
+
+  #swatches{display:grid;grid-template-columns:repeat(2,1fr);gap:4px;
+    justify-items:center;}
+
+  /* ============================ bottom bar ==========================
+     FACT (D.1): the guide tools live in a bottom context menu. */
+  #ctx{left:50%;transform:translateX(-50%);bottom:14px;padding:5px;
+    display:flex;gap:2px;align-items:center;max-width:calc(100vw - 150px);}
+  #ctxHint{color:var(--dim);font-size:12px;padding:0 12px;}
+  #guideBar,#ctxSlider{display:flex;gap:6px;align-items:center;}
+
+  /* ============================ joystick ============================
+     Circular, with three arcs standing for the three axes — Feather's
+     transform widget rather than a plain square pad. */
+  #joy{right:12px;top:50%;transform:translateY(-50%);width:132px;padding:10px;
+    display:flex;flex-direction:column;gap:8px;align-items:center;}
+  /* once dragged, the panel is positioned absolutely and the centring
+     transform has to go, or it would sit half a panel above the cursor */
+  #joy.placed{transform:none;}
+  #joyGrip{width:34px;height:5px;border-radius:3px;background:var(--panel3);
+    cursor:grab;flex:0 0 auto;touch-action:none;}
+  #joyGrip:active{cursor:grabbing;}
+  .axisArc{fill:none;stroke-width:5;stroke-linecap:round;opacity:.85;
+    transition:stroke-width .12s,opacity .12s;}
+  .axisArc.dim{opacity:.18;}
+  .axisArc.hot{stroke-width:8;opacity:1;}
+  .axisLab{font:600 9px system-ui,sans-serif;text-anchor:middle;
+    dominant-baseline:middle;opacity:.9;}
+  #joyPad{width:108px;height:108px;border-radius:50%;position:relative;
+    background:var(--panel2);touch-action:none;cursor:grab;overflow:hidden;}
+  #joyPad:active{cursor:grabbing;}
+  #joyPad svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
+  #joyPad::after{content:"";position:absolute;left:50%;top:50%;width:26px;height:26px;
+    margin:-13px 0 0 -13px;border-radius:50%;background:var(--panel);
+    box-shadow:0 2px 8px rgba(0,0,0,.22);}
+  #joyStrip{width:108px;height:26px;border-radius:13px;background:var(--panel2);
+    touch-action:none;cursor:ns-resize;position:relative;flex:0 0 auto;}
+  #joyStrip::after{content:"";position:absolute;left:50%;top:50%;width:22px;height:4px;
+    margin:-2px 0 0 -11px;border-radius:2px;background:var(--dim2);}
+  #joyTarget{color:var(--dim);font-size:10.5px;text-align:center;}
+  #joyMode{display:flex;gap:2px;width:100%;}
+  #joyMode button{flex:1 1 0;padding:4px 2px;min-height:28px;font-size:10.5px;
+    border-radius:9px;background:var(--panel2);}
+  #joyMode button.on{background:var(--active);color:var(--onActive);}
+
+  /* ============================ cards ============================ */
+  #scrim{position:fixed;inset:0;background:rgba(20,20,34,.28);z-index:29;
+    backdrop-filter:blur(3px);}
+  body.dark #scrim{background:rgba(0,0,0,.5);}
+  #sysMenu{top:50%;left:50%;transform:translate(-50%,-50%);
+    width:min(380px,calc(100vw - 24px));max-height:calc(100vh - 60px);overflow:auto;
+    padding:18px;z-index:30;display:flex;flex-direction:column;gap:14px;
+    box-shadow:var(--shadowLg);}
+  .mhead{display:flex;align-items:center;justify-content:space-between;}
+  .mhead b{font-size:15px;}
+
+  #stagePanel{right:12px;top:62px;width:264px;padding:14px;
+    max-height:calc(100vh - 90px);overflow:auto;display:flex;flex-direction:column;
+    gap:12px;z-index:28;box-shadow:var(--shadowLg);}
+  .list{display:flex;flex-direction:column;gap:4px;max-height:190px;overflow:auto;}
+  .listItem{display:flex;gap:8px;align-items:center;padding:7px 9px;border-radius:12px;
+    font-size:12px;cursor:pointer;background:var(--panel2);}
+  .listItem:hover{background:var(--panel3);}
+  .listItem .tag{color:var(--dim2);font-size:10px;margin-left:auto;}
+  .listItem.sel{background:var(--active);color:var(--onActive);}
+  .listItem.sel .tag{color:var(--onActive);opacity:.7;}
+  .empty{color:var(--dim2);font-size:11px;padding:3px 1px;line-height:1.55;}
+
+  #diag{top:62px;right:12px;padding:10px 12px;width:184px;
+    font:11px/1.55 ui-monospace,Menlo,Consolas,monospace;color:var(--dim);}
+  #diag b{color:var(--ink);font-weight:600;}
+  #diag .k{display:inline-block;width:58px;color:var(--dim2);font-style:normal;}
+  #diagHead{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}
+  #diagBody.hide{display:none;}
+
+  /* ============================ misc ============================ */
+  /* Sits on the top strip beside the home cluster, NOT along the bottom — the
+     bottom bar is centred and grows when a guide is active, which walked it
+     straight over a bottom-left readout. */
+  #viewInfo{top:12px;left:214px;padding:7px 13px;color:var(--dim);font-size:11px;
+    display:flex;gap:12px;font-variant-numeric:tabular-nums;}
+  #viewInfo b{color:var(--ink);font-weight:600;}
+  /* drop the optional figures before the readout can reach the tool pill */
+  @media (max-width:1000px){ #viewInfo .opt{display:none;} }
+
+  #toast{left:50%;transform:translateX(-50%) translateY(8px);bottom:74px;
+    padding:10px 18px;opacity:0;transition:opacity .18s,transform .18s;
+    pointer-events:none;z-index:50;font-size:13px;box-shadow:var(--shadowLg);}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+  #walk{left:50%;transform:translateX(-50%);bottom:84px;width:min(440px,92vw);
+    padding:18px 20px;z-index:40;display:flex;flex-direction:column;gap:10px;
+    box-shadow:var(--shadowLg);}
+  #walk h3{margin:0;font-size:15px;}
+  #walk p{margin:0;color:var(--dim);font-size:12.5px;line-height:1.6;}
+  #walkStep{color:var(--dim2);font-size:10px;letter-spacing:.11em;
+    text-transform:uppercase;font-weight:700;}
+
+  .tip{position:fixed;padding:6px 11px;background:var(--active);color:var(--onActive);
+    border-radius:9px;font-size:11.5px;pointer-events:none;z-index:60;opacity:0;
+    transition:opacity .12s;max-width:240px;line-height:1.5;box-shadow:var(--shadow);}
+  .tip.show{opacity:1;}
+  .tip i{font-style:normal;opacity:.65;}
+
+  /* ================= selection action bar =================
+     Appears at bottom-centre whenever something is selected: duplicate,
+     duplicate symmetrically, delete. Delete is the one red thing in the whole
+     interface, which is exactly how the reference uses colour. */
+  #selBar{left:50%;transform:translateX(-50%);bottom:78px;padding:5px;
+    display:flex;gap:2px;align-items:center;z-index:6;}
+  #selBar .ico{width:40px;height:36px;}
+  #btnSelDelete{color:var(--red);}
+  #btnSelDelete:hover{background:rgba(242,84,91,.12);}
+
+  /* ================= numeric keypad ================= */
+  #keypad{padding:10px;display:grid;grid-template-columns:repeat(3,58px);gap:6px;
+    z-index:31;box-shadow:var(--shadowLg);}
+  #keypad button{height:44px;font-size:16px;background:var(--panel2);border-radius:12px;}
+  #keypad button:hover{background:var(--panel3);}
+  #keypad .wide{grid-column:span 1;}
+  #keypadHead{grid-column:1/-1;display:flex;align-items:center;gap:8px;
+    padding:0 2px 4px;}
+  #keypadVal{flex:1 1 auto;font-size:15px;font-variant-numeric:tabular-nums;
+    text-align:right;font-weight:600;}
+  #keypadUnit{color:var(--dim2);font-size:11px;}
+  #keyBack{color:var(--red);}
+  #keyOk{background:var(--green);color:#083;}
+
+  /* ================= colour wheel ================= */
+  #colorCard{padding:12px;width:224px;z-index:31;box-shadow:var(--shadowLg);
+    display:flex;flex-direction:column;gap:10px;}
+  #hexRow{display:flex;align-items:center;gap:8px;background:var(--panel2);
+    border-radius:11px;padding:5px 6px 5px 10px;}
+  #hexIn{flex:1 1 auto;border:0;background:transparent;color:var(--ink);
+    font:12px ui-monospace,Menlo,Consolas,monospace;letter-spacing:.06em;
+    text-transform:uppercase;outline:none;min-width:0;}
+  #wheelWrap{position:relative;width:200px;height:200px;margin:0 auto;
+    touch-action:none;}
+  #wheelWrap canvas{position:absolute;inset:0;border-radius:50%;cursor:crosshair;}
+  #svBox{position:absolute;left:50%;top:50%;width:104px;height:104px;
+    margin:-52px 0 0 -52px;border-radius:10px;cursor:crosshair;overflow:hidden;}
+  .knob{position:absolute;width:14px;height:14px;border-radius:50%;
+    border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.35);pointer-events:none;
+    transform:translate(-50%,-50%);}
+
+  #saveDot{width:7px;height:7px;border-radius:50%;background:var(--green);
+    display:inline-block;margin-left:6px;vertical-align:middle;}
+  #saveDot.dirty{background:var(--accent);}
+  #saveDot.error{background:var(--red);}
+
+  #dock{display:none;}
+
+  @media (max-width:1150px){
+    #stagePanel{width:244px;}
+    #diag{display:none;}
+  }
+
+  /* ======================================================================
+     COMPACT — phones. Rails become bottom sheets; the dock is the only
+     permanent chrome. 44px touch targets throughout.
+     ====================================================================== */
+  body.compact #diag{display:none;}
+  body.compact button{min-height:44px;}
+  body.compact button.small{min-height:40px;}
+  body.compact input[type=range]{height:40px;}
+  body.compact input[type=range]::-webkit-slider-thumb{width:24px;height:24px;margin-top:-10px;}
+  body.compact #topleft{top:8px;left:8px;}
+  /* opposite corner from the home cluster, since the tool pill is a sheet here */
+  body.compact #viewInfo{font-size:10px;padding:5px 10px;gap:8px;
+    left:auto;right:8px;bottom:auto;top:8px;}
+  body.compact #viewInfo .opt{display:none;}
+
+  body.compact #tools,
+  body.compact #brush,
+  body.compact #joy,
+  body.compact #stagePanel{
+    left:0;right:0;top:auto;width:auto;
+    bottom:calc(60px + env(safe-area-inset-bottom));
+    max-height:56vh;overflow:auto;
+    border-radius:24px 24px 0 0;
+    transform:translateY(calc(100% + 90px));
+    transition:transform .22s ease;
+    z-index:20;padding:14px;
+  }
+  body.compact #tools.open,
+  body.compact #brush.open,
+  body.compact #joy.open,
+  body.compact #stagePanel.open{transform:translateY(0);}
+
+  /* three across, because the pairs stay merged here too — one Erase icon on
+     the phone as well as on the desktop */
+  body.compact #tools{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+  body.compact #tools .ico{width:100%;height:56px;border-radius:14px;
+    background:var(--panel2);}
+  body.compact #tools .ico.on{background:var(--active);}
+  body.compact #tools .div{display:none;}
+
+  body.compact #brush{flex-direction:column;align-items:stretch;}
+  body.compact #brushBody{align-items:stretch;}
+  body.compact .vslider{height:auto;width:auto;}
+  body.compact .vslider input[type=range]{transform:none;width:100%;flex:1 1 auto;}
+  body.compact .vstack{flex-direction:row;gap:10px;}
+  body.compact #brushGrid{position:static;transform:none;box-shadow:none;
+    grid-template-columns:repeat(5,1fr);padding:0;}
+  body.compact #brushGrid button{width:100%;height:48px;}
+  body.compact #swatches{grid-template-columns:repeat(10,1fr);}
+
+  body.compact #joy{align-items:center;}
+  body.compact #ctx{left:8px;right:8px;transform:none;max-width:none;
+    bottom:calc(60px + env(safe-area-inset-bottom));justify-content:center;
+    flex-wrap:wrap;}
+  body.compact #walk{bottom:calc(76px + env(safe-area-inset-bottom));}
+  body.compact #toast{bottom:calc(78px + env(safe-area-inset-bottom));}
+  body.compact #sysMenu{width:calc(100vw - 16px);}
+
+  body.compact #dock{
+    display:flex;gap:6px;align-items:center;left:0;right:0;bottom:0;top:auto;
+    padding:7px 8px calc(7px + env(safe-area-inset-bottom));
+    border-radius:0;z-index:25;
+  }
+  #dock button{flex:1 1 0;min-width:0;padding:6px 4px;font-size:11px;
+    background:var(--panel2);}
+  #dock button.on{background:var(--active);color:var(--onActive);}
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<svg id="overlay"><path id="lassoPath"></path></svg>
+
+<!-- reusable icon defs; every button references one with <use> -->
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7"/><path d="M6.5 9.6V19h11V9.6"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 8 5 12l4 4"/><path d="M5 12h9a5 5 0 0 1 0 10h-2"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M15 8l4 4-4 4"/><path d="M19 12h-9a5 5 0 0 0 0 10h2"/></symbol>
+  <symbol id="i-draw" viewBox="0 0 24 24"><path d="M12 3.5 18.5 20 12 16.4 5.5 20z"/></symbol>
+  <symbol id="i-shape" viewBox="0 0 24 24"><circle cx="9" cy="9" r="5"/><path d="M13 13h7v7h-7z"/></symbol>
+  <symbol id="i-guide" viewBox="0 0 24 24"><path d="M3.5 16 9.5 6.5h11L14.5 16z"/><path d="M6.6 16 12.6 6.5M10 16l6-9.5"/></symbol>
+  <symbol id="i-bend" viewBox="0 0 24 24"><path d="M4 19c0-8 5.5-12 13-12"/><path d="M13.5 3.5 17.5 7l-4 3.5"/></symbol>
+  <symbol id="i-loft" viewBox="0 0 24 24"><path d="M3.5 15.5c5-5 12-5 17 0"/><path d="M3.5 10c5-5 12-5 17 0"/></symbol>
+  <symbol id="i-solid" viewBox="0 0 24 24"><path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M12 12 20 7.5M12 12v9M12 12 4 7.5"/></symbol>
+  <symbol id="i-select" viewBox="0 0 24 24"><path d="M5.5 4.5 19 11l-5.8 1.8L11 19z"/></symbol>
+  <symbol id="i-lasso" viewBox="0 0 24 24"><ellipse cx="12" cy="10" rx="8" ry="6"/><path d="M8.5 15.4c-.4 2 .6 3.4 2.2 3.9"/></symbol>
+  <symbol id="i-smooth" viewBox="0 0 24 24"><path d="M3 14c3-7 6 7 9 0s6-7 9 0"/></symbol>
+  <symbol id="i-erase" viewBox="0 0 24 24"><path d="M8 18 4.5 14.5 13 6l6.5 6.5-5.5 5.5z"/><path d="M4 20h16"/></symbol>
+  <symbol id="i-vacuum" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><path d="M6.5 6.5 17.5 17.5"/></symbol>
+  <symbol id="i-mirror" viewBox="0 0 24 24"><path d="M12 3v18"/><path d="M8.5 7.5 4.5 12l4 4.5"/><path d="M15.5 7.5 19.5 12l-4 4.5"/></symbol>
+  <symbol id="i-stage" viewBox="0 0 24 24"><path d="M12 3.5 3.5 8 12 12.5 20.5 8z"/><path d="M3.5 13 12 17.5 20.5 13"/></symbol>
+  <symbol id="i-pick" viewBox="0 0 24 24"><path d="M18.5 3.6a2.3 2.3 0 0 0-3.3 0l-1.4 1.4 3.2 3.2 1.5-1.4a2.3 2.3 0 0 0 0-3.2z"/><path d="M13.2 6.3 5 14.5V19h4.5l8.2-8.2"/></symbol>
+  <symbol id="i-inject" viewBox="0 0 24 24"><path d="M14 4l6 6"/><path d="M17.5 6.5 8 16v3h3l9.5-9.5z" transform="translate(-2,-1)"/><path d="M5 19l-1.5 1.5"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.6"/></symbol>
+  <symbol id="i-brush" viewBox="0 0 24 24"><path d="M4 20s1-4 3.5-4S11 18 11 19s-3 2-7 1z"/><path d="M9.5 16.5 19 7a2 2 0 0 0-2.8-2.8L6.7 13.7"/></symbol>
+  <symbol id="i-dup" viewBox="0 0 24 24"><path d="M4 4h11v11H4z"/><path d="M8.5 19.5h11v-11"/></symbol>
+  <symbol id="i-dupmir" viewBox="0 0 24 24"><path d="M12 3v18"/><path d="M9.5 6 3 18h6.5z"/><path d="M14.5 6 21 18h-6.5z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6.5h16"/><path d="M9 6.5V4h6v2.5"/><path d="M6.5 6.5 7.5 20h9l1-13.5"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M5 5.5h14v13H5z"/><path d="M12 15V7.5"/><path d="M9 10.5 12 7.5l3 3"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 1 1 2.9 2.8V14"/><path d="M12.4 17.2h.01"/></symbol>
+  <symbol id="i-enter" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.5 12h5.5"/><path d="M12.8 9.8 15 12l-2.2 2.2"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9.5 5.5 16 12l-6.5 6.5"/></symbol>
+  <symbol id="i-size" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></symbol>
+  <symbol id="i-opacity" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-reset" viewBox="0 0 24 24"><path d="M5 12a7 7 0 1 0 2.2-5.1"/><path d="M4.5 4.5v4h4"/></symbol>
+  <symbol id="i-axis" viewBox="0 0 24 24"><path d="M6 4v14h14"/><path d="M17 15l3 3-3 3" transform="translate(0,-3)"/></symbol>
+</svg>
+
+<!-- ============================ top left ============================ -->
+<div id="topleft" class="panel">
+  <button class="ico" id="btnHome" data-tip="Reset view<br><i>F — or press-and-hold empty space</i>"><svg><use href="#i-grid"/></svg></button>
+  <button class="ico" id="btnExportTop" data-tip="Export — PNG or .plume file"><svg><use href="#i-export"/></svg></button>
+  <button class="ico" id="btnMenu" data-tip="Settings"><svg><use href="#i-menu"/></svg></button>
+</div>
+<div id="helpBtn" class="panel">
+  <button class="ico" id="btnWalkTop" data-tip="Walkthrough"><svg><use href="#i-help"/></svg></button>
+</div>
+
+<!-- ============================ tool pill ============================ -->
+<div id="tools" class="panel">
+  <button class="ico on" data-tool="draw"   data-tip="Draw — tap again for Draw Shape<br><i>D</i>"><svg><use href="#i-draw"/></svg></button>
+  <button class="ico alt" data-tool="shape" data-tip="Draw Shape — snaps to lines, curves and circles<br><i>R</i>"><svg><use href="#i-shape"/></svg></button>
+  <button class="ico" data-tool="select"    data-tip="Select — tap again for Lasso<br><i>S</i>"><svg><use href="#i-select"/></svg></button>
+  <button class="ico alt" data-tool="lasso" data-tip="Lasso — drag a loop<br><i>L</i>"><svg><use href="#i-lasso"/></svg></button>
+  <button class="ico" data-tool="smooth"    data-tip="Smooth — drag over a shaky curve<br><i>M</i>"><svg><use href="#i-smooth"/></svg></button>
+  <button class="ico" data-tool="erase"     data-tip="Eraser — tap again for Vacuum<br><i>E</i>"><svg><use href="#i-erase"/></svg></button>
+  <button class="ico alt" data-tool="vacuum" data-tip="Vacuum — deletes whole curves<br><i>V</i>"><svg><use href="#i-vacuum"/></svg></button>
+  <div class="div"></div>
+  <button class="ico" id="btnMirror" data-tip="Mirror — X, then Z"><svg><use href="#i-mirror"/></svg></button>
+  <button class="ico" id="btnStage"  data-tip="Stage — curves, resources, scene"><svg><use href="#i-stage"/></svg></button>
+</div>
+
+<!-- ============================ brush rail ============================ -->
+<!-- collapse tab on the very edge, as in the reference -->
+<button id="railTab" class="panel" data-tip="Hide the brush rail"><svg viewBox="0 0 24 24"><use href="#i-chev"/></svg></button>
+
+<div id="brush" class="panel">
+  <div id="brushHead"><h4>Brush</h4><button class="ico sm" id="btnBrushMin">–</button></div>
+  <div id="brushBody">
+    <button class="ico" id="brushType" data-tip="Brush type"><svg><use href="#i-brush"/></svg></button>
+    <button id="brushColor" data-tip="Colour"></button>
+    <div class="sep" style="width:100%"></div>
+    <button class="ico" id="btnSize" data-tip="Brush size — tap to type an exact value"><svg><use href="#i-size"/></svg></button>
+    <span class="val" id="sizeVal">14mm</span>
+    <button class="ico" id="btnOpacity" data-tip="Opacity"><svg><use href="#i-opacity"/></svg></button>
+    <span class="val" id="opacityVal">100%</span>
+    <div class="sep" style="width:100%"></div>
+    <button class="ico sm" id="btnPressure" data-tip="Pressure sensitivity"><svg><use href="#i-brush"/></svg></button>
+    <button class="ico sm" id="btnInject"  data-tip="Injector — samples the whole brush"><svg><use href="#i-inject"/></svg></button>
+  </div>
+</div>
+
+<!-- undo lives in its own pill below the rail, as in the reference -->
+<div id="undoPill" class="panel">
+  <button class="ico" id="btnUndo" data-tip="Undo<br><i>Ctrl+Z</i>"><svg><use href="#i-undo"/></svg></button>
+  <button class="ico" id="btnRedo" data-tip="Redo<br><i>Ctrl+Shift+Z</i>"><svg><use href="#i-redo"/></svg></button>
+</div>
+
+<!-- size / opacity slider popover, opened from the rail -->
+<div id="slidePop" class="panel hidden">
+  <div class="row">
+    <input type="range" id="size" min="1" max="120" value="14">
+    <span class="val" id="sizeValPop">14mm</span>
+  </div>
+  <div class="row">
+    <input type="range" id="opacity" min="5" max="100" value="100">
+    <span class="val" id="opacityValPop">100%</span>
+  </div>
+  <div class="row hidden" id="pressSeg">
+    <button class="small" data-p="size">Size</button>
+    <button class="small" data-p="opacity">Opac</button>
+    <button class="small" data-p="both">Both</button>
+    <button class="small" data-p="color">Col</button>
+  </div>
+</div>
+
+<input type="color" id="colorPick" value="#1b1c21" style="display:none">
+
+<!-- brush-type popover -->
+<div id="brushGrid" class="hidden">
+  <button data-brush="round"  class="on" data-tip="Round"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="7" stroke-linecap="round"/></svg></button>
+  <button data-brush="flat"   data-tip="Flat — follows pen tilt"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="3.5" stroke-linecap="butt"/></svg></button>
+  <button data-brush="taper"  data-tip="Taper — thins at both ends"><svg viewBox="0 0 28 20"><path d="M3 10c6-4 16-4 22 0-6 4-16 4-22 0z" fill="currentColor" stroke="none"/></svg></button>
+  <button data-brush="ink"    data-tip="Ink — pressure-driven"><svg viewBox="0 0 28 20"><path d="M3 11c6-5 16 3 22-3" stroke-width="4" stroke-linecap="round"/></svg></button>
+  <button data-brush="pencil" data-tip="Pencil — fine, dry"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="2" stroke-linecap="round"/></svg></button>
+  <button data-brush="marker" data-tip="Marker — broad chisel"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="9" stroke-linecap="butt"/></svg></button>
+  <button data-brush="chisel" data-tip="Chisel — hard blade"><svg viewBox="0 0 28 20"><path d="M4 15 24 5" stroke-width="6" stroke-linecap="butt"/></svg></button>
+  <button data-brush="wide"   data-tip="Wide — large areas fast"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="13" stroke-linecap="butt"/></svg></button>
+  <button data-brush="ribbon" data-tip="Ribbon — flat tape"><svg viewBox="0 0 28 20"><path d="M3 7h22M3 13h22" stroke-width="2"/></svg></button>
+  <button data-brush="glow"   data-tip="Glow — emissive"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="4" stroke-linecap="round" opacity=".35"/><path d="M3 10h22" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+</div>
+
+<!-- ==================== bottom context menu: guide tools ==================== -->
+<div id="ctx" class="panel">
+  <button class="ico" data-tool="guide" data-tip="Draw 3D Guide — extrudes along the view direction<br><i>G</i>"><svg><use href="#i-guide"/></svg></button>
+  <button class="ico" data-tool="bend"  data-tip="Bend — redraw the sweep from another viewpoint<br><i>B</i>"><svg><use href="#i-bend"/></svg></button>
+  <button class="ico" data-tool="loft"  data-tip="Loft — connect two or more curves"><svg><use href="#i-loft"/></svg></button>
+  <button class="ico" data-tool="prim"  data-tip="Primitives — cube, pyramid, sphere, tube"><svg><use href="#i-solid"/></svg></button>
+
+  <span id="ctxHint">Draw a stroke — it extrudes into a 3D guide.</span>
+
+  <div class="hidden" id="guideBar">
+    <div class="div"></div>
+    <label class="lab" id="guideName">Surface</label>
+    <button class="small filled" id="btnGuideBend" data-tip="Bend this guide">Bend</button>
+    <input type="range" id="guideOpacity" min="0" max="92" value="42" style="width:76px">
+    <span class="val" id="guideOpacityVal">42%</span>
+    <button class="ico sm" id="btnGuideSave" data-tip="Save to the Resource tab"><svg><use href="#i-eye"/></svg></button>
+    <button class="ico sm" id="btnGuideClose" data-tip="Close the guide"><svg><use href="#i-close"/></svg></button>
+  </div>
+
+  <div class="hidden" id="ctxSlider">
+    <div class="div"></div>
+    <label class="lab" id="ctxLabel">Tension</label>
+    <input type="range" id="ctxRange" min="0" max="100" value="100" style="width:90px">
+    <span class="val" id="ctxVal">1.0</span>
+    <span class="row hidden" id="ctxRow2">
+      <label class="lab" id="ctxLabel2">Taper</label>
+      <input type="range" id="ctxRange2" min="0" max="100" value="100" style="width:70px">
+      <span class="val" id="ctxVal2">1.0</span>
+    </span>
+    <span class="row hidden" id="primKinds">
+      <button class="small filled" data-prim="cube">Cube</button>
+      <button class="small filled" data-prim="pyramid">Pyr</button>
+      <button class="small filled" data-prim="sphere">Sph</button>
+      <button class="small filled" data-prim="tube">Tube</button>
+    </span>
+    <button class="small on" id="btnCtxDone">Done</button>
+    <button class="small filled" id="btnCtxCancel">Cancel</button>
+  </div>
+</div>
+
+<!-- ============================ joystick ============================ -->
+<div id="joy" class="panel hidden">
+  <div id="joyGrip" data-tip="Drag to move this panel<br><i>double-tap to reset it</i>"></div>
+  <div id="joyMode">
+    <button data-joy="move" class="on">Move</button>
+    <button data-joy="rotate">Turn</button>
+    <button data-joy="scale">Size</button>
+  </div>
+  <div id="joyPad" data-tip="Centre drags freely. Grab a coloured arc to stay on that axis.">
+    <svg viewBox="0 0 108 108">
+      <circle cx="54" cy="54" r="43" fill="none" stroke="var(--line)" stroke-width="1"/>
+      <circle cx="54" cy="54" r="19" fill="none" stroke="var(--line)" stroke-width="1"/>
+      <!-- the three arcs are positioned in JS: each sits where its world axis
+           points on screen, so they rotate as the camera orbits -->
+      <path id="arcX" class="axisArc" stroke="#f2545b"></path>
+      <path id="arcY" class="axisArc" stroke="#4cc38a"></path>
+      <path id="arcZ" class="axisArc" stroke="#5b9dff"></path>
+      <text id="labX" class="axisLab" fill="#f2545b">X</text>
+      <text id="labY" class="axisLab" fill="#4cc38a">Y</text>
+      <text id="labZ" class="axisLab" fill="#5b9dff">Z</text>
+    </svg>
+  </div>
+  <div id="joyStrip" data-tip="Depth axis — towards and away from the camera"></div>
+  <div id="joyTarget">Nothing selected</div>
+</div>
+
+<!-- ============================ stage card ============================ -->
+<div id="stagePanel" class="panel hidden">
+  <div class="tabs" id="stageTabs">
+    <button data-tab="group" class="on">Curves</button>
+    <button data-tab="res">Import</button>
+    <button data-tab="env">Scene</button>
+  </div>
+
+  <div id="bodyGroup" class="col">
+    <div class="list" id="groupList"></div>
+    <div class="row">
+      <button class="small filled grow" id="btnSelAll">Select all</button>
+      <button class="small filled grow" id="btnDelSel">Delete</button>
+    </div>
+    <div class="row">
+      <button class="small filled grow" id="btnDuplicate" data-tip="Copy the selection">Duplicate</button>
+      <button class="small filled grow" id="btnGroup">Group</button>
+      <button class="small filled grow" id="btnUngroup">Ungroup</button>
+    </div>
+  </div>
+
+  <div id="bodyRes" class="col hidden">
+    <button class="small filled" id="btnImportRef" data-tip="Trace over a photo or a 3D model.<br><i>PNG/JPG, or .obj / .stl</i>">Import reference…</button>
+    <div class="list" id="resList"></div>
+    <div class="empty">Saved guides and imported references live here. Draw straight onto any of them.</div>
+  </div>
+
+  <div id="bodyEnv" class="col hidden">
+    <div class="row"><label class="lab grow">Background</label><input type="color" id="bgPick" value="#eceaf3"></div>
+    <div class="igrid">
+      <button id="optGrid"   class="on" data-tip="Ground grid — one unit = 1000mm">Grid</button>
+      <button id="optAxis"   data-tip="Global axis, RGB = XYZ">Axis</button>
+      <button id="optFog"    data-tip="Fog follows the background">Fog</button>
+      <button id="optShaded" class="on" data-tip="Shaded material">Shade</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept=".json,application/json" style="display:none">
+<input type="file" id="refInput" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.obj,.stl,image/*" style="display:none">
+
+<!-- ============================ settings ============================ -->
+<div id="scrim" class="hidden"></div>
+<div id="sysMenu" class="panel hidden">
+  <div class="mhead"><b>Settings</b>
+    <button class="ico sm" id="btnMenuClose"><svg><use href="#i-close"/></svg></button></div>
+
+  <h4>Input</h4>
+  <div class="igrid">
+    <button class="small" id="optFinger" data-tip="Draw with a finger. On by default on touch hardware.">Finger</button>
+    <button class="small" id="optAutoGuide" data-tip="With no guide active, the first stroke becomes one">Auto&nbsp;guide</button>
+    <button class="small" id="optIsolate" data-tip="Curves behind the guide cannot be erased or selected">Isolate</button>
+    <button class="small" id="optClamp" data-tip="Strokes leaving the guide clamp to its nearest point">Clamp</button>
+    <button class="small" id="optHoldShape" data-tip="Hold the pen still mid-stroke to snap it to a line, curve or circle — then drag to adjust.<br><i>Works for curves, guide profiles and bend paths.</i>">Hold&nbsp;shape</button>
+  </div>
+  <div class="pair">
+    <span style="min-width:78px">Stable stroke</span>
+    <input type="range" id="stableAmt" min="0" max="95" value="45">
+    <span class="val" id="stableVal">45</span>
+    <button class="ico sm" id="optStable" data-tip="Stable Stroke — input stabiliser"><svg><use href="#i-smooth"/></svg></button>
+  </div>
+
+  <div class="sep"></div>
+  <h4>View</h4>
+  <div class="pair">
+    <span style="min-width:40px">Lens</span>
+    <input type="range" id="focal" min="10" max="500" value="50">
+    <span class="val" id="focalVal">50mm</span>
+  </div>
+  <div class="igrid">
+    <button class="small" id="btnProj" data-tip="Perspective / orthographic<br><i>O</i>">Ortho</button>
+    <button class="small" id="btnTheme" data-tip="Follows the background by default">Theme</button>
+    <button class="small" id="btnHideUI" data-tip="Double-tap the canvas to bring it back">Hide&nbsp;UI</button>
+    <button class="small" id="btnWalk">Guide</button>
+  </div>
+  <div class="igrid" id="viewSeg">
+    <button data-view="0" data-tip="Front — 1">Front</button>
+    <button data-view="1" data-tip="Back — 2">Back</button>
+    <button data-view="2" data-tip="Right — 3">Right</button>
+    <button data-view="3" data-tip="Left — 4">Left</button>
+    <button data-view="4" data-tip="Top — 5">Top</button>
+    <button data-view="5" data-tip="Bottom — 6">Btm</button>
+  </div>
+
+  <div class="sep"></div>
+  <h4>File <span id="saveDot" title="autosave state"></span></h4>
+  <div class="igrid">
+    <button class="small" id="btnNew">New</button>
+    <button class="small" id="btnSaveNow" data-tip="Sketches autosave automatically">Save</button>
+    <button class="small" id="btnExport" data-tip="Download as .plume.json">Export</button>
+    <button class="small" id="btnImport" data-tip="Open a .plume.json sketch">Open</button>
+    <button class="small" id="btnPNG">PNG</button>
+    <button class="small" id="btnClear">Clear</button>
+  </div>
+  <div id="saveInfo" class="empty">Autosaves to this device.</div>
+</div>
+
+<!-- ============================ diagnostics ============================ -->
+<div id="diag" class="panel hidden">
+  <div id="diagHead"><h4>Input</h4><button class="ico sm" id="diagX">–</button></div>
+  <div id="diagBody">
+    <div><i class="k">type</i><b id="dType">—</b></div>
+    <div><i class="k">pressure</i><b id="dPress">—</b></div>
+    <div><i class="k">tilt x/y</i><b id="dTilt">—</b></div>
+    <div><i class="k">buttons</i><b id="dBtn">—</b></div>
+    <div><i class="k">hover</i><b id="dHover">—</b></div>
+    <div><i class="k">barrel</i><b id="dBarrel">not seen</b></div>
+    <div><i class="k">strokes</i><b id="dCount">0</b></div>
+  </div>
+</div>
+
+<div id="viewInfo" class="panel">
+  <span class="opt">lens <b id="vFocal">50</b>mm</span>
+  <span><b id="vProj">Persp</b></span>
+  <span class="opt">pivot <b id="vPivot">auto</b></span>
+  <span><b id="vCount">0</b> curves</span>
+</div>
+
+<!-- ============================ onboarding ============================ -->
+<div id="walk" class="panel hidden">
+  <span id="walkStep">Step 1 of 6</span>
+  <h3 id="walkTitle">Draw one stroke</h3>
+  <p id="walkBody">Anything you draw first becomes a 3D guide.</p>
+  <div class="row">
+    <button class="small on grow" id="walkNext">Next</button>
+    <button class="small filled" id="walkSkip">Skip</button>
+  </div>
+</div>
+
+<!-- ============================ compact dock ============================ -->
+<div id="dock" class="panel">
+  <button id="dockUndo" data-tip="Undo">Undo</button>
+  <button id="dockRedo" data-tip="Redo">Redo</button>
+  <button id="dockTools" data-tip="Tools">Tools</button>
+  <button id="dockBrush" data-tip="Brush">Brush</button>
+  <button id="dockJoy"   data-tip="Transform">Move</button>
+  <button id="dockStage" data-tip="Stage">Stage</button>
+</div>
+
+<!-- ============ selection action bar ============ -->
+<div id="selBar" class="panel hidden">
+  <button class="ico" id="btnSelDup" data-tip="Duplicate"><svg><use href="#i-dup"/></svg></button>
+  <button class="ico" id="btnSelDupMir" data-tip="Duplicate symmetrically"><svg><use href="#i-dupmir"/></svg></button>
+  <button class="ico" id="btnSelDelete" data-tip="Delete"><svg><use href="#i-trash"/></svg></button>
+</div>
+
+<!-- ============ numeric keypad ============ -->
+<div id="keypad" class="panel hidden">
+  <div id="keypadHead">
+    <span id="keypadLabel" class="lab">Size</span>
+    <span id="keypadVal">14</span><span id="keypadUnit">mm</span>
+  </div>
+  <button data-key="1">1</button><button data-key="2">2</button><button data-key="3">3</button>
+  <button data-key="4">4</button><button data-key="5">5</button><button data-key="6">6</button>
+  <button data-key="7">7</button><button data-key="8">8</button><button data-key="9">9</button>
+  <button id="keyBack" data-key="back">⌫</button>
+  <button data-key="0">0</button>
+  <button id="keyOk" data-key="ok">✓</button>
+</div>
+
+<!-- ============ colour wheel ============ -->
+<div id="colorCard" class="panel hidden">
+  <div id="hexRow">
+    <input id="hexIn" value="1B1C21" spellcheck="false" maxlength="7">
+    <button class="ico sm" id="btnHexPick" data-tip="Sample a colour from the sketch"><svg><use href="#i-pick"/></svg></button>
+  </div>
+  <div id="wheelWrap">
+    <canvas id="hueWheel" width="200" height="200"></canvas>
+    <div id="svBox"><canvas id="svCanvas" width="104" height="104"></canvas></div>
+    <div class="knob" id="hueKnob"></div>
+    <div class="knob" id="svKnob"></div>
+  </div>
+  <div id="swatches"></div>
+</div>
+
+<div id="toast" class="panel"></div>
+<div id="tip" class="tip"></div>
+
+<!-- three.js is vendored, not from a CDN: this has to run offline from day one
+     inside a packaged Android app. -->
+<script src="js/vendor/three.min.js"></script>
+<script src="js/core.js"></script>
+<script src="js/camera.js"></script>
+<script src="js/strokes.js"></script>
+<script src="js/guides.js"></script>
+<script src="js/import.js"></script>
+<script src="js/doc.js"></script>
+<script src="js/tools.js"></script>
+<script src="js/app.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/input.js"></script>
+<script>P.boot();</script>
+</body>
+</html>
