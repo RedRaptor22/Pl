@@ -22,7 +22,10 @@ var S = P.Strokes, G = P.Guides;
 
 var D = P.Doc = {
   FORMAT  : 'plume',
-  VERSION : 1,
+  /* v2 adds named groups with their own visibility. v1 stored `group` as a
+     bare number with no name and no list, so a v1 file is read by inventing
+     one group per distinct id — see restoreGroups(). */
+  VERSION : 2,
   dirty   : false,
   lastSaved : 0
 };
@@ -238,6 +241,12 @@ D.serialize = function(){
       stableOn:!!T.stableOn, stable:q(T.stable), mirror:T.mirror,
       autoGuide:!!T.autoGuide
     },
+    groups: {
+      active: S.activeGroup,
+      list: S.groups.map(function(g){
+        return { id:g.id, name:g.name, visible:g.visible !== false };
+      })
+    },
     strokes: S.list.map(packStroke),
     guides: {
       active: G.active ? packGuide(G.active) : null,
@@ -245,6 +254,44 @@ D.serialize = function(){
     }
   };
 };
+
+/* Groups, or an honest reconstruction of them.
+
+   A v2 file carries the list. A v1 file carries only a number per stroke, so
+   every distinct number becomes a group — named, because a nameless group is
+   not something the panel can show — and strokes that were never grouped land
+   in the first one. Either way the document ends up with at least one group
+   and a valid active id, because a sketch always has somewhere to draw. */
+function restoreGroups(doc, strokes, maxGroup){
+  S.groups.length = 0;
+  S.nextGroup = Math.max(1, maxGroup + 1);
+
+  if(doc.groups && doc.groups.list && doc.groups.list.length){
+    for(var i=0;i<doc.groups.list.length;i++){
+      var g = doc.groups.list[i];
+      S.groups.push({ id:g.id, name:g.name || ('Group ' + (i+1)),
+                      visible: g.visible !== false });
+      if(g.id >= S.nextGroup) S.nextGroup = g.id + 1;
+    }
+    S.activeGroup = doc.groups.active;
+  } else {
+    /* v1: invent one group per id that was actually used */
+    var seen = [], k;
+    for(k=0;k<strokes.length;k++){
+      if(strokes[k].group && seen.indexOf(strokes[k].group) < 0) seen.push(strokes[k].group);
+    }
+    seen.sort(function(a,b){ return a-b; });
+    S.groups.push({ id: S.nextGroup++, name:'Group 1', visible:true });
+    for(k=0;k<seen.length;k++){
+      S.groups.push({ id: seen[k], name:'Group ' + (k+2), visible:true });
+    }
+    for(k=0;k<strokes.length;k++){
+      if(!strokes[k].group) strokes[k].group = S.groups[0].id;
+    }
+    S.activeGroup = S.groups[0].id;
+  }
+  S.ensureGroup();
+}
 
 /* Replaces the scene wholesale. History is cleared rather than preserved:
    undoing from a freshly opened document back into the previous one would be
@@ -257,14 +304,18 @@ D.restore = function(doc){
 
   var i;
   if(doc.strokes){
-    var maxGroup = 0;
+    var maxGroup = 0, restored = [];
     for(i=0;i<doc.strokes.length;i++){
       var st = unpackStroke(doc.strokes[i]);
       if(st.group && st.group > maxGroup) maxGroup = st.group;
-      if(st.pts.length) S.add(st);
+      if(st.pts.length) restored.push(st);
     }
-    /* keep new group ids from colliding with restored ones */
-    S.nextGroup = maxGroup + 1;
+    restoreGroups(doc, restored, maxGroup);
+    /* added AFTER the groups exist, so each mesh is built with the right
+       visibility rather than flashing on and being hidden a frame later */
+    for(i=0;i<restored.length;i++) S.add(restored[i]);
+  } else {
+    restoreGroups(doc, [], 0);
   }
   if(doc.guides){
     if(doc.guides.resources){
@@ -316,6 +367,9 @@ D.restore = function(doc){
 D.clear = function(quiet){
   S.clear();
   S.clearSelection();
+  S.groups.length = 0;
+  S.activeGroup = 0;
+  S.ensureGroup();
   G.setActive(null);
   for(var i=0;i<G.resources.length;i++) G.dispose(G.resources[i]);
   G.resources.length = 0;

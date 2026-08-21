@@ -289,6 +289,29 @@
     max-height:calc(100vh - 90px);overflow:auto;display:flex;flex-direction:column;
     gap:12px;z-index:28;box-shadow:var(--shadowLg);}
   .list{display:flex;flex-direction:column;gap:4px;max-height:190px;overflow:auto;}
+  #groupList{max-height:268px;}
+  /* ---- group rows ------------------------------------------------------
+     Feather's grouping panel: one row per group, the name on the left, then
+     the "move selection in here" arrow and the visibility eye. The active
+     group is the highlighted one. */
+  #grpHead{align-items:center;gap:6px;}
+  .ico.danger{color:var(--bad,#d2413f);}
+  .grpRow{display:flex;align-items:center;gap:2px;padding:5px 4px 5px 8px;
+    border-radius:12px;background:var(--panel2);border:1.5px solid transparent;
+    touch-action:none;}
+  .grpRow:hover{background:var(--panel3);}
+  .grpRow.on{border-color:var(--ink);background:var(--panel3);}
+  .grpRow.hidden-group .grpName,.grpRow.hidden-group .grpCount{opacity:.45;}
+  .grpName{flex:1 1 auto;min-width:0;text-align:left;background:transparent;
+    padding:3px 2px;border-radius:7px;font-size:13px;color:var(--ink);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:0;}
+  .grpName:hover{background:var(--panel);}
+  .grpNameEdit{flex:1 1 auto;min-width:0;font:inherit;font-size:13px;
+    color:var(--ink);background:var(--panel);border:0;border-radius:7px;
+    padding:3px 4px;outline:1.5px solid var(--ink);}
+  .grpCount{flex:0 0 auto;color:var(--dim2);font-size:10px;padding:0 2px;}
+  .grpRow .ico.sm{flex:0 0 auto;width:28px;height:28px;}
+  .grpRow .ico.sm.off{color:var(--dim2);}
   .listItem{display:flex;gap:8px;align-items:center;padding:7px 9px;border-radius:12px;
     font-size:12px;cursor:pointer;background:var(--panel2);}
   .listItem:hover{background:var(--panel3);}
@@ -480,6 +503,8 @@
   <symbol id="i-pick" viewBox="0 0 24 24"><path d="M18.5 3.6a2.3 2.3 0 0 0-3.3 0l-1.4 1.4 3.2 3.2 1.5-1.4a2.3 2.3 0 0 0 0-3.2z"/><path d="M13.2 6.3 5 14.5V19h4.5l8.2-8.2"/></symbol>
   <symbol id="i-inject" viewBox="0 0 24 24"><path d="M14 4l6 6"/><path d="M17.5 6.5 8 16v3h3l9.5-9.5z" transform="translate(-2,-1)"/><path d="M5 19l-1.5 1.5"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M3 10.5S6.5 16 12 16s9-5.5 9-5.5"/><path d="M5.5 13.4 3.6 16"/><path d="M18.5 13.4 20.4 16"/><path d="M12 16v3"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.6"/></symbol>
   <symbol id="i-brush" viewBox="0 0 24 24"><path d="M4 20s1-4 3.5-4S11 18 11 19s-3 2-7 1z"/><path d="M9.5 16.5 19 7a2 2 0 0 0-2.8-2.8L6.7 13.7"/></symbol>
   <symbol id="i-dup" viewBox="0 0 24 24"><path d="M4 4h11v11H4z"/><path d="M8.5 19.5h11v-11"/></symbol>
@@ -651,15 +676,18 @@
   </div>
 
   <div id="bodyGroup" class="col">
+    <div class="row" id="grpHead">
+      <button class="ico sm danger" id="btnGroupDel" data-tip="Delete this group and everything in it"><svg><use href="#i-trash"/></svg></button>
+      <button class="ico sm" id="btnGroupDup" data-tip="Duplicate this group and its curves"><svg><use href="#i-dup"/></svg></button>
+      <span class="grow"></span>
+      <button class="ico sm" id="btnGroupNew" data-tip="New group"><svg><use href="#i-plus"/></svg></button>
+    </div>
     <div class="list" id="groupList"></div>
+    <div class="empty" id="grpHint">Tap a row to draw into it, its name to rename · hold to select its curves · the arrow moves the selection in</div>
     <div class="row">
       <button class="small filled grow" id="btnSelAll">Select all</button>
-      <button class="small filled grow" id="btnDelSel">Delete</button>
-    </div>
-    <div class="row">
       <button class="small filled grow" id="btnDuplicate" data-tip="Copy the selection">Duplicate</button>
-      <button class="small filled grow" id="btnGroup">Group</button>
-      <button class="small filled grow" id="btnUngroup">Ungroup</button>
+      <button class="small filled grow" id="btnDelSel">Delete</button>
     </div>
   </div>
 

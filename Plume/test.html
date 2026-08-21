@@ -174,6 +174,7 @@ function run(W){
   }
   function reset(){
     P.Strokes.clear(); P.Guides.setActive(null); P.Guides.resources.length = 0;
+    P.Strokes.groups.length = 0; P.Strokes.activeGroup = 0; P.Strokes.ensureGroup();
     P.History.clear(); P.TOOL.mirror = null; P.Guides.isolate = true;
     P.TOOL.sizeMM = 14; P.TOOL.eraserMM = 20;
     P.TOOL.autoGuide = false; P.TOOL.brush = 'pen';
@@ -1392,24 +1393,137 @@ function run(W){
   P.History.undo();
   ck('duplicate is undoable', P.Strokes.list.length === 2);
 
+  /* ---- the grouping panel ----
+     Rebuilt to match Feather's: every curve is in a named group, drawing goes
+     into the active one, and the panel is where you move things between them.
+     FACT (C.8): undo covers add/delete group. */
+  reset();
+  ck('a sketch always has a group to draw into',
+     P.Strokes.groups.length === 1 && !!P.Strokes.findGroup(P.Strokes.activeGroup));
+  pen([{x:CX-60,y:CY-40},{x:CX,y:CY-40},{x:CX+60,y:CY-40}]);
+  pen([{x:CX-60,y:CY+40},{x:CX,y:CY+40},{x:CX+60,y:CY+40}]);
+  ck('a new curve joins the active group',
+     P.Strokes.list[0].group === P.Strokes.activeGroup &&
+     P.Strokes.list[1].group === P.Strokes.activeGroup);
+
+  var gA = P.Strokes.groups[0];
+  var gB = P.Tools.newGroup('Interior backface');
+  ck('a new group is added and becomes active',
+     P.Strokes.groups.length === 2 && P.Strokes.activeGroup === gB.id);
+  ck('...and it is undoable', (function(){
+    P.History.undo();
+    var gone = P.Strokes.groups.length === 1 && P.Strokes.activeGroup === gA.id;
+    P.History.redo();
+    return gone && P.Strokes.groups.length === 2;
+  })());
+
+  /* THE ARROW: selected curves move into the group whose arrow you tap */
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  var moved = P.Tools.assignSelection(gB.id);
+  ck('the arrow moves the selection into that group', moved === 1 &&
+     P.Strokes.list[0].group === gB.id && P.Strokes.list[1].group === gA.id);
+  ck('...and nothing else follows it', P.Strokes.membersOf(gB.id).length === 1);
+  P.History.undo();
+  ck('...and that is undoable too', P.Strokes.list[0].group === gA.id);
+  P.History.redo();
+
+  /* LONG PRESS: select everything in a group */
   P.Strokes.clearSelection();
-  P.Strokes.list.forEach(function(st){ P.Strokes.setSelected(st, true); });
-  P.Tools.groupSelection();
-  ck('grouping tags the members', !!P.Strokes.list[0].group &&
-     P.Strokes.list[0].group === P.Strokes.list[1].group);
-  P.Strokes.clearSelection();
-  P.Tools.selectWithGroup(P.Strokes.list[0]);
-  ck('picking one member selects the group', P.Strokes.selection.length === 2);
+  P.Strokes.setSelected(P.Strokes.list[1], true);
+  var picked = P.Tools.selectGroup(gA.id);
+  ck('selecting a group takes exactly its members', picked === 1 &&
+     P.Strokes.selection.length === 1 && P.Strokes.selection[0] === P.Strokes.list[1]);
+
+  /* THE EYE */
+  P.Tools.setGroupVisible(gB.id, false);
+  ck('hiding a group hides its curves',
+     P.Strokes.list[0].mesh.visible === false && P.Strokes.list[1].mesh.visible === true);
+  ck('...and a hidden curve cannot be selected by tapping it', (function(){
+    var mid = ts(P.Strokes.list[0].pts[1].p);
+    return P.Strokes.hitTest(mid.x, mid.y) === null;
+  })());
+  ck('...nor erased', (function(){
+    var mid = ts(P.Strokes.list[0].pts[1].p);
+    var before = P.Strokes.list.length;
+    P.setTool('erase'); P.TOOL.eraserMM = 120;
+    pen([{x:mid.x,y:mid.y},{x:mid.x+1,y:mid.y}]);
+    P.setTool('draw'); P.TOOL.eraserMM = 20;
+    return P.Strokes.list.length === before;
+  })());
+  P.Tools.setGroupVisible(gB.id, true);
+  ck('showing it again brings the curves back',
+     P.Strokes.list[0].mesh.visible === true);
+
+  /* renaming */
+  P.Tools.renameGroup(gB.id, 'Rough sketch');
+  ck('a group can be renamed', P.Strokes.findGroup(gB.id).name === 'Rough sketch');
+  P.History.undo();
+  ck('...and the old name comes back', P.Strokes.findGroup(gB.id).name === 'Interior backface');
+  P.History.redo();
+
+  /* duplicate and delete */
+  var dup = P.Tools.duplicateGroup(gB.id);
+  ck('duplicating a group copies its curves too',
+     P.Strokes.groups.length === 3 && P.Strokes.membersOf(dup.id).length === 1 &&
+     P.Strokes.list.length === 3);
+  P.History.undo();
+  ck('...undoably', P.Strokes.groups.length === 2 && P.Strokes.list.length === 2);
+
+  var beforeDel = P.Strokes.list.length;
+  P.Tools.deleteGroup(gB.id);
+  ck('deleting a group takes its curves with it',
+     P.Strokes.groups.length === 1 && P.Strokes.list.length === beforeDel - 1);
+  P.History.undo();
+  ck('...and undo brings both back',
+     P.Strokes.groups.length === 2 && P.Strokes.list.length === beforeDel);
+  ck('the last group cannot be deleted out from under you', (function(){
+    P.Tools.deleteGroup(gB.id);
+    return P.Tools.deleteGroup(P.Strokes.groups[0].id) === false &&
+           P.Strokes.groups.length === 1;
+  })());
+
+  ck('a hidden group is left out of select all', (function(){
+    reset();
+    pen([{x:CX-120,y:CY-40},{x:CX+120,y:CY-40}]);
+    var g5 = P.Tools.newGroup('Hidden');
+    pen([{x:CX-120,y:CY+40},{x:CX+120,y:CY+40}]);
+    P.Tools.setGroupVisible(g5.id, false);
+    W.document.getElementById('btnSelAll').click();
+    var n5 = P.Strokes.selection.length;
+    P.Strokes.clearSelection();
+    return n5 === 1;
+  })());
+  ck('...and out of an export, because it is not on screen', (function(){
+    var parts5 = P.Export.collect();
+    var all5 = P.Export.collect({strokes: P.Strokes.list});
+    return parts5.length === 1 && all5.length === 2;
+  })());
+  reset();
+
+  /* round trip, and reading a v1 file that has no group list at all */
+  P.Tools.newGroup('Sub drawing');
+  P.Tools.setGroupVisible(P.Strokes.groups[0].id, false);
   var gjson = JSON.stringify(P.Doc.serialize());
   P.Doc.clear();
   P.Doc.restore(JSON.parse(gjson));
   ck('groups survive a save/load round trip',
-     !!P.Strokes.list[0].group && P.Strokes.list[0].group === P.Strokes.list[1].group);
-  P.Strokes.list.forEach(function(st){ P.Strokes.setSelected(st, true); });
-  P.Tools.ungroupSelection();
-  ck('ungroup clears the tag', !P.Strokes.list[0].group);
-  P.History.undo();
-  ck('ungroup is undoable', !!P.Strokes.list[0].group);
+     P.Strokes.groups.length === 2 &&
+     P.Strokes.groups.map(function(g){ return g.name; }).indexOf('Sub drawing') >= 0);
+  ck('...including which of them are hidden',
+     P.Strokes.groups[0].visible === false);
+  ck('...and which one is active', !!P.Strokes.findGroup(P.Strokes.activeGroup));
+
+  ck('a v1 file with no group list still opens', (function(){
+    var v1 = JSON.parse(gjson);
+    v1.version = 1;
+    delete v1.groups;
+    v1.strokes.forEach(function(st, i){ st.group = i === 0 ? 7 : null; });
+    if(!P.Doc.restore(v1)) return false;
+    /* one invented group per id that was used, plus a home for the ungrouped */
+    return P.Strokes.groups.length >= 1 &&
+           P.Strokes.list.every(function(st){ return !!P.Strokes.findGroup(st.group); });
+  })(), P.Strokes.groups.map(function(g){ return g.name; }).join(', '));
+  reset();
 
   /* ================= render correctness ==================
      These render and read the framebuffer, because the bug they guard against
@@ -2439,7 +2553,54 @@ function run(W){
       P.TOOL.stableOn = true;
       P.setTool('draw');
       reset(); P.killSpin();
-      flush();
+
+      /* ---- holding a group row selects its curves ---- */
+      group('Grouping panel — hold to select');
+      var GD = W.document;
+      P.TOOL.autoGuide = false; P.TOOL.stableOn = false;
+      pen([{x:CX-140,y:CY-50},{x:CX,y:CY-30},{x:CX+140,y:CY-60}]);
+      pen([{x:CX-140,y:CY+50},{x:CX,y:CY+70},{x:CX+140,y:CY+40}]);
+      var hg = P.Tools.newGroup('Plate window');
+      pen([{x:CX-100,y:CY},{x:CX+100,y:CY}]);        // one curve in the new group
+      if(GD.getElementById('stagePanel').classList.contains('hidden')){
+        GD.getElementById('btnStage').click();
+      }
+      P.UI.refresh();
+      var gRows = GD.querySelectorAll('#groupList .grpRow');
+      ck('the panel lists one row per group', gRows.length === 2,
+         gRows.length + ' rows for ' + P.Strokes.groups.length + ' groups');
+      ck('the active group is the highlighted one',
+         gRows[0].classList.contains('on') &&
+         String(gRows[0].dataset.id) === String(P.Strokes.activeGroup));
+      ck('each row shows how many curves it holds',
+         gRows[0].querySelector('.grpCount').textContent === '1' &&
+         gRows[1].querySelector('.grpCount').textContent === '2');
+
+      P.Strokes.clearSelection(); P.onSceneChange();
+      function rowPress(row, type){
+        row.dispatchEvent(new W.PointerEvent(type, {pointerId:42, pointerType:'touch',
+          clientX:0, clientY:0, bubbles:true, cancelable:true}));
+      }
+      var secondRow = GD.querySelectorAll('#groupList .grpRow')[1];
+      rowPress(secondRow, 'pointerdown');
+      return wait(620).then(function(){
+        ck('holding a row selects everything in that group',
+           P.Strokes.selection.length === 2,
+           P.Strokes.selection.length + ' selected');
+        rowPress(secondRow, 'pointerup');
+
+        /* and a plain tap just makes it the group you draw into */
+        var rows2 = GD.querySelectorAll('#groupList .grpRow');
+        var target = P.Strokes.groups[1].id;
+        rowPress(rows2[1], 'pointerdown');
+        rowPress(rows2[1], 'pointerup');
+        ck('a tap on a row makes it active instead',
+           P.Strokes.activeGroup === target);
+        P.Strokes.clearSelection();
+        GD.getElementById('btnStage').click();
+        reset(); P.killSpin();
+        flush();
+      });
     });
   });
 }

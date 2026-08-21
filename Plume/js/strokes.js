@@ -433,6 +433,7 @@ S.rebuild = function(stroke){
   stroke.mesh.userData.stroke = stroke;
   stroke.mesh.material.uniforms.uSelect.value = stroke.selected ? 1 : 0;
   stroke.mesh.frustumCulled = true;
+  stroke.mesh.visible = S.visible(stroke);
   group.add(stroke.mesh);
 };
 
@@ -658,6 +659,90 @@ S.freezeFrames = function(stroke){
 };
 
 /* ==========================================================================
+   Groups
+   --------------------------------------------------------------------------
+   FACT (C.8): undo covers "add/delete group", so a group is part of the
+   document, not a listing the panel invents.
+
+   Modelled on Feather's own panel: a flat, ordered list of NAMED groups, each
+   with its own visibility, one of them active. Every curve belongs to exactly
+   one — drawing puts it in the active group — which is what makes the panel a
+   place you organise a sketch from rather than a scrolling inventory of every
+   line you have ever drawn.
+
+   The previous model was the other way round: `group` was null until you
+   selected two curves and pressed Group, groups had no names and no
+   visibility, and the panel listed curves individually. Tapping any curve then
+   selected its whole group, which is reasonable for ad-hoc grouping and wrong
+   once everything is grouped by default — so that rule moves to a long press
+   on the group row, where it is asked for rather than assumed.
+   ========================================================================== */
+S.groups = [];                  // ordered, first = top of the panel
+S.activeGroup = 0;              // id that new curves join
+
+function findGroup(id){
+  for(var i=0;i<S.groups.length;i++) if(S.groups[i].id === id) return S.groups[i];
+  return null;
+}
+S.findGroup = findGroup;
+
+S.groupOf = function(stroke){ return findGroup(stroke.group); };
+S.membersOf = function(id){
+  return S.list.filter(function(st){ return st.group === id; });
+};
+
+/* A sketch always has somewhere to draw. */
+S.ensureGroup = function(){
+  if(!S.groups.length) S.addGroup('Group 1');
+  if(!findGroup(S.activeGroup)) S.activeGroup = S.groups[0].id;
+  return findGroup(S.activeGroup);
+};
+
+S.addGroup = function(name, at){
+  var g = { id: S.nextGroup++, name: name || ('Group ' + (S.groups.length+1)),
+            visible: true };
+  if(at === undefined || at < 0 || at > S.groups.length) S.groups.unshift(g);
+  else S.groups.splice(at, 0, g);
+  return g;
+};
+
+S.removeGroup = function(id){
+  for(var i=0;i<S.groups.length;i++){
+    if(S.groups[i].id === id){ S.groups.splice(i,1); return i; }
+  }
+  return -1;
+};
+
+S.insertGroup = function(g, at){
+  S.groups.splice(P.clamp(at, 0, S.groups.length), 0, g);
+  return g;
+};
+
+/* A curve is drawable, selectable, erasable and exportable only if its group
+   says so. The raycaster does NOT check .visible, so everything that reaches
+   into the scene has to ask this rather than assume. */
+S.visible = function(stroke){
+  var g = findGroup(stroke.group);
+  return !g || g.visible !== false;
+};
+
+S.applyVisibility = function(){
+  for(var i=0;i<S.list.length;i++){
+    var st = S.list[i];
+    if(st.mesh) st.mesh.visible = S.visible(st);
+    if(!S.visible(st) && st.selected) S.setSelected(st, false);
+  }
+};
+
+S.setGroupVisible = function(id, on){
+  var g = findGroup(id);
+  if(!g) return false;
+  g.visible = !!on;
+  S.applyVisibility();
+  return true;
+};
+
+/* ==========================================================================
    Collection
    ========================================================================== */
 S.add = function(stroke){
@@ -665,6 +750,7 @@ S.add = function(stroke){
   S.list.push(stroke);
   if(!stroke.mesh) S.rebuild(stroke);
   else if(stroke.mesh.parent !== group) group.add(stroke.mesh);
+  if(stroke.mesh) stroke.mesh.visible = S.visible(stroke);
 };
 
 S.remove = function(stroke){
@@ -708,6 +794,7 @@ S.hitTest = function(x, y){
   var ray = P.rayFrom(x, y);
   var hits = ray.intersectObjects(group.children, false);
   for(var i=0;i<hits.length;i++){
+    if(hits[i].object.visible === false) continue;      // hidden group
     if(P.Guides.isMasked(hits[i].point)) continue;
     return {stroke: hits[i].object.userData.stroke, point: hits[i].point};
   }
@@ -729,7 +816,9 @@ S.hitTest = function(x, y){
 function eraseRuns(split){
   var removed = [], added = [], i, k;
   for(i=S.list.length-1; i>=0; i--){
-    var st = S.list[i], runs = split(st);
+    var st = S.list[i];
+    if(!S.visible(st)) continue;                        // hidden group
+    var runs = split(st);
     if(!runs) continue;
     removed.push(st);
     for(k=0;k<runs.length;k++){
@@ -893,6 +982,7 @@ S.vacuumAt = function(x, y){
   var ray = P.rayFrom(x, y);
   var hits = ray.intersectObjects(group.children, false), killed = [];
   for(var i=0;i<hits.length;i++){
+    if(hits[i].object.visible === false) continue;      // hidden group
     if(P.Guides.isMasked(hits[i].point)) continue;
     var st = hits[i].object.userData.stroke;
     if(st && killed.indexOf(st) < 0) killed.push(st);

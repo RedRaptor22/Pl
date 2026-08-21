@@ -138,8 +138,12 @@ EX.collect = function(opts){
   opts = opts || {};
   var scale = opts.scale === undefined ? MM_PER_UNIT : opts.scale;
   var zUp = !!opts.zUp;
+  /* By default a hidden group is not exported — it is not part of what you
+     are looking at. An explicit `strokes` list is taken as given. */
   var list = opts.strokes ||
-             (opts.selectionOnly ? S.selection.slice() : S.list.slice());
+             (opts.selectionOnly ? S.selection : S.list).filter(function(st){
+               return !S.visible || S.visible(st);
+             });
 
   P.scene.updateMatrixWorld(true);
 

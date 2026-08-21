@@ -170,6 +170,7 @@ function newStroke(){
     opacity: TOOL.opacity,
     pressureTarget: TOOL.pressureOn ? TOOL.pressureTarget : 'none',
     seedRef: null,
+    group: S.ensureGroup().id,        // a curve is drawn INTO a group
     pts: [], mesh: null, selected: false
   };
 }
@@ -751,7 +752,7 @@ function stepSmooth(x, y){
 
   for(var i=0;i<S.list.length;i++){
     var st = S.list[i], pts = st.pts, n = pts.length;
-    if(n < 3) continue;
+    if(n < 3 || !S.visible(st)) continue;
     var touched = false;
     /* one pass, endpoints pinned so the curve keeps its extent */
     for(var j=1;j<n-1;j++){
@@ -824,6 +825,7 @@ function endLasso(){
   var hits = [];
   for(var i=0;i<S.list.length;i++){
     var st = S.list[i], pts = st.pts, inside = 0, seen = 0;
+    if(!S.visible(st)) continue;
     for(var j=0;j<pts.length;j++){
       P.worldToScreen(pts[j].p, _sm);
       if(_sm.z < -1 || _sm.z > 1) continue;
@@ -839,7 +841,7 @@ function endLasso(){
     label:'lasso select',
     redo: function(){
       S.clearSelection();
-      for(var k=0;k<hits.length;k++) selectWithGroup(hits[k]);
+      for(var k=0;k<hits.length;k++) S.setSelected(hits[k], true);
     },
     undo: function(){
       S.clearSelection();
@@ -851,42 +853,184 @@ function endLasso(){
 }
 
 /* ==========================================================================
-   Groups — FACT (C.8): undo covers "add/delete group", so groups are a real
-   part of the model rather than a Stage-tab listing.
-   ========================================================================== */
-function selectWithGroup(st){
-  S.setSelected(st, true);
-  if(!st.group) return;
-  for(var i=0;i<S.list.length;i++){
-    if(S.list[i].group === st.group) S.setSelected(S.list[i], true);
-  }
-}
-Tools.selectWithGroup = selectWithGroup;
+   Groups
+   --------------------------------------------------------------------------
+   The panel operations, all of them undoable — FACT (C.8) lists "add/delete
+   group" among the things undo covers.
 
-Tools.groupSelection = function(){
-  var sel = S.selection.slice();
-  if(sel.length < 2){ P.toast('Select two or more curves to group'); return; }
-  var prev = sel.map(function(st){ return st.group || null; });
-  var id = S.nextGroup++;
+   `selectWithGroup` is gone on purpose. It made tapping any curve select every
+   curve grouped with it, which was reasonable when grouping was rare and is
+   wrong now that every curve is in a group by default: a tap would always take
+   the whole layer. Selecting a group is now an explicit gesture — a long press
+   on its row.
+   ========================================================================== */
+Tools.newGroup = function(name){
+  var g = S.addGroup(name);
+  var prevActive = S.activeGroup;
   P.History.run({
-    label:'group',
-    redo: function(){ for(var i=0;i<sel.length;i++) sel[i].group = id; },
-    undo: function(){ for(var i=0;i<sel.length;i++) sel[i].group = prev[i]; }
+    label: 'add group',
+    redo: function(){
+      if(!S.findGroup(g.id)) S.insertGroup(g, 0);
+      S.activeGroup = g.id;
+    },
+    undo: function(){ S.removeGroup(g.id); S.activeGroup = prevActive; S.ensureGroup(); }
   });
-  P.toast(sel.length + ' curves grouped');
   P.onSceneChange();
+  return g;
 };
 
-Tools.ungroupSelection = function(){
-  var sel = S.selection.filter(function(st){ return !!st.group; });
-  if(!sel.length){ P.toast('No group selected'); return; }
+/* Deleting a group takes its curves with it, as a layer does. Undo puts both
+   back — which is the reason this is not behind a confirmation dialog. */
+Tools.deleteGroup = function(id){
+  var g = S.findGroup(id);
+  if(!g) return false;
+  if(S.groups.length <= 1){ P.toast('A sketch needs at least one group'); return false; }
+  var members = S.membersOf(id);
+  var at = S.groups.indexOf(g);
+  var prevActive = S.activeGroup;
+  P.History.run({
+    label: 'delete group', cost: P.History.costOf(members),
+    redo: function(){
+      for(var i=0;i<members.length;i++) S.remove(members[i]);
+      S.removeGroup(id);
+      if(S.activeGroup === id){ S.ensureGroup(); }
+    },
+    undo: function(){
+      S.insertGroup(g, at);
+      for(var i=0;i<members.length;i++) S.add(members[i]);
+      S.activeGroup = prevActive;
+    }
+  });
+  P.toast(members.length ? ('Deleted ' + g.name + ' and ' + members.length +
+          (members.length === 1 ? ' curve' : ' curves')) : ('Deleted ' + g.name));
+  P.onSceneChange();
+  return true;
+};
+
+Tools.duplicateGroup = function(id){
+  var g = S.findGroup(id);
+  if(!g) return null;
+  var at = S.groups.indexOf(g);
+  var copy = { id: S.nextGroup++, name: g.name + ' copy', visible: g.visible };
+  var members = S.membersOf(id).map(function(st){
+    var c = S.clone(st); c.group = copy.id; return c;
+  });
+  P.History.run({
+    label: 'duplicate group', cost: P.History.costOf(members),
+    redo: function(){
+      S.insertGroup(copy, at);
+      for(var i=0;i<members.length;i++) S.add(members[i]);
+      S.activeGroup = copy.id;
+    },
+    undo: function(){
+      for(var i=0;i<members.length;i++) S.remove(members[i]);
+      S.removeGroup(copy.id);
+      S.activeGroup = id;
+    }
+  });
+  P.toast('Duplicated ' + g.name);
+  P.onSceneChange();
+  return copy;
+};
+
+Tools.renameGroup = function(id, name){
+  var g = S.findGroup(id);
+  name = String(name || '').trim().slice(0, 40);
+  if(!g || !name || name === g.name) return false;
+  var was = g.name;
+  P.History.run({
+    label: 'rename group',
+    redo: function(){ g.name = name; },
+    undo: function(){ g.name = was; }
+  });
+  P.onSceneChange();
+  return true;
+};
+
+Tools.setGroupVisible = function(id, on){
+  var g = S.findGroup(id);
+  if(!g || g.visible === !!on) return false;
+  P.History.run({
+    label: 'group visibility',
+    redo: function(){ S.setGroupVisible(id, on); },
+    undo: function(){ S.setGroupVisible(id, !on); }
+  });
+  P.onSceneChange();
+  return true;
+};
+
+/* THE ARROW. Select curves on the canvas, tap a group's arrow, and they move
+   there — the one gesture the panel exists for. */
+Tools.assignSelection = function(id){
+  var g = S.findGroup(id);
+  if(!g) return 0;
+  var sel = S.selection.filter(function(st){ return st.group !== id; });
+  if(!sel.length){
+    P.toast(S.selection.length ? ('Already in ' + g.name) : 'Select some curves first');
+    return 0;
+  }
   var prev = sel.map(function(st){ return st.group; });
   P.History.run({
-    label:'ungroup',
-    redo: function(){ for(var i=0;i<sel.length;i++) sel[i].group = null; },
-    undo: function(){ for(var i=0;i<sel.length;i++) sel[i].group = prev[i]; }
+    label: 'move to group',
+    redo: function(){
+      for(var i=0;i<sel.length;i++) sel[i].group = id;
+      S.applyVisibility();
+    },
+    undo: function(){
+      for(var i=0;i<sel.length;i++) sel[i].group = prev[i];
+      S.applyVisibility();
+    }
   });
-  P.toast('Ungrouped');
+  P.toast(sel.length + (sel.length === 1 ? ' curve' : ' curves') + ' moved to ' + g.name);
+  P.onSceneChange();
+  return sel.length;
+};
+
+/* Long press on a row. */
+Tools.selectGroup = function(id){
+  var g = S.findGroup(id);
+  if(!g) return 0;
+  S.clearSelection();
+  var members = S.membersOf(id);
+  if(!g.visible){
+    P.toast(g.name + ' is hidden');
+    return 0;
+  }
+  for(var i=0;i<members.length;i++) S.setSelected(members[i], true);
+  P.toast(members.length ? (members.length + (members.length === 1 ? ' curve' : ' curves') +
+          ' selected in ' + g.name) : (g.name + ' is empty'));
+  P.onSceneChange();
+  return members.length;
+};
+
+Tools.setActiveGroup = function(id){
+  if(!S.findGroup(id)) return false;
+  S.activeGroup = id;
+  P.onSceneChange();
+  return true;
+};
+
+/* The old Group / Ungroup buttons, restated: one makes a group out of what is
+   selected, the other sends the selection back to the first group. */
+Tools.groupSelection = function(){
+  var sel = S.selection.slice();
+  if(!sel.length){ P.toast('Select some curves first'); return; }
+  var g = S.addGroup('Group ' + (S.groups.length + 1));
+  var prev = sel.map(function(st){ return st.group; });
+  var prevActive = S.activeGroup;
+  P.History.run({
+    label: 'group',
+    redo: function(){
+      if(!S.findGroup(g.id)) S.insertGroup(g, 0);
+      for(var i=0;i<sel.length;i++) sel[i].group = g.id;
+      S.activeGroup = g.id;
+    },
+    undo: function(){
+      for(var i=0;i<sel.length;i++) sel[i].group = prev[i];
+      S.removeGroup(g.id); S.activeGroup = prevActive; S.ensureGroup();
+    }
+  });
+  P.toast(sel.length + ' curves moved into ' + g.name);
   P.onSceneChange();
 };
 
@@ -990,8 +1134,8 @@ Tools.tapSelect = function(x, y, additive){
     label:'select',
     redo: function(){
       if(!additive) S.clearSelection();
-      /* picking one member of a group takes the whole group */
-      if(!was) selectWithGroup(st); else S.setSelected(st, false);
+      /* one tap, one curve — the whole group is a long press on its row */
+      S.setSelected(st, !was);
     },
     undo: function(){
       S.clearSelection();

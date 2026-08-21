@@ -246,8 +246,12 @@ UI.init = function(){
 
   /* ---- group actions ---- */
   on($('btnDuplicate'), 'click', function(){ Tools.duplicateSelection(); });
-  on($('btnGroup'),     'click', function(){ Tools.groupSelection(); });
-  on($('btnUngroup'),   'click', function(){ Tools.ungroupSelection(); });
+  on($('btnGroupNew'), 'click', function(){
+    var g = Tools.newGroup();
+    P.toast('New group: ' + g.name);
+  });
+  on($('btnGroupDup'), 'click', function(){ Tools.duplicateGroup(S.activeGroup); });
+  on($('btnGroupDel'), 'click', function(){ Tools.deleteGroup(S.activeGroup); });
   on($('btnHome'), 'click', function(){ P.resetView(); P.toast('View reset'); });
 
   on($('optFinger'),   'click', function(){ P.Input.fingerPen = !P.Input.fingerPen; UI.refresh(); });
@@ -382,7 +386,7 @@ UI.init = function(){
     $('bodyEnv').classList.toggle('hidden',   v !== 'env');
   });
   on($('btnSelAll'), 'click', function(){
-    var all = S.list.slice(), before = S.selection.slice();
+    var all = S.list.filter(S.visible), before = S.selection.slice();
     P.History.run({
       label:'select all',
       redo: function(){ for(var i=0;i<all.length;i++) S.setSelected(all[i], true); },
@@ -1313,29 +1317,145 @@ UI.refresh = function(){
   refreshLists();
 };
 
+/* ==========================================================================
+   The grouping panel
+   --------------------------------------------------------------------------
+   Built to match Feather's: a row per group, name on the left, then the arrow
+   that moves the current canvas selection into that group and the eye that
+   hides it. Tap the name to rename, tap the row to make it the one you are
+   drawing into, hold it to select everything inside.
+
+   Rows are rebuilt wholesale on every refresh, so the two pieces of transient
+   state that must survive a rebuild — an open rename box and an in-flight long
+   press — are held out here rather than on the elements.
+   ========================================================================== */
+var renamingId = null, pressTimer = null, pressId = null, pressMoved = false;
+var GROUP_HOLD_MS = 480;
+
+/* Cancels the pending hold ONLY. It used to clear pressId as well, which made
+   it impossible to call safely from the handlers that need to read pressId
+   afterwards — the tap-to-activate path compared an id this had already
+   nulled, so tapping a row silently did nothing. */
+function cancelGroupPress(){
+  if(pressTimer){ clearTimeout(pressTimer); pressTimer = null; }
+}
+function endGroupPress(){ cancelGroupPress(); pressId = null; pressMoved = false; }
+
+function renderGroups(){
+  var gl = $('groupList');
+  if(!gl) return;
+  if(renamingId !== null) return;          // never yank the box out mid-rename
+
+  gl.innerHTML = '';
+  S.ensureGroup();
+  for(var i=0;i<S.groups.length;i++){
+    (function(g){
+      var n = S.membersOf(g.id).length;
+      var row = document.createElement('div');
+      row.className = 'grpRow' + (g.id === S.activeGroup ? ' on' : '') +
+                      (g.visible === false ? ' hidden-group' : '');
+      row.dataset.id = g.id;
+
+      var name = document.createElement('button');
+      name.className = 'grpName';
+      name.type = 'button';
+      name.textContent = g.name;
+      /* Tap the name of the group you are in to rename it. On any other row a
+         tap selects that row first — the same slow double-tap every file list
+         uses, and it leaves the whole row as a target for switching groups
+         rather than a sliver of padding beside the name. */
+      var isActive = g.id === S.activeGroup;
+      name.setAttribute('data-tip', isActive ? 'Tap to rename' : 'Tap to draw into this group');
+      name.onclick = function(e){
+        e.stopPropagation();
+        if(g.id === S.activeGroup) beginRename(row, g);
+        else P.Tools.setActiveGroup(g.id);
+      };
+      row.appendChild(name);
+
+      var count = document.createElement('span');
+      count.className = 'grpCount';
+      count.textContent = n ? n : '';
+      row.appendChild(count);
+
+      var arrow = document.createElement('button');
+      arrow.className = 'ico sm';
+      arrow.innerHTML = '<svg><use href="#i-enter"/></svg>';
+      arrow.setAttribute('data-tip', 'Move the selected curves into ' + g.name);
+      arrow.onclick = function(e){
+        e.stopPropagation();
+        P.Tools.assignSelection(g.id);
+      };
+      row.appendChild(arrow);
+
+      var eye = document.createElement('button');
+      eye.className = 'ico sm' + (g.visible === false ? ' off' : '');
+      eye.innerHTML = '<svg><use href="#i-eye' + (g.visible === false ? '-off' : '') + '"/></svg>';
+      eye.setAttribute('data-tip', g.visible === false ? 'Show this group' : 'Hide this group');
+      eye.onclick = function(e){
+        e.stopPropagation();
+        P.Tools.setGroupVisible(g.id, g.visible === false);
+      };
+      row.appendChild(eye);
+
+      /* tap to make active, hold to select everything in it */
+      row.addEventListener('pointerdown', function(e){
+        if(e.target.closest('button')) return;
+        cancelGroupPress();
+        pressId = g.id; pressMoved = false;
+        pressTimer = setTimeout(function(){
+          pressTimer = null; pressMoved = true;     // the tap is spent on the hold
+          P.Tools.selectGroup(g.id);
+        }, GROUP_HOLD_MS);
+      });
+      row.addEventListener('pointerup', function(e){
+        if(e.target.closest('button')) return;
+        var tapped = !pressMoved && pressId === g.id;
+        endGroupPress();
+        if(tapped) P.Tools.setActiveGroup(g.id);
+      });
+      row.addEventListener('pointercancel', endGroupPress);
+      row.addEventListener('pointerleave', endGroupPress);
+
+      gl.appendChild(row);
+    })(S.groups[i]);
+  }
+}
+UI.renderGroups = renderGroups;
+
+function beginRename(row, g){
+  renamingId = g.id;
+  var input = document.createElement('input');
+  input.className = 'grpNameEdit';
+  input.value = g.name;
+  input.setAttribute('aria-label', 'Group name');
+  row.replaceChild(input, row.firstChild);
+  input.focus();
+  input.select();
+
+  var done = false;
+  function finish(commit){
+    if(done) return;
+    done = true;
+    renamingId = null;
+    if(commit) P.Tools.renameGroup(g.id, input.value);
+    renderGroups();
+    UI.refresh();
+  }
+  input.onkeydown = function(e){
+    if(e.key === 'Enter'){ e.preventDefault(); finish(true); }
+    else if(e.key === 'Escape'){ e.preventDefault(); finish(false); }
+    e.stopPropagation();                 // the canvas has single-key shortcuts
+  };
+  input.onblur = function(){ finish(true); };
+}
+
 function refreshLists(){
   var sp = $('stagePanel');
   var visible = UI.compact ? sp.classList.contains('open') : !sp.classList.contains('hidden');
   if(!visible) return;
 
-  var gl = $('groupList');
-  gl.innerHTML = '';
-  if(!S.list.length){
-    gl.innerHTML = '<div class="empty">No curves yet.</div>';
-  } else {
-    for(var i=0;i<S.list.length;i++){
-      (function(st, idx){
-        var d = document.createElement('div');
-        d.className = 'listItem';
-        d.innerHTML = '<span style="width:10px;height:10px;border-radius:50%;background:#' +
-                      st.color.getHexString() + '"></span> Curve ' + (idx+1) +
-                      '<span class="tag">' + st.pts.length + ' pts' +
-                      (st.selected ? ' · sel' : '') + '</span>';
-        d.onclick = function(){ S.setSelected(st, !st.selected); P.onSceneChange(); };
-        gl.appendChild(d);
-      })(S.list[i], i);
-    }
-  }
+  renderGroups();
 
   var rl = $('resList');
   rl.innerHTML = '';
