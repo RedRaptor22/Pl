@@ -562,6 +562,8 @@ LIVE.append = function(stroke){
     /* the head taper is arc-length based and therefore already final */
   }
   for(i=first;i<n;i++){
+    /* the same roll the commit will freeze, so nothing shifts on pen-up */
+    pts[i].roll = rollOf(pts[i], L.T[i], L.R[i]);
     if(writeRing(stroke, i, L.T[i], L.R[i], L.arc, L.pos, L.nor, L.col, seg) < 0.995){
       L.needsAlpha = true;
     }
@@ -638,6 +640,59 @@ LIVE.discard = function(stroke){
   }
 };
 
+/* ==========================================================================
+   Nib orientation — THE NIB LIES IN THE SURFACE, NOT IN THE SCREEN
+   --------------------------------------------------------------------------
+   A flat nib has a direction, and something has to decide it. It used to be
+   the camera: the cross-section's wide axis was built from the view basis at
+   the moment of drawing, so every blade brush was angled to wherever you
+   happened to be standing. Draw the same line on the same guide from two
+   viewpoints and you got two different strokes; orbit afterwards and the nib
+   stayed pointing at where the camera used to be.
+
+   The surface is what the nib should follow. Every sample already carries the
+   normal of whatever it landed on (guide, image, imported mesh, or the pivot
+   plane when nothing is active), so the wide axis is t x n — perpendicular to
+   the stroke, lying IN the surface — and the thin axis comes out along the
+   normal. A blade then reads as a blade held flat against the guide, which is
+   what it is.
+
+   FACT (C.3): pen tilt turns the nib. It still does; it now turns within the
+   surface, about the stroke's own tangent, instead of within the screen plane.
+   INFERENCE: mapping the screen-space tilt azimuth onto that rotation is a
+   reading, not something the sources state.
+
+   With no guide the pivot plane faces the camera, so its normal IS the view
+   direction and free-space strokes look exactly as they did.
+   ========================================================================== */
+var _axisT = new THREE.Vector3(), _projT = new THREE.Vector3(),
+    _sT = new THREE.Vector3();
+
+function nibAxis(pt, t, out){
+  var n = pt.nrm;
+  if(n && n.lengthSq() > EPS){
+    out.crossVectors(t, n);
+    if(out.lengthSq() > EPS){
+      out.normalize();
+      var az = pt.tiltAz;
+      if(az) out.applyAxisAngle(t, az);
+      return out;
+    }
+  }
+  /* no surface to lie in: the camera-plane axis the sample was taken with */
+  return out.copy(pt.axis || pt.ref || t);
+}
+
+/* The stored cross-section angle, measured in the transported frame. */
+function rollOf(pt, t, r){
+  _sT.crossVectors(t, r);
+  nibAxis(pt, t, _axisT);
+  _projT.copy(_axisT).addScaledVector(t, -_axisT.dot(t));
+  return (_projT.lengthSq() < EPS) ? 0
+       : Math.atan2(_projT.dot(_sT), _projT.dot(r));
+}
+S.rollOf = rollOf;
+
 /* Freeze frames into point data. This is the step that makes orientation
    persistent rather than re-derived, and it is what erase, bend and the
    joystick transform all read back. */
@@ -645,13 +700,9 @@ S.freezeFrames = function(stroke){
   var pts = stroke.pts;
   if(pts.length === 0) return;
   var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef);
-  var s = new THREE.Vector3(), proj = new THREE.Vector3();
   for(var i=0;i<pts.length;i++){
     var t = fr.T[i], r = fr.R[i], pt = pts[i];
-    s.crossVectors(t, r);
-    var axis = pt.axis || r;
-    proj.copy(axis).addScaledVector(t, -axis.dot(t));
-    pt.roll = (proj.lengthSq() < EPS) ? 0 : Math.atan2(proj.dot(s), proj.dot(r));
+    pt.roll = rollOf(pt, t, r);
     pt.tan = t.clone();
     pt.ref = r.clone();
     if(pt.axis) delete pt.axis;
@@ -1012,6 +1063,11 @@ S.transform = function(strokes, matrix){
         if(pt.tan) pt.ref.addScaledVector(pt.tan, -pt.ref.dot(pt.tan));
         if(pt.ref.lengthSq()>EPS) pt.ref.normalize();
         else P.perpTo(pt.tan || new THREE.Vector3(0,0,1), pt.ref);
+      }
+      /* the surface normal is what the nib is squared to, so it rotates too */
+      if(pt.nrm){
+        pt.nrm.applyMatrix3(rot);
+        if(pt.nrm.lengthSq()>EPS) pt.nrm.normalize();
       }
     }
     st.baseRadius *= uniform;

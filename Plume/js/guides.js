@@ -248,15 +248,45 @@ function attachOrange(guide, pts){
 /* ==========================================================================
    4. Sweep evaluation
    ========================================================================== */
+/* WHICH WAY UP THE PROFILE SITS ON A NEW PATH.
+
+   The transported frames need a seed at index 0, and the obvious seed —
+   basisR, the profile's own right axis — fails in the most ordinary case
+   there is. transportFrames projects the seed perpendicular to the first
+   tangent, and when the path sets off ALONG basisR that projection is
+   degenerate, so it falls back to an arbitrary world-axis perpendicular. That
+   is precisely the common bend: draw a profile in the front view, orbit to the
+   top, drag sideways. Measured on a hooked profile, two bend paths 2.3 degrees
+   apart produced reference frames 178 degrees apart and surfaces 0.81 units
+   apart — the profile flipped end for end. Symmetric profiles hid it; a curved
+   stroke showed it every time, which is exactly how it was reported.
+
+   So carry the whole anchor frame onto the new tangent by the shortest
+   rotation instead. It reduces to basisR exactly when the path still runs
+   along basisT (guide creation, unchanged), it is continuous everywhere the
+   minimal rotation is, and it keeps the profile facing the way the user drew
+   it. A path doubling straight back along the extrusion axis is the one
+   antipodal case: rotate 180 degrees about basisR, which maps basisT to its
+   opposite and leaves basisR itself alone. */
+var _sq = new THREE.Quaternion(), _seedV = new THREE.Vector3();
+
+function sweepSeed(sweep, T0){
+  if(sweep.basisT.dot(T0) < -0.999999) return _seedV.copy(sweep.basisR);
+  _sq.setFromUnitVectors(sweep.basisT, T0);
+  return _seedV.copy(sweep.basisR).applyQuaternion(_sq);
+}
+
 function evalSweep(sweep){
   var path = sweep.path, local = sweep.local;
-  var fr = P.transportFrames(path, sweep.basisR);
+  var T0 = P.computeTangents(path)[0];
+  var fr = P.transportFrames(path, sweepSeed(sweep, T0));
   sweep.frames = fr;
 
   /* local[] was written in the anchor frame; because the frames are
-     transported from index 0 with basisR as the seed, the frame at the anchor
-     row is exactly (basisT, basisR, basisT x basisR) again — so the profile
-     can be laid down row by row with no re-derivation. */
+     transported from index 0 with the anchor frame carried onto the path, the
+     frame at the anchor row is (basisT, basisR, basisT x basisR) rotated onto
+     the path — so the profile can be laid down row by row with no
+     re-derivation. */
   var rows = [], j, i;
   var s = new THREE.Vector3();
   for(j=0;j<path.length;j++){

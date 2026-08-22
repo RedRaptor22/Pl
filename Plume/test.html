@@ -729,6 +729,137 @@ function run(W){
   var future = P.Doc.restore({format:'plume', version:999});
   ck('a newer file version is rejected', future === false);
 
+  /* ================= nib orientation ================= */
+  group('C.3  The nib follows the surface, not the camera');
+  /* A blade brush has a direction, and it used to come from the view basis —
+     so the same line drawn on the same guide from two viewpoints came out as
+     two different strokes. It comes from the surface now: the wide axis of the
+     cross-section is perpendicular to the stroke and lies IN the guide, with
+     the thin axis along the normal. */
+  function wideAxisAt(st, i){
+    var pt = st.pts[i], t = pt.tan, r = pt.ref;
+    var sv = new THREE.Vector3().crossVectors(t, r);
+    return r.clone().multiplyScalar(Math.cos(pt.roll || 0))
+            .addScaledVector(sv, Math.sin(pt.roll || 0)).normalize();
+  }
+  function drawOnTube(theta, phi){
+    reset();
+    P.TOOL.stableOn = false;
+    P.Guides.setActive(P.Guides.primitive('tube', 32, 1));
+    P.VIEW.theta = theta; P.VIEW.phi = phi; P.applyCamera();
+    P.TOOL.brush = 'flat'; P.TOOL.sizeMM = 30;
+    pen([{x:CX-120,y:CY-30},{x:CX-40,y:CY},{x:CX+40,y:CY+10},{x:CX+120,y:CY-20}]);
+    return P.Strokes.list[0];
+  }
+  var offWorst = 0, offView = '';
+  [[0.2,1.2,'front'], [1.6,0.7,'side'], [0.9,0.25,'above'], [-1.1,1.4,'behind']]
+    .forEach(function(v){
+      var st6 = drawOnTube(v[0], v[1]);
+      if(!st6) { offWorst = 9; offView = v[2] + ' drew nothing'; return; }
+      for(var i=0;i<st6.pts.length;i++){
+        if(!st6.pts[i].nrm) continue;
+        var d = Math.abs(wideAxisAt(st6, i).dot(st6.pts[i].nrm));
+        if(d > offWorst){ offWorst = d; offView = v[2]; }
+      }
+    });
+  ck('the nib lies flat in the guide from every viewpoint', offWorst < 0.02,
+     'worst ' + offWorst.toFixed(4) + ' out of the surface, ' + offView + ' view');
+
+  /* and the thin axis is the one along the normal, i.e. the blade is a blade */
+  var stFlat = drawOnTube(0.2, 1.2);
+  var thinWorst = 1;
+  for(var fi=0; fi<stFlat.pts.length; fi++){
+    var pt6 = stFlat.pts[fi];
+    if(!pt6.nrm) continue;
+    var u6 = wideAxisAt(stFlat, fi);
+    var v6 = new THREE.Vector3().crossVectors(pt6.tan, u6).normalize();
+    thinWorst = Math.min(thinWorst, Math.abs(v6.dot(pt6.nrm)));
+  }
+  ck('...with its thin axis along the surface normal', thinWorst > 0.98,
+     'worst alignment ' + thinWorst.toFixed(4));
+
+  /* the same stroke drawn from two viewpoints must come out the same shape */
+  function sectionProfile(st){
+    var i = Math.floor(st.pts.length/2), pt = st.pts[i];
+    var u = wideAxisAt(st, i);
+    return { alongSurface: +Math.abs(u.dot(pt.nrm)).toFixed(3) };
+  }
+  var pA = sectionProfile(drawOnTube(0.2, 1.2)),
+      pB = sectionProfile(drawOnTube(1.6, 0.7));
+  ck('so the same line on the same guide is the same stroke from anywhere',
+     Math.abs(pA.alongSurface - pB.alongSurface) < 0.02,
+     pA.alongSurface + ' vs ' + pB.alongSurface);
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14;
+  reset();
+
+  /* ================= bend frame continuity ================= */
+  group('A.6  A bent guide keeps the profile facing the way it was drawn');
+  /* The frames transported along a new path need a seed. Seeding with the
+     profile's own right axis fails when the path sets off ALONG that axis —
+     the ordinary case of orbiting 90 degrees and dragging sideways — and the
+     fallback perpendicular flips as the tangent crosses it. A symmetric
+     profile hides that; a curved one turns inside out. */
+  function hookGuide(){
+    reset();
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = true; P.TOOL.stableOn = false;
+    var prof = [];
+    for(var q=0;q<=24;q++){
+      var t7 = q/24;
+      prof.push({ x: CX-150+300*t7,
+                  y: CY-40-90*Math.sin(t7*Math.PI)*(t7 < 0.5 ? 1 : 0.25) });
+    }
+    pen(prof);
+    return P.Guides.active;
+  }
+  function bendAlongR(g, tilt){
+    var sw = g.sweep;
+    var dir = sw.basisR.clone().addScaledVector(sw.basisT, tilt).normalize();
+    /* move the camera FIRST — the screen points have to be projected through
+       the same view the bend stroke will be read back in */
+    P.VIEW.theta = 0; P.VIEW.phi = 0.05; P.applyCamera();     // look from above
+    var pts7 = [];
+    for(var q=0;q<=8;q++){
+      var w = sw.anchor.clone().addScaledVector(dir, (q/8)*1.6);
+      var sc = P.worldToScreen(w, {});
+      pts7.push({x:sc.x, y:sc.y});
+    }
+    P.setTool('bend'); pen(pts7); P.setTool('draw');
+    return g;
+  }
+  function meshPoints(g){
+    var a = g.mesh.geometry.attributes.position, out = [];
+    for(var q=0;q<a.count;q++) out.push(a.getX(q), a.getY(q), a.getZ(q));
+    return out;
+  }
+  var gPlus  = bendAlongR(hookGuide(), +0.02);
+  var vPlus  = meshPoints(gPlus),  rPlus  = gPlus.sweep.frames.R[0].clone();
+  var gMinus = bendAlongR(hookGuide(), -0.02);
+  var vMinus = meshPoints(gMinus), rMinus = gMinus.sweep.frames.R[0].clone();
+
+  var frameSwing = Math.acos(P.clamp(rPlus.dot(rMinus), -1, 1)) * 57.3;
+  ck('two almost identical bends give two almost identical frames',
+     frameSwing < 15, frameSwing.toFixed(0) + ' deg apart for a 2.3 deg change of path');
+
+  var vWorst = 0;
+  for(var q7=0; q7<Math.min(vPlus.length, vMinus.length); q7+=3){
+    vWorst = Math.max(vWorst, Math.hypot(vPlus[q7]-vMinus[q7],
+                                         vPlus[q7+1]-vMinus[q7+1],
+                                         vPlus[q7+2]-vMinus[q7+2]));
+  }
+  ck('...and two almost identical surfaces, rather than a flipped one',
+     vWorst < 0.2, 'worst vertex moved ' + (vWorst*1000).toFixed(0) + 'mm');
+
+  /* bending along the original extrusion axis must not move the profile at all */
+  var gSame = hookGuide();
+  var beforeR = gSame.sweep.basisR.clone();
+  bendAlongR(gSame, 40);                       // tilt so far it IS basisT
+  ck('a bend that keeps the original direction keeps the original frame',
+     gSame.sweep.frames.R[0].dot(beforeR) > 0.99,
+     'dot ' + gSame.sweep.frames.R[0].dot(beforeR).toFixed(3));
+  P.TOOL.autoGuide = false;
+  reset();
+
   /* ================= sampling density and nib tessellation ================= */
   group('Curves are not polygons — sampling and cross-section');
 
