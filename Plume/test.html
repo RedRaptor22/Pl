@@ -634,7 +634,7 @@ function run(W){
     P.TOOL.autoGuide = true;
     pen(circle(CX, CY, 40));                       // and a fresh active guide
     P.ENV.bg.set('#1a2030'); P.applyEnv();
-    P.TOOL.sizeMM = 27; P.TOOL.color.set('#39c2c9'); P.TOOL.brush = 'flat';
+    P.TOOL.sizeMM = 27; P.TOOL.color.set('#39c2c9'); P.TOOL.brush = 'square';
   }
 
   function snapshot(){
@@ -747,7 +747,7 @@ function run(W){
     P.TOOL.stableOn = false;
     P.Guides.setActive(P.Guides.primitive('tube', 32, 1));
     P.VIEW.theta = theta; P.VIEW.phi = phi; P.applyCamera();
-    P.TOOL.brush = 'flat'; P.TOOL.sizeMM = 30;
+    P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 30;
     pen([{x:CX-120,y:CY-30},{x:CX-40,y:CY},{x:CX+40,y:CY+10},{x:CX+120,y:CY-20}]);
     return P.Strokes.list[0];
   }
@@ -1074,7 +1074,7 @@ function run(W){
      P.Import.parseOBJ(eVC.obj).attributes.position.count === eStat.triangles*3);
 
   /* colour and opacity travel in the .mtl */
-  P.TOOL.color.set('#3264c8'); P.TOOL.opacity = 0.5; P.TOOL.brush = 'marker';
+  P.TOOL.color.set('#3264c8'); P.TOOL.opacity = 0.5; P.TOOL.brush = 'square';
   pen([{x:CX-140,y:CY+90},{x:CX,y:CY+120},{x:CX+140,y:CY+80}]);
   var eParts2 = EXP.collect();
   var eSrc2 = EXP.objSource(eParts2, {name:'plume-test'});
@@ -1399,15 +1399,88 @@ function run(W){
   ck('and no two of them are the same brush twice', samey.length === 0,
      samey.join(', ') || 'all distinct');
 
+  /* ---- each brush does the job it is described as doing ----
+     Measured off the ring at the middle of a straight stroke: the extent along
+     the nib's wide axis, the extent across it, how far the corners stand out
+     from the flats, and the radius at the very end against the middle. */
+  function nibSection(brushName, mm){
+    P.Strokes.clear(); P.History.clear();
+    P.TOOL.brush = brushName; P.TOOL.sizeMM = mm || 40;
+    P.TOOL.pressureOn = false; P.TOOL.stableOn = false;
+    pen([{x:CX-200,y:CY},{x:CX-100,y:CY},{x:CX,y:CY},{x:CX+100,y:CY},{x:CX+200,y:CY}]);
+    var st8 = P.Strokes.list[0];
+    var seg8 = P.Strokes.segOf(st8), pos8 = st8.mesh.geometry.attributes.position;
+    var mid8 = Math.floor(st8.pts.length/2);
+    var c8 = st8.pts[mid8].p, u8 = wideAxisAt(st8, mid8);
+    var v8 = new THREE.Vector3().crossVectors(st8.pts[mid8].tan, u8).normalize();
+    var eu = 0, ev = 0, maxR = 0, minR = 1e9, d8 = new THREE.Vector3(), k8, o8;
+    for(k8=0;k8<seg8;k8++){
+      o8 = 2 + mid8*seg8 + k8;
+      d8.set(pos8.getX(o8), pos8.getY(o8), pos8.getZ(o8)).sub(c8);
+      eu = Math.max(eu, Math.abs(d8.dot(u8)));
+      ev = Math.max(ev, Math.abs(d8.dot(v8)));
+      var r8 = d8.length();
+      maxR = Math.max(maxR, r8); minR = Math.min(minR, r8);
+    }
+    var endR = 0;
+    for(k8=0;k8<seg8;k8++){
+      o8 = 2 + k8;
+      d8.set(pos8.getX(o8), pos8.getY(o8), pos8.getZ(o8)).sub(st8.pts[0].p);
+      endR = Math.max(endR, d8.length());
+    }
+    return { wideMM: eu/P.MM, thinMM: ev/P.MM, corner: maxR/(minR || 1e-9),
+             endOverMid: endR/(maxR || 1e-9) };
+  }
+
+  var secPen    = nibSection('pen'),    secTaper = nibSection('taper');
+  var secSquare = nibSection('square'), secCube  = nibSection('cube');
+  var secWide   = nibSection('wide');
+
+  ck('the pen is still a plain round nib, end to end',
+     secPen.corner < 1.02 && Math.abs(secPen.wideMM - secPen.thinMM) < 0.2 &&
+     secPen.endOverMid > 0.9,
+     'corner ' + secPen.corner.toFixed(3) + ', ends ' +
+     (secPen.endOverMid*100).toFixed(0) + '% of mid');
+
+  ck('the tapered brush keeps a round section but comes to a point',
+     secTaper.corner < 1.02 && secTaper.endOverMid < 0.12,
+     'ends ' + (secTaper.endOverMid*100).toFixed(1) + '% of the nib');
+
+  ck('the square tip is genuinely square — equal sides, hard corners',
+     Math.abs(secSquare.wideMM - secSquare.thinMM) / secSquare.wideMM < 0.05 &&
+     secSquare.corner > 1.35,
+     'sides ' + secSquare.wideMM.toFixed(1) + ' x ' + secSquare.thinMM.toFixed(1) +
+     'mm, corners ' + secSquare.corner.toFixed(2) + 'x the flats');
+  ck('...and uniform along its length, with no taper',
+     secSquare.endOverMid > 0.9, (secSquare.endOverMid*100).toFixed(0) + '% at the end');
+
+  ck('the cube is the same square section, kept narrow',
+     secCube.corner > 1.35 &&
+     Math.abs(secCube.wideMM - secCube.thinMM) / secCube.wideMM < 0.05 &&
+     secCube.wideMM < secSquare.wideMM * 0.5,
+     secCube.wideMM.toFixed(1) + 'mm against ' +
+     secSquare.wideMM.toFixed(1) + 'mm for the square tip');
+
+  ck('the wide brush is a broad flat ribbon, not a rod',
+     secWide.wideMM / secWide.thinMM > 8,
+     secWide.wideMM.toFixed(1) + ' x ' + secWide.thinMM.toFixed(1) + 'mm, ratio ' +
+     (secWide.wideMM/secWide.thinMM).toFixed(1) + ':1');
+  ck('...and the broadest of them at the same nib size',
+     secWide.wideMM > secSquare.wideMM && secWide.wideMM > secPen.wideMM,
+     [secPen.wideMM, secTaper.wideMM, secSquare.wideMM, secCube.wideMM, secWide.wideMM]
+       .map(function(x){ return x.toFixed(0); }).join(' / ') + 'mm across');
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
+  reset();
+
   /* a sketch drawn with a retired brush must reopen as the nearest nib, not
      silently as the default */
   var aliasBad = [];
-  ['round','pencil','taper','chisel','ribbon'].forEach(function(oldName){
+  ['round','pencil','ink','flat','marker','chisel','ribbon'].forEach(function(oldName){
     var got = P.brushName(oldName);
     if(!P.BRUSH[got]) aliasBad.push(oldName + '->' + got);
   });
   ck('retired brush names still resolve', aliasBad.length === 0,
-     aliasBad.join(', ') || 'round/pencil/taper/chisel/ribbon all map to a real nib');
+     aliasBad.join(', ') || 'round/pencil/ink/flat/marker/chisel/ribbon all map to a real nib');
   ck('...and a curve saved as one loads as its replacement', (function(){
     P.Strokes.clear();
     P.TOOL.brush = 'pen';
@@ -1466,7 +1539,7 @@ function run(W){
     return (hi1-lo1)/((hi2-lo2)||1e-9);
   }
   ck('a square nib really changes the cross-section',
-     Math.abs(ringAspect('flat') - ringAspect('pen')) > 0.05);
+     Math.abs(ringAspect('wide') - ringAspect('pen')) > 0.05);
   P.TOOL.brush = 'pen';
 
   /* ================= lasso ================= */
