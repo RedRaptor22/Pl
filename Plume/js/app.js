@@ -133,7 +133,10 @@ P.setTool = function(mode){
   if((TOOL.mode === 'loft' || TOOL.mode === 'prim') && mode !== TOOL.mode){
     Tools.stagedCancel();
   }
-  if(TOOL.mode === 'select' && mode !== 'select'){
+  /* Liquify works ON the selection — "select the curves you want to modify
+     and tap Liquify" — so it is the one tool you can leave Select for without
+     losing what you just picked. */
+  if(TOOL.mode === 'select' && mode !== 'select' && mode !== 'liquify'){
     S.clearSelection();
     if(G.active) G.setSelected(G.active, false);
   }

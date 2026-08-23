@@ -294,6 +294,23 @@
      Feather's grouping panel: one row per group, the name on the left, then
      the "move selection in here" arrow and the visibility eye. The active
      group is the highlighted one. */
+  /* ---- liquify ----
+     A strip above the context bar rather than a card at the right: liquify
+     always has a selection, and a selection always has the joystick, which
+     lives on the right. */
+  #liquifyPanel{left:50%;transform:translateX(-50%);bottom:70px;padding:8px 10px;
+    display:flex;align-items:center;gap:10px;z-index:22;max-width:calc(100vw - 24px);}
+  #lqHead{display:flex;align-items:center;gap:6px;}
+  #lqModes{display:flex;gap:4px;grid-template-columns:none;}
+  #lqModes button{width:40px;height:34px;}
+  #lqModes svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.5;}
+  .lqRow{display:flex;align-items:center;gap:5px;}
+  .lqRow .lab{color:var(--dim);font-size:11px;}
+  #btnLqApply{display:flex;align-items:center;justify-content:center;gap:5px;}
+  #btnLqApply svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;}
+  body.compact #liquifyPanel{bottom:64px;gap:6px;padding:6px 8px;}
+  body.compact #lqHead h4{display:none;}
+
   #grpHead{align-items:center;gap:6px;}
   .ico.danger{color:var(--bad,#d2413f);}
   .grpRow{display:flex;align-items:center;gap:2px;padding:5px 4px 5px 8px;
@@ -503,6 +520,11 @@
   <symbol id="i-pick" viewBox="0 0 24 24"><path d="M18.5 3.6a2.3 2.3 0 0 0-3.3 0l-1.4 1.4 3.2 3.2 1.5-1.4a2.3 2.3 0 0 0 0-3.2z"/><path d="M13.2 6.3 5 14.5V19h4.5l8.2-8.2"/></symbol>
   <symbol id="i-inject" viewBox="0 0 24 24"><path d="M14 4l6 6"/><path d="M17.5 6.5 8 16v3h3l9.5-9.5z" transform="translate(-2,-1)"/><path d="M5 19l-1.5 1.5"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5"/></symbol>
+  <symbol id="i-liquify" viewBox="0 0 24 24"><path d="M4 15c3-6 6 4 9-1s4-6 7-4"/><path d="M4 19c3-6 6 4 9-1"/><path d="M9 7c1.5-2.5 4-2.5 5.5 0"/></symbol>
+  <symbol id="i-lq-push" viewBox="0 0 24 24"><path d="M4 12h11"/><path d="M11.5 8.5 15 12l-3.5 3.5"/><path d="M19 5v14"/></symbol>
+  <symbol id="i-lq-pinch" viewBox="0 0 24 24"><path d="M3 12h6"/><path d="M21 12h-6"/><path d="M6.5 8.5 3 12l3.5 3.5"/><path d="M17.5 8.5 21 12l-3.5 3.5"/></symbol>
+  <symbol id="i-lq-comb" viewBox="0 0 24 24"><path d="M3 8h18"/><path d="M6 8v8M10 8v8M14 8v8M18 8v8"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12.5 5 5L20 6.5"/></symbol>
   <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M3 10.5S6.5 16 12 16s9-5.5 9-5.5"/><path d="M5.5 13.4 3.6 16"/><path d="M18.5 13.4 20.4 16"/><path d="M12 16v3"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.6"/></symbol>
@@ -815,7 +837,25 @@
 <div id="selBar" class="panel hidden">
   <button class="ico" id="btnSelDup" data-tip="Duplicate"><svg><use href="#i-dup"/></svg></button>
   <button class="ico" id="btnSelDupMir" data-tip="Duplicate symmetrically"><svg><use href="#i-dupmir"/></svg></button>
+  <button class="ico" id="btnSelLiquify" data-tip="Liquify — press and drag to deform the selection"><svg><use href="#i-liquify"/></svg></button>
   <button class="ico" id="btnSelDelete" data-tip="Delete"><svg><use href="#i-trash"/></svg></button>
+</div>
+
+<!-- ============ liquify ============
+     FACT: the panel carries size, range and strength — each adjusted by
+     sliding up or down — a mode you tap to change, and an Apply button. -->
+<div id="liquifyPanel" class="panel hidden">
+  <div id="lqHead"><h4>Liquify</h4>
+    <button class="ico sm" id="btnLqClose" data-tip="Close"><svg><use href="#i-close"/></svg></button></div>
+  <div class="igrid" id="lqModes">
+    <button class="small" data-lq="push"  data-tip="Push — distorts naturally, as if pushing or pulling with a finger"><svg><use href="#i-lq-push"/></svg></button>
+    <button class="small" data-lq="pinch" data-tip="Pinch — distorts sharply and precisely.<br><i>For extending or shrinking specific curves.</i>"><svg><use href="#i-lq-pinch"/></svg></button>
+    <button class="small" data-lq="comb"  data-tip="Comb — gently smooths and aligns.<br><i>Straightens wavy curves; works best with a rubbing motion.</i>"><svg><use href="#i-lq-comb"/></svg></button>
+  </div>
+  <div class="lqRow"><span class="lab">Size</span><span class="val" id="lqSizeVal">120</span></div>
+  <div class="lqRow"><span class="lab">Range</span><span class="val" id="lqRangeVal">60</span></div>
+  <div class="lqRow"><span class="lab">Strength</span><span class="val" id="lqStrengthVal">55</span></div>
+  <button class="small filled" id="btnLqApply"><svg><use href="#i-check"/></svg> Apply</button>
 </div>
 
 <!-- ============ numeric keypad ============ -->

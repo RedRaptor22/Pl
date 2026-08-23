@@ -501,6 +501,19 @@ UI.init = function(){
   on($('btnSelDup'),    'click', function(){ Tools.duplicateSelection(); });
   on($('btnSelDupMir'), 'click', function(){ Tools.duplicateMirrored(); });
   on($('btnSelDelete'), 'click', function(){ $('btnDelSel').click(); });
+  on($('btnSelLiquify'), 'click', function(){
+    if(!Tools.liquifyTargets().length){ P.toast('Select the curves to liquify first'); return; }
+    P.setTool('liquify');
+    P.toast('Liquify — press and drag over the selection');
+  });
+
+  /* ---- liquify panel ---- */
+  seg($('lqModes'), 'lq', function(v){ TOOL.liquify.mode = v; UI.refresh(); });
+  dragValue($('lqSizeVal'),     'lqSize');
+  dragValue($('lqRangeVal'),    'lqRange');
+  dragValue($('lqStrengthVal'), 'lqStrength');
+  on($('btnLqApply'), 'click', function(){ Tools.liquifyApply(); });
+  on($('btnLqClose'), 'click', function(){ P.setTool('select'); UI.refresh(); });
 
   /* ---- rail collapse tab ---- */
   on($('railTab'), 'click', function(){
@@ -640,6 +653,20 @@ function openKeypad(which){
    ========================================================================== */
 var SIZE_PER_PX = 0.011, OPACITY_PER_PX = 0.004, DRAG_SLOP = 3;
 
+/* Liquify's three numbers are dragged the same way — FACT: size, range and
+   strength are each "adjusted by sliding up or down". Size is a screen radius
+   so it moves geometrically like the brush; the other two are percentages and
+   move linearly. */
+var LQ = {
+  lqSize:     { get:function(){ return TOOL.liquify.size; },
+                set:function(v){ TOOL.liquify.size = Math.round(P.clamp(v, 8, 600)); },
+                log:true },
+  lqRange:    { get:function(){ return TOOL.liquify.range; },
+                set:function(v){ TOOL.liquify.range = Math.round(P.clamp(v, 0, 100)); } },
+  lqStrength: { get:function(){ return TOOL.liquify.strength; },
+                set:function(v){ TOOL.liquify.strength = Math.round(P.clamp(v, 1, 100)); } }
+};
+
 /* The size control edits whichever tool is in hand — the eraser carries its
    own size, so switching to it re-points the readout rather than resizing the
    brush underneath you. */
@@ -659,7 +686,8 @@ function dragValue(el, which){
      stops a touch drag from scrolling the panel instead. */
   on(el, 'pointerdown', function(e){
     drag = { y:e.clientY, moved:false,
-             from: which === 'size' ? UI.getSize() : TOOL.opacity };
+             from: LQ[which] ? LQ[which].get()
+                 : which === 'size' ? UI.getSize() : TOOL.opacity };
     try { el.setPointerCapture(e.pointerId); } catch(err){}
   });
   on(el, 'pointermove', function(e){
@@ -667,7 +695,12 @@ function dragValue(el, which){
     var dy = drag.y - e.clientY;                       // up is more
     if(!drag.moved && Math.abs(dy) < DRAG_SLOP) return;
     drag.moved = true;
-    if(which === 'size') UI.setSize(drag.from * Math.exp(dy * SIZE_PER_PX));
+    if(LQ[which]){
+      var spec = LQ[which];
+      spec.set(spec.log ? drag.from * Math.exp(dy * SIZE_PER_PX)
+                        : drag.from + dy * 0.4);
+    }
+    else if(which === 'size') UI.setSize(drag.from * Math.exp(dy * SIZE_PER_PX));
     else TOOL.opacity = P.clamp(drag.from + dy * OPACITY_PER_PX, 0.05, 1);
     UI.refresh();
   });
@@ -685,7 +718,7 @@ function dragValue(el, which){
   on(el, 'click', function(){
     var swallow = ate && (performance.now() - ateAt) < 700;
     ate = false;                       // and never hold it against a later tap
-    if(swallow) return;
+    if(swallow || LQ[which]) return;   // liquify's numbers are drag-only
     openKeypad(which);
   });
 }
@@ -1202,9 +1235,24 @@ UI.refresh = function(){
   var hx = $('hexIn');
   if(hx && document.activeElement !== hx) hx.value = TOOL.color.getHexString().toUpperCase();
 
-  /* selection action bar rides along with the selection */
+  /* The selection action bar rides along with the selection — except while
+     liquifying, when the strip takes its place at the foot of the screen and
+     duplicating or deleting mid-deformation is not what the hand is there for. */
+  var liquifying = TOOL.mode === 'liquify';
   var selCount = S.selection.length;
-  $('selBar').classList.toggle('hidden', selCount === 0);
+  $('selBar').classList.toggle('hidden', selCount === 0 || liquifying);
+
+  /* the liquify panel is the tool: it is up whenever the tool is */
+  $('liquifyPanel').classList.toggle('hidden', !liquifying);
+  if(liquifying){
+    $('lqSizeVal').textContent     = TOOL.liquify.size;
+    $('lqRangeVal').textContent    = TOOL.liquify.range;
+    $('lqStrengthVal').textContent = TOOL.liquify.strength;
+    var lqb = $('lqModes').querySelectorAll('button');
+    for(var lq=0; lq<lqb.length; lq++){
+      lqb[lq].classList.toggle('on', lqb[lq].dataset.lq === TOOL.liquify.mode);
+    }
+  }
 
   /* the rail's size/opacity readouts, and their popover twins */
   var erasing = UI.sizeKey() === 'eraserMM';

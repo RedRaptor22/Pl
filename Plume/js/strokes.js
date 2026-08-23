@@ -158,8 +158,11 @@ var BRUSH = P.BRUSH = {
   taper:  { flat:1.00, square:0.00, taper:9, tip:0.04, caps:true, wide:1.00, glow:0 },
   /* square tip / flat: blocky and uniform, for structure */
   square: { flat:1.00, square:1.00, taper:0, tip:0,    caps:true, wide:1.60, glow:0 },
-  /* cube: the same section, narrow, for dense geometric linework */
-  cube:   { flat:1.00, square:1.00, taper:0, tip:0,    caps:true, wide:0.55, glow:0 },
+  /* cube: an EXTRUSION FROM the surface. Same hard square section, but it
+     stands on the stroke rather than straddling it (rise), and the size slider
+     is the length it stands off by — geometry to deform later, not a line. */
+  cube:   { flat:1.00, square:1.00, taper:0, tip:0,    caps:true, wide:1.00, glow:0,
+            rise:1 },
   /* FACT: the "Wide Brush ... paint larger areas faster" (1.5), as a ribbon */
   wide:   { flat:0.10, square:1.00, taper:0, tip:0,    caps:true, wide:3.40, glow:0 },
   /* FACT (C.5): "a Glow material enables glowing lines" */
@@ -198,16 +201,21 @@ S.cfgOf = cfgOf;
    facet error of an n-gon is (1 - cos(pi/n))*r, so solving that for a fixed
    error in millimetres gives a count that keeps the silhouette equally smooth
    at any size. 0.3mm is about a screen pixel at a normal working zoom.
-   Rounded up to a multiple of 4 so the squared-off sections keep their corners
-   on the diagonals, and clamped so a huge brush cannot run away with memory.
-   The ceiling is what a 200mm nib needs; past that the guarantee becomes a
-   relative one — a 48-gon is within 0.21% of its circle at any radius. */
+   A HARD SECTION IS ROUNDED UP TO A MULTIPLE OF EIGHT, a soft one to four.
+   The corners of a squared-off nib sit at 45 degrees, so only a count divisible
+   by eight puts vertices ON them; at 20 segments the corner falls between two
+   samples and gets sliced off, which is a bevel rather than a square — measured
+   as a corner standing 1.24x out from the flats where a square stands 1.41x.
+   Clamped at both ends so a huge brush cannot run away with memory: the ceiling
+   is what a 200mm nib needs, and past that the guarantee becomes a relative one
+   — a 48-gon is within 0.21% of its circle at any radius. */
 var SEG_ERR_MM = 0.3, SEG_MIN = 8, SEG_MAX = 48;
 function segOf(stroke){
   var cfg = cfgOf(stroke);
   var rmm = Math.max(0.25, stroke.baseRadius * cfg.wide / P.MM);
   var n = Math.ceil(Math.PI / Math.sqrt(2 * SEG_ERR_MM / rmm));
-  return P.clamp(Math.ceil(n/4)*4, SEG_MIN, SEG_MAX);
+  var step = cfg.square > 0.5 ? 8 : 4;
+  return P.clamp(Math.ceil(n/step)*step, SEG_MIN, SEG_MAX);
 }
 S.segOf = segOf;
 
@@ -295,6 +303,16 @@ function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
   _u.copy(R).multiplyScalar(ca).addScaledVector(_b, sa);
   _v.crossVectors(T, _u);
 
+  /* A RISEN SECTION STANDS ON THE SURFACE RATHER THAN STRADDLING IT.
+     _v comes out along -n for a surface-aligned nib, so shifting the centre
+     by -ry*_v puts the section's near face on the stroke and its far face one
+     full section-height out along the normal. That is what makes the cube
+     brush an extrusion FROM the surface instead of a rod half sunk into it. */
+  var riseX = 0, riseY = 0, riseZ = 0;
+  if(cfg.rise){
+    riseX = -_v.x*ry*cfg.rise; riseY = -_v.y*ry*cfg.rise; riseZ = -_v.z*ry*cfg.rise;
+  }
+
   for(var k=0;k<seg;k++){
     var ang = k/seg * Math.PI*2;
     sectionPoint(ang, sq, _p0);
@@ -314,20 +332,39 @@ function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
     if(_nrm.lengthSq() < EPS) _nrm.copy(_u); else _nrm.normalize();
 
     var o = 2 + i*seg + k;
-    pos[o*3]   = pt.p.x + _dir.x;
-    pos[o*3+1] = pt.p.y + _dir.y;
-    pos[o*3+2] = pt.p.z + _dir.z;
+    pos[o*3]   = pt.p.x + _dir.x + riseX;
+    pos[o*3+1] = pt.p.y + _dir.y + riseY;
+    pos[o*3+2] = pt.p.z + _dir.z + riseZ;
     nor[o*3]   = _nrm.x; nor[o*3+1] = _nrm.y; nor[o*3+2] = _nrm.z;
     col[o*4]   = _c.r; col[o*4+1] = _c.g; col[o*4+2] = _c.b; col[o*4+3] = sh.alpha;
   }
   return sh.alpha;
 }
 
-function writeCaps(stroke, n, T, arc, pos, nor, col){
+/* Where the section's centre sits, which is the point itself unless the brush
+   rises off the surface. Its own scratch, because writeRing is mid-flight with
+   the shared vectors when this is called from there. */
+var _cu = new THREE.Vector3(), _cv = new THREE.Vector3(), _cb = new THREE.Vector3();
+function sectionCentre(stroke, i, T, R, arc, out){
+  var pt = stroke.pts[i];
+  out.copy(pt.p);
+  var cfg = cfgOf(stroke);
+  if(!cfg.rise) return out;
+  var sh = shadeAt(stroke, i, arc);
+  var ry = Math.max(sh.radius * cfg.flat, 1e-5);
+  var ca = Math.cos(pt.roll||0), sa = Math.sin(pt.roll||0);
+  _cb.crossVectors(T, R);
+  _cu.copy(R).multiplyScalar(ca).addScaledVector(_cb, sa);
+  _cv.crossVectors(T, _cu);
+  return out.addScaledVector(_cv, -ry*cfg.rise);
+}
+
+function writeCaps(stroke, n, T, R, arc, pos, nor, col){
   var e0 = shadeAt(stroke, 0, arc), e1 = shadeAt(stroke, n-1, arc);
   var c0 = stroke.color.clone().lerp(WHITE, e0.lift),
       c1 = stroke.color.clone().lerp(WHITE, e1.lift);
-  var p0 = stroke.pts[0].p, p1 = stroke.pts[n-1].p;
+  var p0 = sectionCentre(stroke, 0,   T[0],   R[0],   arc, new THREE.Vector3());
+  var p1 = sectionCentre(stroke, n-1, T[n-1], R[n-1], arc, new THREE.Vector3());
   pos[0]=p0.x; pos[1]=p0.y; pos[2]=p0.z;
   pos[3]=p1.x; pos[4]=p1.y; pos[5]=p1.z;
   nor[0]=-T[0].x; nor[1]=-T[0].y; nor[2]=-T[0].z;
@@ -414,7 +451,7 @@ function buildGeometry(stroke){
   for(i=0;i<n;i++){
     if(writeRing(stroke, i, T[i], R[i], arc, pos, nor, col, seg) < 0.995) needsAlpha = true;
   }
-  if(cfg.caps) writeCaps(stroke, n, T, arc, pos, nor, col);
+  if(cfg.caps) writeCaps(stroke, n, T, R, arc, pos, nor, col);
 
   var quads = (n-1)*seg*6, fans = cfg.caps ? seg*6 : 0;
   var IndexArray = vCount < 65536 ? Uint16Array : Uint32Array;
@@ -582,7 +619,7 @@ LIVE.append = function(stroke){
       L.needsAlpha = true;
     }
   }
-  if(L.caps && n >= 1) writeCaps(stroke, n, L.T, L.arc, L.pos, L.nor, L.col);
+  if(L.caps && n >= 1) writeCaps(stroke, n, L.T, L.R, L.arc, L.pos, L.nor, L.col);
 
   /* --- indices: append the new quad band, move the end fan --- */
   var at = 0;
@@ -671,10 +708,13 @@ LIVE.discard = function(stroke){
    normal. A blade then reads as a blade held flat against the guide, which is
    what it is.
 
-   FACT (C.3): pen tilt turns the nib. It still does; it now turns within the
-   surface, about the stroke's own tangent, instead of within the screen plane.
-   INFERENCE: mapping the screen-space tilt azimuth onto that rotation is a
-   reading, not something the sources state.
+   NOTHING ROLLS THE NIB. An earlier pass mapped the pen's tilt azimuth onto a
+   rotation about the stroke's tangent, on the reading that C.3's "tilt turns
+   the nib" should survive the move to surface alignment. It cannot: ANY
+   rotation about the tangent lifts a blade off the surface, and a pen held at
+   a natural angle reports azimuths right across the range, so a ribbon painted
+   on a wall stood at whatever angle the hand happened to hold. Tilt is still
+   recorded per point; it no longer turns the section.
 
    With no guide the pivot plane faces the camera, so its normal IS the view
    direction and free-space strokes look exactly as they did.
@@ -686,12 +726,7 @@ function nibAxis(pt, t, out){
   var n = pt.nrm;
   if(n && n.lengthSq() > EPS){
     out.crossVectors(t, n);
-    if(out.lengthSq() > EPS){
-      out.normalize();
-      var az = pt.tiltAz;
-      if(az) out.applyAxisAngle(t, az);
-      return out;
-    }
+    if(out.lengthSq() > EPS) return out.normalize();
   }
   /* no surface to lie in: the camera-plane axis the sample was taken with */
   return out.copy(pt.axis || pt.ref || t);
@@ -706,6 +741,26 @@ function rollOf(pt, t, r){
        : Math.atan2(_projT.dot(_sT), _projT.dot(r));
 }
 S.rollOf = rollOf;
+
+/* NO TWO POINTS IN THE SAME PLACE.
+   A guide that clamps several samples to the same nearest position, or a
+   densified path whose inserted samples fall on top of a real one, leaves
+   duplicate consecutive points. They cost a whole ring each, they force
+   computeTangents down its fallback path, and every triangle between the two
+   coincident rings has zero area — which is invisible on screen and a HOLE in
+   an exported solid, because the exporter drops degenerate faces. Measured on
+   a cube stroke drawn across a guide: 22 zero-area triangles, 12 boundary
+   edges in the STL. Cheaper to never make them. */
+S.dedupe = function(stroke){
+  var pts = stroke.pts, out = [pts[0]], i;
+  if(!pts.length) return 0;
+  for(i=1;i<pts.length;i++){
+    if(pts[i].p.distanceToSquared(out[out.length-1].p) > 1e-10) out.push(pts[i]);
+  }
+  var dropped = pts.length - out.length;
+  if(dropped) stroke.pts = out;
+  return dropped;
+};
 
 /* Freeze frames into point data. This is the step that makes orientation
    persistent rather than re-derived, and it is what erase, bend and the

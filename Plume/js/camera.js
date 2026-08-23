@@ -71,6 +71,22 @@ P.viewHeight = viewHeight;
 P.pxToWorld = function(px){ return px * (viewHeight() / viewport().h); };
 P.worldToPx = function(w){  return w  * (viewport().h / viewHeight()); };
 
+/* Pixels -> world units AT A GIVEN POINT, rather than at the pivot. Under
+   perspective a pixel covers more world the further away it is, so a drag that
+   must follow the pen — Liquify — needs the scale where the point actually is.
+   Orthographic has no such falloff and returns the pivot scale. */
+var _pxFwd = new THREE.Vector3(), _pxOff = new THREE.Vector3();
+P.pxToWorldAt = function(p){
+  var h = viewport().h;
+  if(VIEW.ortho) return viewHeight() / h;
+  var cam = P.cam();
+  cam.getWorldDirection(_pxFwd);
+  _pxOff.set(p.x - cam.position.x, p.y - cam.position.y, p.z - cam.position.z);
+  var d = Math.abs(_pxFwd.dot(_pxOff));          // depth along the view axis
+  if(!(d > 1e-6)) d = VIEW.radius;
+  return 2 * Math.tan(fovFromFocal(VIEW.focal)*Math.PI/360) * d / h;
+};
+
 /* world point -> client coordinates, directly comparable to clientX/clientY */
 var _sp = new THREE.Vector3();
 P.worldToScreen = function(p, out){

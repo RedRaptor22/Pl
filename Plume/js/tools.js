@@ -14,7 +14,7 @@
 var T = P.TUNE, S = P.Strokes, G = P.Guides;
 
 var TOOL = P.TOOL = {
-  mode        : 'draw',      // draw|shape|guide|bend|erase|vacuum|select|eyedrop|inject
+  mode        : 'draw',      // draw|shape|guide|bend|erase|vacuum|select|liquify|eyedrop|inject
   brush       : 'pen',
   color       : new THREE.Color('#1b1c21'),   // dark ink on the light default scene
   sizeMM      : 14,
@@ -26,7 +26,10 @@ var TOOL = P.TOOL = {
   stable      : 0.45,
   mirror      : null,        // FACT (C.10): null | 'x' | 'z'
   autoGuide   : true,        // C.1 INFERENCE: with no guide, the first stroke makes one
-  shapeHold   : true
+  shapeHold   : true,
+  /* FACT: the Liquify panel carries size, range and strength, each adjusted by
+     sliding up or down, and a mode you tap or drag to change. */
+  liquify     : { mode:'push', size:120, range:60, strength:55 }
 };
 
 var Tools = P.Tools = {};
@@ -203,6 +206,7 @@ Tools.begin = function(x, y, ev){
 
   if(mode === 'erase' || mode === 'vacuum'){ beginErase(x, y); return; }
   if(mode === 'smooth'){ beginSmooth(x, y); return; }
+  if(mode === 'liquify'){ beginLiquify(x, y); return; }
   if(mode === 'lasso'){ beginLasso(x, y); return; }
   if(mode === 'select'){ return; }                  // handled on tap/hold
   if(mode === 'eyedrop' || mode === 'inject'){ sample(x, y); return; }
@@ -269,6 +273,7 @@ Tools.extend = function(x, y, ev){
   if(!live) {
     if(TOOL.mode === 'erase' || TOOL.mode === 'vacuum') stepErase(x, y);
     else if(TOOL.mode === 'smooth') stepSmooth(x, y);
+    else if(TOOL.mode === 'liquify') stepLiquify(x, y);
     else if(TOOL.mode === 'lasso')  stepLasso(x, y);
     return;
   }
@@ -364,6 +369,7 @@ Tools.finish = function(){
   disarmShapeHold();
   if(TOOL.mode === 'erase' || TOOL.mode === 'vacuum'){ endErase(); return; }
   if(TOOL.mode === 'smooth'){ endSmooth(); return; }
+  if(TOOL.mode === 'liquify'){ endLiquify(); return; }
   if(TOOL.mode === 'lasso'){ endLasso(); return; }
   if(!live) return;
   var l = live; live = null;
@@ -435,6 +441,7 @@ function finishCurve(l){
 
   /* fill in what the platform did not report before the one exact rebuild */
   densifyCurve(l);
+  S.dedupe(l.stroke);          // a clamped guide can hand back the same point twice
 
   /* hand off from the growable live buffer to one exact batch rebuild, so a
      stored stroke never carries the incremental path's numerical drift */
@@ -732,6 +739,152 @@ function endErase(){
    ========================================================================== */
 var smoothSession = null;
 var _sm = {x:0, y:0, z:0};
+
+/* ==========================================================================
+   Liquify  (FACT: documented tool)
+   --------------------------------------------------------------------------
+   "Select the curves or sketches you want to modify and tap Liquify. Press and
+   drag with your pen to liquify your curves or drawings." The panel carries a
+   SIZE, a RANGE and a STRENGTH, each adjusted by sliding up or down, a mode
+   you tap or drag to change, and an Apply button. The three documented modes:
+
+     push   "distorts naturally, as if pushing or pulling with a finger"
+     pinch  "distorts sharply and precisely, as if pinching. Useful for
+             extending or shrinking specific curves"
+     comb   "gently smooths and aligns as if combing", for straightening wavy
+             curves, "works best when used with a rubbing motion"
+
+   It works on the SELECTION, so it can be aimed: liquifying a face does not
+   drag the wall behind it.
+
+   INFERENCE — the parts the docs name but do not define:
+     - size is the radius of the affected area, in screen pixels, because that
+       is the space the hand works in and the same space Stable Stroke and the
+       eraser use.
+     - range is the softness of the falloff inside that radius. 0 concentrates
+       everything at the centre; 100 spreads it evenly to the edge.
+     - displacement happens in the CAMERA PLANE. A drag is two-dimensional, and
+       pushing points along the view direction from a 2D gesture would be a
+       guess about depth on every sample. Points keep their distance from the
+       eye and move where the pen moved.
+     - a liquified point leaves the guide it was drawn on. That is the point of
+       the tool: the cube brush exists to be deformed afterwards.
+   ========================================================================== */
+var liquifySession = null;
+var _lqP = new THREE.Vector3(), _lqD = new THREE.Vector3(),
+    _lqR = new THREE.Vector3(), _lqU = new THREE.Vector3(), _lqScr = {x:0,y:0,z:0};
+
+Tools.liquifyTargets = function(){
+  var sel = S.selection.filter(function(st){ return S.visible(st); });
+  return sel;
+};
+
+function beginLiquify(x, y){
+  var targets = Tools.liquifyTargets();
+  if(!targets.length){ P.toast('Select the curves to liquify first'); return; }
+  liquifySession = {
+    strokes: targets,
+    before: targets.map(function(st){
+      return st.pts.map(function(q){ return q.p.clone(); });
+    }),
+    last: {x:x, y:y},
+    moved: false
+  };
+}
+
+/* screen-space falloff: 1 at the centre, 0 at the rim, `range` deciding how
+   much of the disc is at full strength */
+function liquifyFalloff(d, r, range){
+  if(d >= r) return 0;
+  var t = 1 - d/r;
+  var soft = P.clamp(range/100, 0, 1);
+  /* range 100 -> a wide, gentle shoulder; range 0 -> a sharp spike */
+  var k = 1 + (1 - soft) * 6;
+  return Math.pow(t, k);
+}
+
+function stepLiquify(x, y){
+  var s = liquifySession;
+  if(!s) return;
+  var cfg = TOOL.liquify;
+  var dxPx = x - s.last.x, dyPx = y - s.last.y;
+  var dragPx = Math.hypot(dxPx, dyPx);
+  if(cfg.mode !== 'comb' && dragPx < 0.01) return;
+  s.last.x = x; s.last.y = y;
+  s.moved = true;
+
+  var rPx = Math.max(8, cfg.size);
+  var strength = P.clamp(cfg.strength/100, 0, 1);
+  P.camBasis(_lqR, _lqU, _lqD);            // right, up, forward
+
+  for(var i=0;i<s.strokes.length;i++){
+    var st = s.strokes[i], pts = st.pts, touched = false;
+    for(var j=0;j<pts.length;j++){
+      P.worldToScreen(pts[j].p, _lqScr);
+      if(_lqScr.z < -1 || _lqScr.z > 1) continue;
+      var d = Math.hypot(_lqScr.x - x, _lqScr.y - y);
+      var w = liquifyFalloff(d, rPx, cfg.range);
+      if(w <= 0) continue;
+
+      var mx = 0, my = 0;
+      if(cfg.mode === 'push'){
+        mx = dxPx * w * strength;
+        my = dyPx * w * strength;
+      } else if(cfg.mode === 'pinch'){
+        /* toward the cursor, by how far the pen moved — a squeeze rather than
+           a shove, so a curve can be drawn in or stretched out */
+        var toX = x - _lqScr.x, toY = y - _lqScr.y;
+        var len = Math.hypot(toX, toY) || 1;
+        var pull = Math.min(len, dragPx * w * strength);
+        mx = toX/len * pull; my = toY/len * pull;
+      } else {
+        /* comb: pull each point toward the line its neighbours make, which is
+           what straightens a wobble without moving the curve as a whole */
+        if(j === 0 || j === pts.length-1) continue;
+        var a = pts[j-1].p, b = pts[j+1].p;
+        _lqP.copy(a).add(b).multiplyScalar(0.5).sub(pts[j].p);
+        pts[j].p.addScaledVector(_lqP, w * strength * 0.5);
+        touched = true;
+        continue;
+      }
+      if(!mx && !my) continue;
+      /* pixels -> world, in the plane facing the camera at this point's depth */
+      var scale = P.pxToWorldAt(pts[j].p);   // depth-correct, so it tracks the pen
+      pts[j].p.addScaledVector(_lqR, mx * scale)
+              .addScaledVector(_lqU, -my * scale);
+      touched = true;
+    }
+    if(touched){ S.freezeFrames(st); S.rebuild(st); }
+  }
+}
+
+/* Apply — the documented button, and also what leaving the tool does. One
+   history step for the whole session, so a minute of pushing undoes at once
+   rather than a hundred times. */
+function endLiquify(){
+  var s = liquifySession; liquifySession = null;
+  if(!s || !s.moved) return;
+  var after = s.strokes.map(function(st){
+    return st.pts.map(function(q){ return q.p.clone(); });
+  });
+  function apply(snap){
+    for(var i=0;i<s.strokes.length;i++){
+      var st = s.strokes[i];
+      for(var j=0;j<st.pts.length && j<snap[i].length;j++) st.pts[j].p.copy(snap[i][j]);
+      S.freezeFrames(st); S.rebuild(st);
+    }
+  }
+  P.History.push({
+    label:'liquify',
+    redo: function(){ apply(after); },
+    undo: function(){ apply(s.before); }
+  });
+  P.onSceneChange();
+}
+Tools.liquifyApply = function(){
+  endLiquify();
+  P.toast('Liquify applied');
+};
 
 function beginSmooth(x, y){
   smoothSession = { before: [], strokes: [] };

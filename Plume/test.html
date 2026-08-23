@@ -167,6 +167,17 @@ function run(W){
     for(var i=0;i<=n;i++){ var a=i/n*Math.PI*2; o.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r}); }
     return o;
   }
+  function penTilt(pts, tiltX, tiltY){
+    var el = P.elStage;
+    function ev(t,x,y,b){
+      el.dispatchEvent(new W.PointerEvent(t,{pointerId:98, pointerType:'pen',
+        clientX:x, clientY:y, buttons:b, pressure:b?0.6:0,
+        tiltX:tiltX||0, tiltY:tiltY||0, bubbles:true, cancelable:true}));
+    }
+    ev('pointerdown', pts[0].x, pts[0].y, 1);
+    for(var i=1;i<pts.length;i++) ev('pointermove', pts[i].x, pts[i].y, 1);
+    ev('pointerup', pts[pts.length-1].x, pts[pts.length-1].y, 0);
+  }
   var ts = function(p){ return P.worldToScreen(p, {}); };
   function plen(st){
     var L=0; for(var i=1;i<st.pts.length;i++) L += st.pts[i].p.distanceTo(st.pts[i-1].p);
@@ -960,6 +971,166 @@ function run(W){
      '20mm eraser takes ' + biteThin.toFixed(1) + 'px, 120mm takes ' + biteBig.toFixed(1) + 'px');
   reset();
 
+  /* ================= Liquify ================= */
+  group('Liquify — push, pinch and comb');
+  /* FACT: "select the curves or sketches you want to modify and tap Liquify.
+     Press and drag with your pen to liquify your curves or drawings." The
+     panel carries size, range and strength, each adjusted by sliding up or
+     down, a mode you tap to change, and an Apply button. */
+  var LD = W.document;
+  function straightCurve(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.brush = 'pen';
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    pen([{x:CX-220,y:CY},{x:CX-110,y:CY},{x:CX,y:CY},{x:CX+110,y:CY},{x:CX+220,y:CY}]);
+    return P.Strokes.list[0];
+  }
+  function dragReadout(id, dy){
+    var el10 = LD.getElementById(id), r10 = el10.getBoundingClientRect();
+    var x10 = r10.left + r10.width/2, y10 = r10.top + r10.height/2;
+    function pe(t, yy, btn){
+      el10.dispatchEvent(new W.PointerEvent(t, {pointerId:76, pointerType:'touch',
+        clientX:x10, clientY:yy, buttons:btn, bubbles:true, cancelable:true}));
+    }
+    pe('pointerdown', y10, 1);
+    pe('pointermove', y10 - dy/2, 1);
+    pe('pointermove', y10 - dy, 1);
+    pe('pointerup',   y10 - dy, 0);
+  }
+  function drag(from, to, steps){
+    steps = steps || 8;
+    penEvent('pointerdown', from.x, from.y, 1);
+    for(var q=1;q<=steps;q++){
+      penEvent('pointermove', from.x + (to.x-from.x)*q/steps,
+                              from.y + (to.y-from.y)*q/steps, 1);
+    }
+    penEvent('pointerup', to.x, to.y, 0);
+  }
+
+  var lqSt = straightCurve();
+  var lqBefore = lqSt.pts.map(function(q){ return q.p.clone(); });
+  P.Strokes.setSelected(lqSt, true); P.onSceneChange();
+  LD.getElementById('btnSelLiquify').click();
+  ck('Liquify opens from the selection and keeps the selection',
+     P.TOOL.mode === 'liquify' && P.Strokes.selection.length === 1);
+  ck('...and brings up its panel', !LD.getElementById('liquifyPanel').classList.contains('hidden'));
+
+  /* PUSH — "distorts naturally, as if pushing or pulling with a finger" */
+  P.TOOL.liquify.mode = 'push'; P.TOOL.liquify.size = 160;
+  P.TOOL.liquify.strength = 100; P.TOOL.liquify.range = 60;
+  drag({x:CX,y:CY}, {x:CX,y:CY+80});
+  var lqMid = Math.floor(lqSt.pts.length/2);
+  var movedMid = lqSt.pts[lqMid].p.distanceTo(lqBefore[lqMid]) / P.MM;
+  var movedEnd = lqSt.pts[0].p.distanceTo(lqBefore[0]) / P.MM;
+  ck('push moves the curve under the pen', movedMid > 20,
+     movedMid.toFixed(0) + 'mm at the centre of the brush');
+  ck('...and falls off to nothing outside it', movedEnd < movedMid*0.1,
+     movedEnd.toFixed(1) + 'mm at a point ' + P.TOOL.liquify.size + 'px away');
+  ck('the whole session is one undo step', P.History.canUndo() && (function(){
+    P.History.undo();
+    var back = lqSt.pts[lqMid].p.distanceTo(lqBefore[lqMid]) < 1e-9;
+    P.History.redo();
+    return back;
+  })());
+
+  /* the size setting really is the reach */
+  var lqSt2 = straightCurve();
+  var before2 = lqSt2.pts.map(function(q){ return q.p.clone(); });
+  P.Strokes.setSelected(lqSt2, true); P.setTool('liquify');
+  P.TOOL.liquify.size = 40;
+  drag({x:CX,y:CY}, {x:CX,y:CY+80});
+  var reached = 0;
+  for(var li=0; li<lqSt2.pts.length; li++){
+    if(lqSt2.pts[li].p.distanceTo(before2[li]) > 1e-6){
+      reached = Math.max(reached, Math.abs(ts(before2[li]).x - CX));
+    }
+  }
+  ck('a smaller size reaches less far', reached < 60,
+     'furthest point moved was ' + reached.toFixed(0) + 'px from the pen');
+
+  /* COMB — "gently smooths and aligns as if combing", for wavy curves */
+  reset();
+  P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+  P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+  var wobbly10 = [];
+  for(var wq=0; wq<=40; wq++){
+    var wt = wq/40;
+    wobbly10.push({x:CX-220+440*wt, y:CY+Math.sin(wt*22)*16});
+  }
+  pen(wobbly10);
+  var combSt = P.Strokes.list[0];
+  function waviness(st10){
+    var A10 = st10.pts[0].p, B10 = st10.pts[st10.pts.length-1].p;
+    var ab10 = B10.clone().sub(A10), L10 = ab10.length(), dev = 0;
+    for(var q10=0;q10<st10.pts.length;q10++){
+      dev += st10.pts[q10].p.clone().sub(A10).cross(ab10).length()/L10;
+    }
+    return dev/st10.pts.length/P.MM;
+  }
+  var wavy0 = waviness(combSt);
+  P.Strokes.setSelected(combSt, true); P.setTool('liquify');
+  P.TOOL.liquify.mode = 'comb'; P.TOOL.liquify.size = 300; P.TOOL.liquify.strength = 100;
+  for(var rub=0; rub<12; rub++) drag({x:CX-220,y:CY}, {x:CX+220,y:CY}, 20);
+  var wavy1 = waviness(combSt);
+  ck('comb straightens a wavy curve', wavy1 < wavy0*0.5,
+     wavy0.toFixed(1) + 'mm of wobble -> ' + wavy1.toFixed(1) + 'mm');
+
+  /* PINCH — "distorts sharply and precisely, as if pinching" */
+  var pinchSt = straightCurve();
+  P.Strokes.setSelected(pinchSt, true); P.setTool('liquify');
+  P.TOOL.liquify.mode = 'pinch'; P.TOOL.liquify.size = 400; P.TOOL.liquify.strength = 100;
+  var span0 = pinchSt.pts[pinchSt.pts.length-1].p.distanceTo(pinchSt.pts[0].p)/P.MM;
+  for(var pq=0; pq<6; pq++) drag({x:CX,y:CY}, {x:CX+40,y:CY}, 10);
+  var span1 = pinchSt.pts[pinchSt.pts.length-1].p.distanceTo(pinchSt.pts[0].p)/P.MM;
+  ck('pinch gathers the curve toward the pen', span1 < span0 - 20,
+     span0.toFixed(0) + 'mm across -> ' + span1.toFixed(0) + 'mm');
+
+  /* it is aimed: liquify only touches what is selected */
+  reset();
+  P.TOOL.stableOn = false;
+  P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+  pen([{x:CX-200,y:CY-8},{x:CX,y:CY-8},{x:CX+200,y:CY-8}]);
+  pen([{x:CX-200,y:CY+8},{x:CX,y:CY+8},{x:CX+200,y:CY+8}]);
+  var keepSt = P.Strokes.list[1];
+  var keepBefore = keepSt.pts.map(function(q){ return q.p.clone(); });
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  P.setTool('liquify');
+  P.TOOL.liquify.mode = 'push'; P.TOOL.liquify.size = 300; P.TOOL.liquify.strength = 100;
+  drag({x:CX,y:CY}, {x:CX,y:CY+70});
+  var untouched = true;
+  for(var kq=0;kq<keepSt.pts.length;kq++){
+    if(keepSt.pts[kq].p.distanceTo(keepBefore[kq]) > 1e-9) untouched = false;
+  }
+  ck('a curve that is not selected is not liquified', untouched);
+
+  /* the panel: modes, and the three numbers that drag */
+  LD.getElementById('lqModes').querySelector('[data-lq="pinch"]').click();
+  ck('tapping a mode selects it', P.TOOL.liquify.mode === 'pinch');
+  P.UI.refresh();
+  ck('...and the panel shows which one', LD.getElementById('lqModes')
+       .querySelector('[data-lq="pinch"]').classList.contains('on'));
+  var lqSizeWas = P.TOOL.liquify.size;
+  dragReadout('lqSizeVal', 60);
+  ck('size drags up and down like the brush numbers do',
+     P.TOOL.liquify.size > lqSizeWas, lqSizeWas + ' -> ' + P.TOOL.liquify.size);
+  var lqStrWas = P.TOOL.liquify.strength;
+  dragReadout('lqStrengthVal', -40);
+  ck('...so does strength', P.TOOL.liquify.strength < lqStrWas,
+     lqStrWas + '% -> ' + P.TOOL.liquify.strength + '%');
+  ck('strength cannot be dragged below 1%', (function(){
+    dragReadout('lqStrengthVal', -900);
+    return P.TOOL.liquify.strength >= 1;
+  })(), P.TOOL.liquify.strength + '%');
+
+  LD.getElementById('btnLqApply').click();
+  ck('Apply leaves the curves where the pen put them', P.Strokes.list.length === 2);
+  LD.getElementById('btnLqClose').click();
+  ck('closing the panel leaves the tool', P.TOOL.mode !== 'liquify' &&
+     LD.getElementById('liquifyPanel').classList.contains('hidden'));
+  P.TOOL.liquify.mode = 'push'; P.TOOL.liquify.size = 120;
+  P.TOOL.liquify.strength = 55; P.TOOL.liquify.range = 60;
+  P.setTool('draw'); reset();
+
   /* ================= geometry export ================= */
   group('Geometry export — OBJ and STL');
   /* Verified against the CURVE, not against the writers: a round brush swept
@@ -1109,6 +1280,37 @@ function run(W){
   pen(circle(CX, CY, 60));
   ck('a guide is not geometry, so it is left out', EXP.collect().length === 0);
   ck('...but can be asked for', EXP.collect({guides:true}).length === 1);
+
+  /* Duplicate points are a hole in an exported solid: two rings land on top of
+     one another, every triangle between them has zero area, and the writer
+     drops degenerate faces — so the tube opens up where nothing looked wrong
+     on screen. A guide that clamps off-edge samples is the way they get made. */
+  reset();
+  P.TOOL.stableOn = false;
+  P.Guides.setActive(P.Guides.primitive('sphere', 32, 1));
+  P.TOOL.brush = 'cube'; P.TOOL.sizeMM = 30; P.TOOL.pressureOn = true;
+  pen([{x:CX-300,y:CY-40},{x:CX-100,y:CY},{x:CX+100,y:CY+30},{x:CX+300,y:CY-20}]);
+  var dupWorst = Infinity, dupCount = 0;
+  for(var dq=0; dq<P.Strokes.list.length; dq++){
+    var dst = P.Strokes.list[dq];
+    for(var dp=1; dp<dst.pts.length; dp++){
+      var gap = dst.pts[dp].p.distanceTo(dst.pts[dp-1].p);
+      if(gap < 1e-5) dupCount++;
+      dupWorst = Math.min(dupWorst, gap);
+    }
+  }
+  ck('a committed curve never holds the same point twice', dupCount === 0,
+     'closest pair ' + (dupWorst*1e6).toFixed(1) + ' micrometres apart');
+  ck('...so nothing degenerate reaches the exporter', (function(){
+    var parts11 = P.Export.collect();
+    for(var q11=0; q11<parts11.length; q11++){
+      var raw = parts11[q11].stroke.mesh.geometry.index.count/3;
+      if(parts11[q11].tris.length/3 !== raw) return false;
+    }
+    return parts11.length > 0;
+  })());
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14;
+  reset();
 
   /* Every brush, not just the round one: a solid is only printable if each
      directed edge appears exactly once — i.e. the surface is closed AND every
@@ -1371,6 +1573,15 @@ function run(W){
   ck('joystick appears when there is something to move', shown('joy'));
   ck('and still does not overlap anything', scan(base.concat(['joy'])).length === 0,
      scan(base.concat(['joy'])).join(', ') || 'clean');
+  /* liquify always runs with a selection, so it shares the screen with the
+     joystick and the selection bar every single time it is open */
+  P.setTool('liquify'); P.UI.refresh();
+  var lqScan = base.concat(['joy','selBar','liquifyPanel']);
+  ck('the liquify strip clears everything else on screen',
+     scan(lqScan).length === 0, scan(lqScan).join(', ') || 'clean');
+  ck('...taking the selection bar\u2019s place rather than fighting it for it',
+     !shown('selBar') && shown('liquifyPanel'));
+  P.setTool('select'); P.UI.refresh();
   P.Strokes.clearSelection(); P.onSceneChange();
   ck('joystick hides again', !shown('joy'));
 
@@ -1411,9 +1622,17 @@ function run(W){
     var st8 = P.Strokes.list[0];
     var seg8 = P.Strokes.segOf(st8), pos8 = st8.mesh.geometry.attributes.position;
     var mid8 = Math.floor(st8.pts.length/2);
-    var c8 = st8.pts[mid8].p, u8 = wideAxisAt(st8, mid8);
+    var u8 = wideAxisAt(st8, mid8);
     var v8 = new THREE.Vector3().crossVectors(st8.pts[mid8].tan, u8).normalize();
-    var eu = 0, ev = 0, maxR = 0, minR = 1e9, d8 = new THREE.Vector3(), k8, o8;
+    /* measured about the SECTION's own centre, not the point — a brush that
+       rises off the surface puts the two in different places on purpose */
+    var c8 = new THREE.Vector3(), k8, o8;
+    for(k8=0;k8<seg8;k8++){
+      o8 = 2 + mid8*seg8 + k8;
+      c8.add(new THREE.Vector3(pos8.getX(o8), pos8.getY(o8), pos8.getZ(o8)));
+    }
+    c8.multiplyScalar(1/seg8);
+    var eu = 0, ev = 0, maxR = 0, minR = 1e9, d8 = new THREE.Vector3();
     for(k8=0;k8<seg8;k8++){
       o8 = 2 + mid8*seg8 + k8;
       d8.set(pos8.getX(o8), pos8.getY(o8), pos8.getZ(o8)).sub(c8);
@@ -1454,12 +1673,11 @@ function run(W){
   ck('...and uniform along its length, with no taper',
      secSquare.endOverMid > 0.9, (secSquare.endOverMid*100).toFixed(0) + '% at the end');
 
-  ck('the cube is the same square section, kept narrow',
+  ck('the cube keeps the square section',
      secCube.corner > 1.35 &&
-     Math.abs(secCube.wideMM - secCube.thinMM) / secCube.wideMM < 0.05 &&
-     secCube.wideMM < secSquare.wideMM * 0.5,
-     secCube.wideMM.toFixed(1) + 'mm against ' +
-     secSquare.wideMM.toFixed(1) + 'mm for the square tip');
+     Math.abs(secCube.wideMM - secCube.thinMM) / secCube.wideMM < 0.05,
+     secCube.wideMM.toFixed(1) + ' x ' + secCube.thinMM.toFixed(1) + 'mm, corners ' +
+     secCube.corner.toFixed(2) + 'x');
 
   ck('the wide brush is a broad flat ribbon, not a rod',
      secWide.wideMM / secWide.thinMM > 8,
@@ -1469,6 +1687,69 @@ function run(W){
      secWide.wideMM > secSquare.wideMM && secWide.wideMM > secPen.wideMM,
      [secPen.wideMM, secTaper.wideMM, secSquare.wideMM, secCube.wideMM, secWide.wideMM]
        .map(function(x){ return x.toFixed(0); }).join(' / ') + 'mm across');
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
+  reset();
+
+  /* ---- how a nib sits ON a guide, which is what the section is for ----
+     A wall: a profile drawn from above extrudes downwards into a vertical
+     curtain, so the surface normal is horizontal and nothing about the view
+     coincides with it. */
+  function paintOnWall(brush, mm, tiltX, tiltY){
+    reset();
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true; P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    var prof9 = [];
+    for(var q=0;q<=16;q++) prof9.push({x:CX-220+440*(q/16), y:CY});
+    pen(prof9);
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = brush; P.TOOL.sizeMM = mm;
+    var col9 = [];
+    for(q=0;q<=12;q++) col9.push({x:CX, y:CY-120+q*20});
+    penTilt(col9, tiltX || 0, tiltY || 0);
+    var st9 = P.Strokes.list[0];
+    if(!st9) return null;
+    var mid9 = Math.floor(st9.pts.length/2), pt9 = st9.pts[mid9];
+    var u9 = wideAxisAt(st9, mid9), n9 = pt9.nrm.clone();
+    var seg9 = P.Strokes.segOf(st9), pos9 = st9.mesh.geometry.attributes.position;
+    var uLo = 1e9, uHi = -1e9, nLo = 1e9, nHi = -1e9, d9 = new THREE.Vector3();
+    for(var k9=0;k9<seg9;k9++){
+      var o9 = 2 + mid9*seg9 + k9;
+      d9.set(pos9.getX(o9), pos9.getY(o9), pos9.getZ(o9)).sub(pt9.p);
+      uLo = Math.min(uLo, d9.dot(u9)); uHi = Math.max(uHi, d9.dot(u9));
+      nLo = Math.min(nLo, d9.dot(n9)); nHi = Math.max(nHi, d9.dot(n9));
+    }
+    return { acrossMM:(uHi-uLo)/P.MM, outMM:(nHi-nLo)/P.MM,
+             sinksMM:-nLo/P.MM, standsMM:nHi/P.MM };
+  }
+
+  var wallWide = paintOnWall('wide', 100, 0, 0);
+  ck('the wide brush lies flat on the guide it is painted on',
+     wallWide.acrossMM / wallWide.outMM > 8,
+     wallWide.acrossMM.toFixed(0) + 'mm across the surface, ' +
+     wallWide.outMM.toFixed(0) + 'mm out of it');
+
+  /* the bug this replaced: the pen's tilt azimuth was rotating the section
+     about the tangent, so a ribbon painted with a naturally-held pen stood on
+     edge — measured 213mm out of the surface instead of 34mm. */
+  var wallTilted = paintOnWall('wide', 100, -34, 22);
+  ck('...and a tilted pen does not stand it on edge',
+     Math.abs(wallTilted.outMM - wallWide.outMM) < 2,
+     wallTilted.outMM.toFixed(0) + 'mm out of the surface with the pen tilted, ' +
+     wallWide.outMM.toFixed(0) + 'mm flat');
+
+  /* the cube is an EXTRUSION FROM the surface, its length the size slider */
+  var cube100 = paintOnWall('cube', 100), cube40 = paintOnWall('cube', 40);
+  ck('the cube stands on the surface rather than sinking into it',
+     cube100.sinksMM < 1, cube100.sinksMM.toFixed(1) + 'mm below the stroke');
+  ck('...extruding out of it by the size on the slider',
+     Math.abs(cube100.standsMM - 100) < 6 && Math.abs(cube40.standsMM - 40) < 4,
+     '100mm -> ' + cube100.standsMM.toFixed(0) + 'mm out, 40mm -> ' +
+     cube40.standsMM.toFixed(0) + 'mm out');
+  var wallSquare = paintOnWall('square', 100);
+  ck('...while the square tip still straddles the surface as a nib should',
+     wallSquare.sinksMM > wallSquare.standsMM * 0.8,
+     wallSquare.sinksMM.toFixed(0) + 'mm in, ' + wallSquare.standsMM.toFixed(0) + 'mm out');
   P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
   reset();
 
