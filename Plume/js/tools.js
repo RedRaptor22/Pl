@@ -755,6 +755,25 @@ var _sm = {x:0, y:0, z:0};
    The maths reads and writes point POSITIONS, which stay eager, so nothing
    about the result changes: only the mesh that displays them is deferred,
    to the frame that is about to show it. */
+/* OCCLUSION, ONCE PER POINT PER DRAG.
+   G.isMasked answers "is the active guide between the camera and this point",
+   and there is no spatial index behind it, so each test walks the guide. With
+   a 300mm brush the smooth disc covers most of a model and every point in it
+   is tested on every move: 7312 rays over one 40-move drag, 194ms, 97% of the
+   tool's cost. The guide-side cache is keyed on position and a tool that MOVES
+   points misses it by design.
+   Neither the camera nor the guides move during a drag, and a smoothing pass
+   shifts a point by a fraction of a millimetre, so the answer cannot change
+   under us: it is worth having once, per point, for the life of the drag. */
+var dragSeq = 0;
+function beginMaskEpoch(){ dragSeq++; }
+function maskedInDrag(pt){
+  if(pt.maskSeq === dragSeq) return pt.masked;
+  var m = P.Guides.isMasked(pt.p);
+  pt.maskSeq = dragSeq; pt.masked = m;
+  return m;
+}
+
 var dirtyStrokes = [];
 function markDirty(st){
   if(dirtyStrokes.indexOf(st) < 0) dirtyStrokes.push(st);
@@ -917,6 +936,7 @@ Tools.liquifyApply = function(){
 };
 
 function beginSmooth(x, y){
+  beginMaskEpoch();
   smoothSession = { before: [], strokes: [] };
   stepSmooth(x, y);
 }
@@ -944,7 +964,7 @@ function stepSmooth(x, y){
       if(_sm.z < -1 || _sm.z > 1) continue;
       var dx = _sm.x - x, dy = _sm.y - y, d2 = dx*dx + dy*dy;
       if(d2 > r2) continue;
-      if(P.Guides.isMasked(pts[j].p)) continue;
+      if(maskedInDrag(pts[j])) continue;
       if(!touched){ snapshotFor(smoothSession, st); touched = true; }
       var w = (1 - d2/r2) * 0.45;                   // GUESS: feels right by hand
       avg.copy(pts[j-1].p).add(pts[j+1].p).multiplyScalar(0.5);
@@ -981,7 +1001,10 @@ function endSmooth(){
    ========================================================================== */
 var lasso = null;
 
-function beginLasso(x, y){ lasso = [{x:x, y:y}]; P.lassoPreview(lasso); }
+function beginLasso(x, y){
+  beginMaskEpoch();                  // endLasso reads the same per-drag memo
+  lasso = [{x:x, y:y}]; P.lassoPreview(lasso);
+}
 
 function stepLasso(x, y){
   if(!lasso) return;
@@ -1014,7 +1037,7 @@ function endLasso(){
     for(var j=0;j<pts.length;j++){
       P.worldToScreen(pts[j].p, _sm);
       if(_sm.z < -1 || _sm.z > 1) continue;
-      if(P.Guides.isMasked(pts[j].p)) continue;     // A.9 applies to select too
+      if(maskedInDrag(pts[j])) continue;     // A.9 applies to select too
       seen++;
       if(pointInPoly(_sm.x, _sm.y, poly)) inside++;
     }

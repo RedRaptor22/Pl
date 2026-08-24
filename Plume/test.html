@@ -932,15 +932,40 @@ function run(W){
   ck('so the facet error stays under a third of a millimetre up to a 200mm nib',
      errWorst < 0.36, 'worst ' + errWorst.toFixed(3) + 'mm at ' + errAt + 'mm');
 
-  /* above that the segment ceiling takes over, and the guarantee becomes a
-     relative one — including the wide brush, whose nib is 3.2x the slider */
+  /* Above that the segment ceiling takes over and the guarantee becomes a
+     relative one — including the wide brush, whose nib is 3.4x the slider.
+
+     Measured against the OUTLINE THE BRUSH ACTUALLY HAS, not against a circle.
+     1-cos(pi/n) is the sagitta of a circular arc and describes a round section
+     only; a squared-off one is traced by the Chebyshev map, whose samples land
+     on the four corners and the four edge midpoints, so its sides are exact
+     line segments at any size and its error is zero rather than the 7.6% the
+     circle formula claims for it. This walks each span between two consecutive
+     section samples and takes the furthest the true outline strays from the
+     chord across it. */
+  function outlineError(brush, mm){
+    P.Strokes.clear(); P.TOOL.brush = brush; P.TOOL.sizeMM = mm;
+    pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+    var n = P.Strokes.segOf(P.Strokes.list[0]);
+    var sq = P.BRUSH[P.brushName(brush)].square || 0;
+    var a = {x:0,y:0}, b = {x:0,y:0}, m = {x:0,y:0}, worst = 0;
+    for(var k=0;k<n;k++){
+      P.Strokes.sectionPoint(k/n*Math.PI*2, sq, a);
+      P.Strokes.sectionPoint((k+1)/n*Math.PI*2, sq, b);
+      var ex = b.x-a.x, ey = b.y-a.y, e2 = ex*ex+ey*ey;
+      for(var q=1;q<40;q++){
+        P.Strokes.sectionPoint((k + q/40)/n*Math.PI*2, sq, m);
+        var t2 = e2 > 1e-12 ? ((m.x-a.x)*ex + (m.y-a.y)*ey)/e2 : 0;
+        var ox = m.x - (a.x + ex*t2), oy = m.y - (a.y + ey*t2);
+        worst = Math.max(worst, Math.hypot(ox, oy));
+      }
+    }
+    return worst;                       // as a fraction of the nib radius
+  }
   var relWorst = 0, relAt = '';
   ['pen','wide'].forEach(function(bn2){
     [200, 300].forEach(function(mm){
-      P.Strokes.clear(); P.TOOL.brush = bn2; P.TOOL.sizeMM = mm;
-      pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
-      var n = P.Strokes.segOf(P.Strokes.list[0]);
-      var rel = 1 - Math.cos(Math.PI/n);
+      var rel = outlineError(bn2, mm);
       if(rel > relWorst){ relWorst = rel; relAt = bn2 + ' at ' + mm + 'mm'; }
     });
   });

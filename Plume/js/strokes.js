@@ -216,7 +216,19 @@ var SEG_ERR_MM = 0.3, SEG_MIN = 8, SEG_MAX = 48;
 function segOf(stroke){
   var cfg = cfgOf(stroke);
   var rmm = Math.max(0.25, stroke.baseRadius * cfg.wide / P.MM);
-  var n = Math.ceil(Math.PI / Math.sqrt(2 * SEG_ERR_MM / rmm));
+  /* Only the ROUND part of a section needs facets. The sagitta rule below is
+     about approximating a circle, and a section is only a circle at square 0;
+     at square 1 it is a rectangle, whose sides are already exact at any size
+     and whose corners are corners. Feeding it the full radius asked for 92
+     segments on a 300mm wide brush - clamped to the 48 cap, of which 40 were
+     extra vertices strung along four flat sides, on every ring of every
+     stroke. The nib rebuild during a Smooth drag was 4.8ms a move because of
+     it. What still needs facets is the corner radius, which shrinks to
+     nothing as the section squares off. */
+  var curved = rmm * (1 - P.clamp(cfg.square, 0, 1));
+  var n = curved > SEG_ERR_MM
+        ? Math.ceil(Math.PI / Math.sqrt(2 * SEG_ERR_MM / curved))
+        : 0;
   var step = cfg.square > 0.5 ? 8 : 4;
   return P.clamp(Math.ceil(n/step)*step, SEG_MIN, SEG_MAX);
 }
@@ -286,6 +298,8 @@ function sectionPoint(ang, square, out){
   out.y = s*(1-square) + (s/m)*square;
   return out;
 }
+
+S.sectionPoint = sectionPoint;   // exported so tests can measure the real outline
 
 var _p0 = {x:0,y:0}, _p1 = {x:0,y:0};
 var DANG = 1e-3;
