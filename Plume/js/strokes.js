@@ -157,7 +157,8 @@ var BRUSH = P.BRUSH = {
   /* tapered / pointy tip */
   taper:  { flat:1.00, square:0.00, taper:9, tip:0.04, caps:true, wide:1.00, glow:0 },
   /* square tip / flat: blocky and uniform, for structure */
-  square: { flat:1.00, square:1.00, taper:0, tip:0,    caps:true, wide:1.60, glow:0 },
+  rectangle: { flat:1.00, square:1.00, taper:0, tip:0, caps:true, wide:1.60, glow:0,
+               halfWidthMM:11.2 },
   /* cube: an EXTRUSION FROM the surface. Same hard square section, but it
      stands on the stroke rather than straddling it (rise), and the size slider
      is the length it stands off by — geometry to deform later, not a line. */
@@ -179,9 +180,10 @@ P.BRUSH_ALIAS = {
   round:  'pen',      // identical
   pencil: 'pen',      // was round at 0.7x
   ink:    'taper',    // was round with tapered ends
-  flat:   'square',   // Feather names this brush "square tip / flat"
-  marker: 'square',   // hard nib, 1.7x -> hard square nib, 1.6x
-  chisel: 'square',   // hard blade -> the blocky nib
+  flat:   'rectangle',  // Feather names this brush "square tip / flat"
+  marker: 'rectangle',  // hard nib, 1.7x -> hard square nib, 1.6x
+  chisel: 'rectangle',  // hard blade -> the blocky nib
+  square: 'rectangle',  // renamed: its section is no longer a square
   ribbon: 'wide'      // flat tape -> the flat ribbon
 };
 P.brushName = function(name){
@@ -289,6 +291,21 @@ var WHITE = new THREE.Color(1,1,1), _c = new THREE.Color();
    Dividing by max(|cos|,|sin|) pushes the unit circle out onto the unit
    square, so `square` morphs continuously between a round nib and a hard
    rectangular one. Writes into out = {x,y}. */
+/* HOW WIDE THE NIB IS ACROSS THE SURFACE.
+   For most brushes that is just the shaded radius, so the size slider scales
+   the whole section and the nib grows in every direction at once. A brush with
+   halfWidthMM set holds its width instead, and the slider drives only the
+   height standing off the surface - it is a RECTANGLE whose proportions change
+   with size, rather than a square that is uniformly bigger.
+   Everything that needs the across-surface measurement asks here: the ring
+   itself, and the boundary trim, which scales the same axis and would cut in
+   the wrong place if it went on using the radius. */
+function nibHalfWidth(stroke, shadeRadius){
+  var w = cfgOf(stroke).halfWidthMM;
+  return w ? w * P.MM : shadeRadius;
+}
+S.nibHalfWidth = nibHalfWidth;
+
 function sectionPoint(ang, square, out){
   var c = Math.cos(ang), s = Math.sin(ang);
   if(square <= 0){ out.x = c; out.y = s; return out; }
@@ -307,7 +324,7 @@ var DANG = 1e-3;
 function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
   var sh = shadeAt(stroke, i, arc);
   var cfg = cfgOf(stroke);
-  var rx = Math.max(sh.radius, 1e-5);
+  var rx = Math.max(nibHalfWidth(stroke, sh.radius), 1e-5);
   var ry = Math.max(sh.radius * cfg.flat, 1e-5);
   var pt = stroke.pts[i];
   var sq = cfg.square || 0;
@@ -660,7 +677,7 @@ LIVE.append = function(stroke){
   for(i=first;i<n;i++){
     /* the same roll and fit the commit will freeze, so nothing shifts on pen-up */
     pts[i].roll = rollOf(pts[i], L.T[i], L.R[i]);
-    fitAt(pts[i], L.T[i], shadeAt(stroke, i, L.arc).radius);
+    fitAt(pts[i], L.T[i], nibHalfWidth(stroke, shadeAt(stroke, i, L.arc).radius));
     if(writeRing(stroke, i, L.T[i], L.R[i], L.arc, L.pos, L.nor, L.col, seg) < 0.995){
       L.needsAlpha = true;
     }
@@ -925,7 +942,7 @@ S.freezeFrames = function(stroke){
   for(var i=0;i<pts.length;i++){
     var t = fr.T[i], r = fr.R[i], pt = pts[i];
     pt.roll = rollOf(pt, t, r);
-    fitAt(pt, t, shadeAt(stroke, i, arc).radius);
+    fitAt(pt, t, nibHalfWidth(stroke, shadeAt(stroke, i, arc).radius));
     pt.tan = t.clone();
     pt.ref = r.clone();
     if(pt.axis) delete pt.axis;

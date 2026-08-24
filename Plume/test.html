@@ -645,7 +645,7 @@ function run(W){
     P.TOOL.autoGuide = true;
     pen(circle(CX, CY, 40));                       // and a fresh active guide
     P.ENV.bg.set('#1a2030'); P.applyEnv();
-    P.TOOL.sizeMM = 27; P.TOOL.color.set('#39c2c9'); P.TOOL.brush = 'square';
+    P.TOOL.sizeMM = 27; P.TOOL.color.set('#39c2c9'); P.TOOL.brush = 'rectangle';
   }
 
   function snapshot(){
@@ -1571,7 +1571,7 @@ function run(W){
      P.Import.parseOBJ(eVC.obj).attributes.position.count === eStat.triangles*3);
 
   /* colour and opacity travel in the .mtl */
-  P.TOOL.color.set('#3264c8'); P.TOOL.opacity = 0.5; P.TOOL.brush = 'square';
+  P.TOOL.color.set('#3264c8'); P.TOOL.opacity = 0.5; P.TOOL.brush = 'rectangle';
   pen([{x:CX-140,y:CY+90},{x:CX,y:CY+120},{x:CX+140,y:CY+80}]);
   var eParts2 = EXP.collect();
   var eSrc2 = EXP.objSource(eParts2, {name:'plume-test'});
@@ -1978,7 +1978,7 @@ function run(W){
   }
 
   var secPen    = nibSection('pen'),    secTaper = nibSection('taper');
-  var secSquare = nibSection('square'), secCube  = nibSection('cube');
+  var secSquare = nibSection('rectangle', 14), secCube  = nibSection('cube');
   var secWide   = nibSection('wide');
 
   ck('the pen is still a plain round nib, end to end',
@@ -1991,11 +1991,62 @@ function run(W){
      secTaper.corner < 1.02 && secTaper.endOverMid < 0.12,
      'ends ' + (secTaper.endOverMid*100).toFixed(1) + '% of the nib');
 
-  ck('the square tip is genuinely square — equal sides, hard corners',
+  ck('the rectangle has hard corners, and square sides at the default size',
      Math.abs(secSquare.wideMM - secSquare.thinMM) / secSquare.wideMM < 0.05 &&
      secSquare.corner > 1.35,
      'sides ' + secSquare.wideMM.toFixed(1) + ' x ' + secSquare.thinMM.toFixed(1) +
      'mm, corners ' + secSquare.corner.toFixed(2) + 'x the flats');
+
+  /* THE SIZE SLIDER RAISES IT RATHER THAN INFLATING IT. Every other brush
+     scales in every direction at once; this one holds its width across the
+     surface and grows only the height standing off it, which is the whole
+     reason it is a rectangle and not a square. */
+  var rectSizes = [14, 40, 100, 200].map(function(mm){ return nibSection('rectangle', mm); });
+  var widthSpread = 0, tallest = rectSizes[0].thinMM / rectSizes[0].wideMM;
+  for(var r16=0; r16<rectSizes.length; r16++){
+    widthSpread = Math.max(widthSpread,
+      Math.abs(rectSizes[r16].wideMM - rectSizes[0].wideMM) / rectSizes[0].wideMM);
+    tallest = Math.max(tallest, rectSizes[r16].thinMM / rectSizes[r16].wideMM);
+  }
+  ck('the rectangle keeps its width and the size sets its height off the surface',
+     widthSpread < 0.02 && rectSizes[3].thinMM > rectSizes[0].thinMM * 10 &&
+     tallest > 10,
+     rectSizes.map(function(x, q16){
+       return [14,40,100,200][q16] + 'mm: ' + x.wideMM.toFixed(1) + ' x ' +
+              x.thinMM.toFixed(1);
+     }).join(', '));
+
+  /* A SKETCH SAVED BEFORE THE RENAME STILL OPENS. The brush key changed from
+     square to rectangle, so the old name has to resolve like every other
+     retired one rather than silently falling back to the round pen. */
+  ck('the old "square" name still resolves to the rectangle',
+     P.brushName('square') === 'rectangle' &&
+     P.brushName('flat') === 'rectangle' &&
+     P.brushName('chisel') === 'rectangle',
+     'square -> ' + P.brushName('square'));
+  (function(){
+    P.Strokes.clear(); P.History.clear();
+    P.TOOL.brush = 'rectangle'; P.TOOL.sizeMM = 40;
+    pen([{x:CX-100,y:CY},{x:CX,y:CY},{x:CX+100,y:CY}]);
+    var saved = JSON.stringify(P.Doc.serialize());
+    var aged  = JSON.parse(saved.split('"rectangle"').join('"square"'));
+    P.Doc.clear();
+    P.Doc.restore(aged);
+    var back16 = P.Strokes.list[0];
+    ck('...and a document written with it reloads as a rectangle',
+       !!back16 && back16.brush === 'rectangle' && !!back16.mesh &&
+       back16.mesh.geometry.index.count > 0,
+       back16 ? 'brush ' + back16.brush + ', ' +
+                (back16.mesh ? back16.mesh.geometry.index.count/3 : 0) + ' triangles'
+              : 'no stroke came back');
+  })();
+
+  /* and a brush that is NOT the rectangle still scales both ways together */
+  var penSmall = nibSection('pen', 20), penBig = nibSection('pen', 100);
+  ck('...while every other brush still grows in both directions',
+     penBig.wideMM > penSmall.wideMM * 4 && penBig.thinMM > penSmall.thinMM * 4,
+     'pen 20mm ' + penSmall.wideMM.toFixed(0) + ' x ' + penSmall.thinMM.toFixed(0) +
+     ', 100mm ' + penBig.wideMM.toFixed(0) + ' x ' + penBig.thinMM.toFixed(0));
   ck('...and uniform along its length, with no taper',
      secSquare.endOverMid > 0.9, (secSquare.endOverMid*100).toFixed(0) + '% at the end');
 
@@ -2072,7 +2123,7 @@ function run(W){
      Math.abs(cube100.standsMM - 100) < 6 && Math.abs(cube40.standsMM - 40) < 4,
      '100mm -> ' + cube100.standsMM.toFixed(0) + 'mm out, 40mm -> ' +
      cube40.standsMM.toFixed(0) + 'mm out');
-  var wallSquare = paintOnWall('square', 100);
+  var wallSquare = paintOnWall('rectangle', 100);
   ck('...while the square tip still straddles the surface as a nib should',
      wallSquare.sinksMM > wallSquare.standsMM * 0.8,
      wallSquare.sinksMM.toFixed(0) + 'mm in, ' + wallSquare.standsMM.toFixed(0) + 'mm out');
