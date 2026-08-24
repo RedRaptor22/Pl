@@ -19,9 +19,18 @@
 
    WINDING IS NORMALISED HERE, not trusted. STL has no index buffer and no way
    to say "the normal disagrees with the winding" that any slicer respects, so
-   a mesh wound the wrong way is a solid that prints inside out. Each mesh is
-   compared against its own shading normals — area-weighted, summed over the
-   whole surface — and flipped WHOLESALE if it disagrees.
+   a mesh wound the wrong way is a solid that prints inside out.
+
+   A CLOSED mesh settles it exactly: its signed volume is positive if and only
+   if it is wound outward, and that needs no normals at all. Every stroke is a
+   closed tube, so every stroke uses it. Guide surfaces are open sheets with no
+   volume to speak of, and fall back to comparing the winding against the
+   shading normals, area-weighted over the whole surface.
+
+   The volume test earns its place beyond exactness: a paint brush hands the
+   shader the SURFACE normal for every vertex rather than its own facet
+   normals, so on those strokes the normal vote is comparing the geometry
+   against something that is deliberately not the geometry.
 
    Per-triangle flipping was tried first and is wrong: on the blade-shaped nibs
    (chisel, ribbon) the cross-section collapses to slivers whose shading normals
@@ -97,7 +106,7 @@ function partFromMesh(mesh, opt){
   /* source triangles: indexed if the geometry is, else sequential */
   var index = geom.index, triCount = (index ? index.count : n) / 3 | 0;
   var tris = new Uint32Array(triCount*3);
-  var at = 0, agree = 0;
+  var at = 0, agree = 0, volume = 0;
   for(i=0;i<triCount;i++){
     var a = index ? index.getX(i*3)   : i*3,
         b = index ? index.getX(i*3+1) : i*3+1,
@@ -115,11 +124,17 @@ function partFromMesh(mesh, opt){
            + gy*(nor[a*3+1]+nor[b*3+1]+nor[c*3+1])
            + gz*(nor[a*3+2]+nor[b*3+2]+nor[c*3+2]);
 
+    /* and the exact answer for anything closed */
+    volume += (pos[a*3]  *(pos[b*3+1]*pos[c*3+2] - pos[b*3+2]*pos[c*3+1]) +
+               pos[a*3+1]*(pos[b*3+2]*pos[c*3]   - pos[b*3]  *pos[c*3+2]) +
+               pos[a*3+2]*(pos[b*3]  *pos[c*3+1] - pos[b*3+1]*pos[c*3]));
+
     tris[at++]=a; tris[at++]=b; tris[at++]=c;
   }
   if(!at) return null;
 
-  if(agree < 0){                                 // wound inwards: flip it whole
+  var inward = opt.closed ? (volume < 0) : (agree < 0);
+  if(inward){                                    // wound inwards: flip it whole
     for(i=0;i<at;i+=3){ var t = tris[i+1]; tris[i+1] = tris[i+2]; tris[i+2] = t; }
   }
 
@@ -163,7 +178,8 @@ EX.collect = function(opts){
       name: safeName(st.name, 'curve_' + (i+1)),
       scale: scale, zUp: zUp,
       color: '#' + st.color.getHexString(),
-      opacity: st.opacity === undefined ? 1 : st.opacity
+      opacity: st.opacity === undefined ? 1 : st.opacity,
+      closed: true                                // every stroke is a capped tube
     });
     if(temp) temp.dispose();
     if(part){ part.stroke = st; parts.push(part); }

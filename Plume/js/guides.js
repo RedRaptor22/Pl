@@ -875,6 +875,91 @@ var _ray = new THREE.Raycaster();
 
 G.hasActive = function(){ return !!(G.active && G.active.mesh); };
 
+/* ==========================================================================
+   Where the edge is
+   --------------------------------------------------------------------------
+   A brush is wider than the line it follows, so a stroke whose CENTRE is on
+   the guide can still hang half its width off the side — you paint up to the
+   edge of a wall and the paint carries on into thin air. To stop that, a
+   stroke needs to know how far it is from the boundary in the direction its
+   nib is wide.
+
+   Swept and lofted surfaces are grids, and buildSurfaceGeometry already writes
+   each vertex's ARC LENGTH along u and v into the uvw attribute — so the
+   distance to an edge is a subtraction rather than a search. This reads that
+   frame straight off the face the ray hit: where the hit is in arc length,
+   which way u and v run in the world there, and how long the surface is.
+
+   Closed guides — primitives, imported models — have no boundary to fall off,
+   and return nothing. */
+var _fA = new THREE.Vector3(), _fB = new THREE.Vector3(), _fC = new THREE.Vector3(),
+    _fRel = new THREE.Vector3();
+
+/* THE FRAME AT A HIT, read exactly rather than reconstructed.
+
+   uvw holds arc length along u and v at every vertex, and it is linear across
+   each triangle, so the value at the hit and the direction it increases in are
+   both had from the triangle's own gradient — the standard linear-shape-function
+   formula. An earlier version worked back from the cell index instead and was
+   a whole cell out on some rows (measured: a 10mm step in a surface whose cells
+   are 10mm), which showed up as a ragged edge where paint met the boundary. */
+var _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3(), _fn = new THREE.Vector3(),
+    _g1 = new THREE.Vector3(), _g2 = new THREE.Vector3(), _gu = new THREE.Vector3(),
+    _gv = new THREE.Vector3(), _rel = new THREE.Vector3();
+
+function gradientOf(d1, d2, out){
+  /* grad = (d1 * (e2 x n) + d2 * (n x e1)) / |n|^2 , for a linear field whose
+     values rise by d1 along e1 and d2 along e2 */
+  _g1.crossVectors(_e2, _fn);
+  _g2.crossVectors(_fn, _e1);
+  var nn = _fn.lengthSq();
+  if(nn < EPS) return out.set(0,0,0);
+  return out.copy(_g1).multiplyScalar(d1/nn).addScaledVector(_g2, d2/nn);
+}
+
+function frameOnTriangle(mesh, ia, ib, ic, point){
+  var geom = mesh.geometry;
+  var nu = geom.userData.nu, nv = geom.userData.nv;
+  var uvw = geom.attributes.uvw, pos = geom.attributes.position;
+  if(!nu || !nv || !uvw) return null;
+  var m = mesh.matrixWorld;
+  _fA.fromBufferAttribute(pos, ia).applyMatrix4(m);
+  _fB.fromBufferAttribute(pos, ib).applyMatrix4(m);
+  _fC.fromBufferAttribute(pos, ic).applyMatrix4(m);
+  _e1.subVectors(_fB, _fA);
+  _e2.subVectors(_fC, _fA);
+  _fn.crossVectors(_e1, _e2);
+  if(_fn.lengthSq() < EPS) return null;
+
+  var u0 = uvw.getX(ia), v0 = uvw.getY(ia);
+  gradientOf(uvw.getX(ib) - u0, uvw.getX(ic) - u0, _gu);
+  gradientOf(uvw.getY(ib) - v0, uvw.getY(ic) - v0, _gv);
+  if(_gu.lengthSq() < EPS || _gv.lengthSq() < EPS) return null;
+
+  _rel.copy(point).sub(_fA);
+  return { su: u0 + _gu.dot(_rel), sv: v0 + _gv.dot(_rel),
+           Lu: uvw.getX(nu-1), Lv: uvw.getY((nv-1)*nu),
+           uDir: _gu.clone().normalize(), vDir: _gv.clone().normalize() };
+}
+
+function surfaceFrameAt(mesh, hit){
+  if(!hit.face) return null;
+  return frameOnTriangle(mesh, hit.face.a, hit.face.b, hit.face.c, hit.point);
+}
+
+/* How far the surface reaches from `frame` along +dir and -dir, in world
+   units. Infinity where the direction runs parallel to that pair of edges. */
+G.reachAlong = function(frame, dir){
+  var a = dir.dot(frame.uDir), b = dir.dot(frame.vDir);
+  function side(sign){
+    var t = Infinity, aa = a*sign, bb = b*sign;
+    if(Math.abs(aa) > 1e-6) t = Math.min(t, aa > 0 ? (frame.Lu - frame.su)/aa : -frame.su/aa);
+    if(Math.abs(bb) > 1e-6) t = Math.min(t, bb > 0 ? (frame.Lv - frame.sv)/bb : -frame.sv/bb);
+    return Math.max(0, t);
+  }
+  return { pos: side(1), neg: side(-1) };
+};
+
 G.project = function(x, y){
   if(!G.hasActive()) return null;
   var r = P.rayFrom(x, y);
@@ -885,6 +970,7 @@ G.project = function(x, y){
                 ? hits[0].face.normal.clone().applyMatrix3(
                     new THREE.Matrix3().getNormalMatrix(G.active.mesh.matrixWorld)).normalize()
                 : new THREE.Vector3(0,0,1),
+             frame: surfaceFrameAt(G.active.mesh, hits[0]),
              onSurface: true };
   }
   /* FACT (A.4): an imported image refuses strokes past its edge rather than
@@ -895,6 +981,7 @@ G.project = function(x, y){
 
 /* ---- closest point on a triangle to a point (Ericson, Real-Time Collision
    Detection §5.1.5). Exact, branch-per-Voronoi-region, no iteration. ---- */
+var _triV = [0,0,0], _ncTmp = new THREE.Vector3();
 var _ab = new THREE.Vector3(), _ac = new THREE.Vector3(), _ap = new THREE.Vector3(),
     _bp = new THREE.Vector3(), _cp = new THREE.Vector3(), _bc = new THREE.Vector3();
 
@@ -975,7 +1062,7 @@ function nearestOnGuide(ray){
   var result = vert.clone();
 
   var adj = adjacencyOf(geom);
-  var tris = adj[best];
+  var tris = adj[best], bestTri = null;
   if(tris && tris.length){
     var idx = geom.index;
     var target = new THREE.Vector3(), cand = new THREE.Vector3();
@@ -988,11 +1075,15 @@ function nearestOnGuide(ray){
         var t3 = tris[k]*3;
         for(var c=0;c<3;c++){
           var vi = idx ? idx.getX(t3+c) : (t3+c);
+          _triV[c] = vi;
           _tri[c].set(pos.getX(vi), pos.getY(vi), pos.getZ(vi)).applyMatrix4(m);
         }
         closestPtTriangle(target, _tri[0], _tri[1], _tri[2], cand);
         var dd = cand.distanceToSquared(target);
-        if(dd < localD){ localD = dd; localBest = cand.clone(); }
+        if(dd < localD){
+          localD = dd; localBest = cand.clone();
+          bestTri = [_triV[0], _triV[1], _triV[2]];
+        }
       }
       if(!localBest) break;
       result.copy(localBest);
@@ -1000,9 +1091,32 @@ function nearestOnGuide(ray){
     }
   }
 
-  var n = new THREE.Vector3(nor.getX(best), nor.getY(best), nor.getZ(best))
-            .applyMatrix3(new THREE.Matrix3().getNormalMatrix(m)).normalize();
-  return { point:result, normal:n, onSurface:false };
+  /* THE SAME NORMAL A RAY HIT WOULD GIVE. G.project reports the FACE normal,
+     built from the winding; this used to report the stored VERTEX normal, and
+     on this surface the two point opposite ways. Every clamped sample was
+     therefore lit as if it faced away from the light, which painted a
+     distinctly darker band — measured at 136 against 181 — everywhere a stroke
+     ran off the edge and got clamped back. */
+  var n = null;
+  if(bestTri){
+    for(var c2=0;c2<3;c2++){
+      _tri[c2].set(pos.getX(bestTri[c2]), pos.getY(bestTri[c2]), pos.getZ(bestTri[c2]))
+              .applyMatrix4(m);
+    }
+    n = new THREE.Vector3().subVectors(_tri[1], _tri[0])
+          .cross(_ncTmp.subVectors(_tri[2], _tri[0]));
+    if(n.lengthSq() < EPS) n = null; else n.normalize();
+  }
+  if(!n){
+    n = new THREE.Vector3(nor.getX(best), nor.getY(best), nor.getZ(best))
+          .applyMatrix3(new THREE.Matrix3().getNormalMatrix(m)).normalize();
+  }
+  /* the clamp lands on a triangle, not a vertex, so its frame is read the same
+     exact way as a hit's — quantising it to the nearest vertex put the trim
+     out by up to half a cell and left the painted edge ragged */
+  var frame = bestTri ? frameOnTriangle(mesh, bestTri[0], bestTri[1], bestTri[2], result)
+                      : null;
+  return { point:result, normal:n, frame:frame, onSurface:false };
 }
 
 /* ==========================================================================

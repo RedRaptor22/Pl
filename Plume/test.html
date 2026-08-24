@@ -971,6 +971,181 @@ function run(W){
      '20mm eraser takes ' + biteThin.toFixed(1) + 'px, 120mm takes ' + biteBig.toFixed(1) + 'px');
   reset();
 
+  /* ================= painting an area ================= */
+  group('Painting — overlaps and the guide’s edge');
+  /* Build a wall and paint it with overlapping strokes of the wide brush, the
+     way you would block one in. */
+  function paintWall(strokeCount, brush, mm){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof12 = [];
+    for(var q=0;q<=16;q++) prof12.push({x:CX-240+480*(q/16), y:CY});
+    pen(prof12);
+    var wall = P.Guides.active;
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = brush; P.TOOL.sizeMM = mm; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#2fbf55');
+    for(var k=0;k<strokeCount;k++){
+      var x12 = CX - 210 + k*24, col12 = [];
+      for(q=0;q<=10;q++) col12.push({x:x12, y:CY-120+q*24});
+      pen(col12);
+    }
+    return wall;
+  }
+
+  /* THE SEAMS. Fourteen overlapping ribbons of one colour on one flat wall
+     should read as one flat wall. What gave the overlaps away was that each
+     sheet's SIDES were lit differently from its top — a dark line at every
+     seam, which no amount of thinning removes. Sampled across the painted
+     area, every pixel should now be the same value. */
+  var wallGuide = paintWall(18, 'wide', 70);
+  P.Guides.setActive(null);
+  P.VIEW.theta = 0.25; P.VIEW.phi = 1.25; P.applyCamera();
+  P.renderer.render(P.scene, P.cam());
+  var pxSeam = (function(){
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpS = P.viewport();
+    var buf = new W.Uint8Array(4*600);
+    gl.readPixels(Math.round(200*dpr), Math.round((vpS.h - CY)*dpr), 600, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    /* Runs of painted pixels, judged in their INTERIORS. The two pixels at
+       each end of a run straddle the silhouette and are part background, which
+       is antialiasing rather than a seam. */
+    var runs = [], cur = [];
+    for(var q=0;q<600;q++){
+      var r12 = buf[q*4], g12 = buf[q*4+1], b12 = buf[q*4+2];
+      if(g12 > r12+20 && g12 > b12+20) cur.push(g12);
+      else { if(cur.length) runs.push(cur); cur = []; }
+    }
+    if(cur.length) runs.push(cur);
+    var worst = 0, steps = 0, seen = 0;
+    for(var rq=0; rq<runs.length; rq++){
+      var run = runs[rq];
+      for(var sq=3; sq<run.length-2; sq++){
+        seen++;
+        var d12 = Math.abs(run[sq] - run[sq-1]);
+        worst = Math.max(worst, d12);
+        if(d12 > 4) steps++;
+      }
+    }
+    return { seen:seen, worst:worst, steps:steps };
+  })();
+  ck('a wall painted with overlapping strokes has no seams in it',
+     pxSeam.seen > 200 && pxSeam.steps === 0,
+     pxSeam.seen + ' painted pixels sampled, ' + pxSeam.steps +
+     ' visible steps, worst neighbour difference ' + pxSeam.worst);
+
+  /* THE EDGE. A brush is wider than the line it follows, so paint used to run
+     off the side of the guide by up to half a nib. */
+  function paintColumn(dx, mm){
+    P.Strokes.clear(); P.History.clear();
+    P.TOOL.brush = 'wide'; P.TOOL.sizeMM = mm;
+    var col13 = [];
+    for(var q=0;q<=8;q++) col13.push({x:CX+dx, y:CY-100+q*25});
+    pen(col13);
+    return P.Strokes.list[0];
+  }
+  var wall2 = paintWall(0, 'wide', 100);
+  var guideBox = new THREE.Box3().setFromObject(wall2.mesh);
+  var overflowWorst = -1e9, overflowAt = 0;
+  [0, 140, 190, 215, 232].forEach(function(dx){
+    var st13 = paintColumn(dx, 100);
+    if(!st13) return;
+    var box13 = new THREE.Box3().setFromObject(st13.mesh);
+    var over = Math.max(box13.max.x - guideBox.max.x, guideBox.min.x - box13.min.x);
+    if(over > overflowWorst){ overflowWorst = over; overflowAt = dx; }
+  });
+  ck('paint stays inside the guide, however close to the edge you work',
+     overflowWorst < 1e-6,
+     'worst overflow ' + (overflowWorst/P.MM).toFixed(0) + 'mm, painting ' +
+     overflowAt + 'px from centre on a 960mm wall');
+
+  /* ...and it narrows only on the side that would have hung over */
+  var edgeSt = paintColumn(215, 100);
+  var midEdge = Math.floor(edgeSt.pts.length/2);
+  ck('...by narrowing the nib on that side alone',
+     Math.min(edgeSt.pts[midEdge].fitL, edgeSt.pts[midEdge].fitR) < 0.6 &&
+     Math.max(edgeSt.pts[midEdge].fitL, edgeSt.pts[midEdge].fitR) > 0.99,
+     'nib fits ' + edgeSt.pts[midEdge].fitL.toFixed(2) + ' one side, ' +
+     edgeSt.pts[midEdge].fitR.toFixed(2) + ' the other');
+
+  /* a trimmed nib has to survive a save, since nothing recomputes it on load */
+  var fitJson = JSON.stringify(P.Doc.serialize());
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(fitJson));
+  var backSt = P.Strokes.list[0];
+  ck('...and the trim survives a save and reload', !!backSt &&
+     Math.abs(backSt.pts[midEdge].fitL - edgeSt.pts[midEdge].fitL) < 1e-5,
+     backSt ? backSt.pts[midEdge].fitL.toFixed(3) : 'no stroke');
+
+  /* out in open ground nothing is trimmed at all */
+  var openSt = paintColumn(0, 100);
+  var trimmed = 0;
+  for(var oq=0; oq<openSt.pts.length; oq++){
+    if(openSt.pts[oq].fitL < 0.999 || openSt.pts[oq].fitR < 0.999) trimmed++;
+  }
+  ck('a stroke in the middle of a guide keeps its whole nib', trimmed === 0,
+     trimmed + ' of ' + openSt.pts.length + ' points trimmed');
+
+  /* THE TRIMMED BAND, SHADED. Trimming a section moves its corner vertices but
+     the corner NORMALS have to keep facing out of the guide, or the strip of
+     paint beside a boundary is lit as though it were angled away and reads as
+     a dirty smear against the rest of the wall. Painted straight on, every
+     pixel of the wall — trimmed band included — is one value. */
+  reset();
+  P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+  P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+  P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+  P.TOOL.autoGuide = true;
+  var prof14 = [];
+  for(var q14=0;q14<=16;q14++) prof14.push({x:CX-240+480*(q14/16), y:CY});
+  pen(prof14);
+  P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+  P.TOOL.autoGuide = false;
+  P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 70; P.TOOL.opacity = 1;
+  P.TOOL.color.set('#2fbf55');
+  for(var k14=0;k14<20;k14++){
+    var col14 = [];
+    for(q14=0;q14<=10;q14++){
+      col14.push({x:CX-230+k14*26+Math.sin(q14*0.7+k14)*4, y:CY-120+q14*24});
+    }
+    pen(col14);
+  }
+  var trimmedStrokes = 0;
+  for(var s14=0; s14<P.Strokes.list.length; s14++){
+    var least = 1, ps14 = P.Strokes.list[s14].pts;
+    for(var t14=0; t14<ps14.length; t14++){
+      least = Math.min(least, ps14[t14].fitL, ps14[t14].fitR);
+    }
+    if(least < 0.999) trimmedStrokes++;
+  }
+  P.Guides.setActive(null);
+  P.renderer.render(P.scene, P.cam());
+  var bandShades = (function(){
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vp14 = P.viewport(), buf14 = new W.Uint8Array(4*900), seen14 = {};
+    gl.readPixels(0, Math.round((vp14.h - CY)*dpr), 900, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf14);
+    var painted = 0;
+    for(var q=0;q<900;q++){
+      var r14 = buf14[q*4], g14 = buf14[q*4+1], b14 = buf14[q*4+2];
+      if(g14 > r14+20 && g14 > b14+20){ seen14[g14] = (seen14[g14]||0)+1; painted++; }
+    }
+    return { shades: Object.keys(seen14), painted: painted };
+  })();
+  ck('paint trimmed at a boundary is shaded like the rest of the wall',
+     trimmedStrokes > 0 && bandShades.painted > 300 &&
+     bandShades.shades.length === 1,
+     trimmedStrokes + ' strokes trimmed, ' + bandShades.painted +
+     ' pixels sampled in ' + bandShades.shades.length + ' shade(s): ' +
+     bandShades.shades.join(', '));
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
+  reset();
+
   /* ================= Liquify ================= */
   group('Liquify — push, pinch and comb');
   /* FACT: "select the curves or sketches you want to modify and tap Liquify.

@@ -163,8 +163,11 @@ var BRUSH = P.BRUSH = {
      is the length it stands off by — geometry to deform later, not a line. */
   cube:   { flat:1.00, square:1.00, taper:0, tip:0,    caps:true, wide:1.00, glow:0,
             rise:1 },
-  /* FACT: the "Wide Brush ... paint larger areas faster" (1.5), as a ribbon */
-  wide:   { flat:0.10, square:1.00, taper:0, tip:0,    caps:true, wide:3.40, glow:0 },
+  /* FACT: the "Wide Brush ... paint larger areas faster" (1.5), as a ribbon.
+     `paint` shades it by the surface it lies on instead of by its own facets —
+     see writeRing. A sheet, not a slab: 0.04 puts a 100mm nib at 13mm thick. */
+  wide:   { flat:0.04, square:1.00, taper:0, tip:0,    caps:true, wide:3.40, glow:0,
+            paint:1 },
   /* FACT (C.5): "a Glow material enables glowing lines" */
   glow:   { flat:1.00, square:0.00, taper:6, tip:0.10, caps:true, wide:1.30, glow:1 }
 };
@@ -308,15 +311,22 @@ function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
      by -ry*_v puts the section's near face on the stroke and its far face one
      full section-height out along the normal. That is what makes the cube
      brush an extrusion FROM the surface instead of a rod half sunk into it. */
+  var paintN = (cfg.paint && pt.nrm && pt.nrm.lengthSq() > EPS) ? pt.nrm : null;
+
   var riseX = 0, riseY = 0, riseZ = 0;
   if(cfg.rise){
     riseX = -_v.x*ry*cfg.rise; riseY = -_v.y*ry*cfg.rise; riseZ = -_v.z*ry*cfg.rise;
   }
 
+  var fitL = pt.fitL === undefined ? 1 : pt.fitL,
+      fitR = pt.fitR === undefined ? 1 : pt.fitR;
+
   for(var k=0;k<seg;k++){
     var ang = k/seg * Math.PI*2;
     sectionPoint(ang, sq, _p0);
-    var ax = _p0.x*rx, ay = _p0.y*ry;
+    /* the two halves of the section are scaled independently, so a nib beside
+       an edge keeps everything it has room for and loses only the overhang */
+    var ax = _p0.x*rx*(_p0.x >= 0 ? fitR : fitL), ay = _p0.y*ry;
     _dir.copy(_u).multiplyScalar(ax).addScaledVector(_v, ay);
 
     /* Normal from the actual outline: differentiate the cross-section and
@@ -330,6 +340,22 @@ function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
     if(nl < EPS){ nx = ax; ny = ay; nl = Math.hypot(nx, ny) || 1; }
     _nrm.copy(_u).multiplyScalar(nx/nl).addScaledVector(_v, ny/nl);
     if(_nrm.lengthSq() < EPS) _nrm.copy(_u); else _nrm.normalize();
+
+    /* PAINT SHADES AS THE SURFACE, NOT AS ITSELF.
+       A brush meant to fill an area leaves a sheet lying on a guide, and the
+       thing that gives away every overlap is that the sheet's SIDES are lit
+       differently from its top: a one-pixel dark line at every seam, however
+       thin the sheet gets. Measured on a wall of fourteen overlapping ribbons,
+       sampled across 450 pixels that should all be one colour: 28 visible
+       steps and a 58-level spread as shipped; 26 steps at a tenth the
+       thickness; ONE step when the sides are lit as the surface; and zero of
+       either with both. So a paint brush hands the shader the surface normal
+       for every vertex, and a wall reads as a wall no matter how many times
+       you go over it.
+
+       Only the brushes that are FOR filling do this. A pen is a tube and
+       should still look like one where two of them cross. */
+    if(paintN) _nrm.copy(paintN);
 
     var o = 2 + i*seg + k;
     pos[o*3]   = pt.p.x + _dir.x + riseX;
@@ -367,8 +393,13 @@ function writeCaps(stroke, n, T, R, arc, pos, nor, col){
   var p1 = sectionCentre(stroke, n-1, T[n-1], R[n-1], arc, new THREE.Vector3());
   pos[0]=p0.x; pos[1]=p0.y; pos[2]=p0.z;
   pos[3]=p1.x; pos[4]=p1.y; pos[5]=p1.z;
-  nor[0]=-T[0].x; nor[1]=-T[0].y; nor[2]=-T[0].z;
-  nor[3]= T[n-1].x; nor[4]= T[n-1].y; nor[5]= T[n-1].z;
+  var capCfg = cfgOf(stroke);
+  var pn0 = (capCfg.paint && stroke.pts[0].nrm) ? stroke.pts[0].nrm : null;
+  var pn1 = (capCfg.paint && stroke.pts[n-1].nrm) ? stroke.pts[n-1].nrm : null;
+  if(pn0){ nor[0]=pn0.x; nor[1]=pn0.y; nor[2]=pn0.z; }
+  else   { nor[0]=-T[0].x; nor[1]=-T[0].y; nor[2]=-T[0].z; }
+  if(pn1){ nor[3]=pn1.x; nor[4]=pn1.y; nor[5]=pn1.z; }
+  else   { nor[3]= T[n-1].x; nor[4]= T[n-1].y; nor[5]= T[n-1].z; }
   col[0]=c0.r; col[1]=c0.g; col[2]=c0.b; col[3]=e0.alpha;
   col[4]=c1.r; col[5]=c1.g; col[6]=c1.b; col[7]=e1.alpha;
 }
@@ -613,8 +644,9 @@ LIVE.append = function(stroke){
     /* the head taper is arc-length based and therefore already final */
   }
   for(i=first;i<n;i++){
-    /* the same roll the commit will freeze, so nothing shifts on pen-up */
+    /* the same roll and fit the commit will freeze, so nothing shifts on pen-up */
     pts[i].roll = rollOf(pts[i], L.T[i], L.R[i]);
+    fitAt(pts[i], L.T[i], shadeAt(stroke, i, L.arc).radius);
     if(writeRing(stroke, i, L.T[i], L.R[i], L.arc, L.pos, L.nor, L.col, seg) < 0.995){
       L.needsAlpha = true;
     }
@@ -732,6 +764,55 @@ function nibAxis(pt, t, out){
   return out.copy(pt.axis || pt.ref || t);
 }
 
+/* HOW MUCH OF THE NIB FITS.
+   The nib is wide across the stroke, so near a guide's edge part of it would
+   land off the surface. Each point records what fraction of its half-width
+   the surface can actually take on each side — 1 in open ground, less as the
+   edge closes in, and asymmetric so painting along an edge keeps full width on
+   the inside instead of collapsing to nothing. Points with no surface frame
+   (free space, closed guides, an off-surface clamp) keep the full nib. */
+var FIT_MIN = 0.02;          // never let a section collapse to zero area
+function fitAt(pt, t, halfWidth){
+  pt.fitL = pt.fitR = 1;
+  var f = pt.surf;
+  if(!f || !(halfWidth > EPS)) return;
+  nibAxis(pt, t, _axisT);
+  var reach = P.Guides.reachAlong(f, _axisT);
+  pt.fitR = P.clamp(reach.pos / halfWidth, FIT_MIN, 1);
+  pt.fitL = P.clamp(reach.neg / halfWidth, FIT_MIN, 1);
+}
+S.fitAt = fitAt;
+
+/* The trim is measured per point, and per-point measurements of anything jitter
+   — the arc-length position is read from whichever cell of the surface grid the
+   sample landed in, and the nib's direction wanders by a fraction of a degree
+   between samples. Left alone that came out as a ragged edge where the paint
+   meets the boundary, measured at 11% of the nib's width along a stroke that
+   runs dead straight beside it. Two passes of a three-tap average take it out
+   without moving where the edge actually is. */
+function smoothFit(pts){
+  var n = pts.length, i, pass;
+  if(n < 3) return;
+  /* the measured limit, kept aside: averaging is allowed to pull a section IN
+     but never to push one back out past what was measured for it, or a column
+     painted along a boundary creeps over the edge again wherever its
+     neighbours happen to have more room */
+  var capL = new Array(n), capR = new Array(n);
+  for(i=0;i<n;i++){ capL[i] = pts[i].fitL; capR[i] = pts[i].fitR; }
+  for(pass=0; pass<2; pass++){
+    var L = new Array(n), R = new Array(n);
+    for(i=0;i<n;i++){
+      var a = pts[Math.max(0,i-1)], b = pts[i], c = pts[Math.min(n-1,i+1)];
+      L[i] = (a.fitL + 2*b.fitL + c.fitL) / 4;
+      R[i] = (a.fitR + 2*b.fitR + c.fitR) / 4;
+    }
+    for(i=0;i<n;i++){
+      pts[i].fitL = Math.min(L[i], capL[i]);
+      pts[i].fitR = Math.min(R[i], capR[i]);
+    }
+  }
+}
+
 /* The stored cross-section angle, measured in the transported frame. */
 function rollOf(pt, t, r){
   _sT.crossVectors(t, r);
@@ -769,13 +850,17 @@ S.freezeFrames = function(stroke){
   var pts = stroke.pts;
   if(pts.length === 0) return;
   var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef);
+  var arc = arcOf(pts);
   for(var i=0;i<pts.length;i++){
     var t = fr.T[i], r = fr.R[i], pt = pts[i];
     pt.roll = rollOf(pt, t, r);
+    fitAt(pt, t, shadeAt(stroke, i, arc).radius);
     pt.tan = t.clone();
     pt.ref = r.clone();
     if(pt.axis) delete pt.axis;
+    if(pt.surf) delete pt.surf;          // transient: the frame is spent here
   }
+  smoothFit(pts);
 };
 
 /* ==========================================================================
@@ -992,6 +1077,7 @@ function lerpPoint(a, b, t){
     tan: near.tan ? near.tan.clone() : null,
     ref: near.ref ? near.ref.clone() : null,
     roll: near.roll,
+    fitL: near.fitL, fitR: near.fitR,
     pressure: a.pressure + (b.pressure - a.pressure)*t,
     tiltAz: near.tiltAz, tiltAlt: near.tiltAlt
   };
@@ -1089,7 +1175,8 @@ function cloneWithPoints(src, pts){
     pts: pts.map(function(p){
       return { p:p.p.clone(), tan:p.tan?p.tan.clone():null, ref:p.ref?p.ref.clone():null,
                nrm:p.nrm?p.nrm.clone():null,
-               roll:p.roll, pressure:p.pressure, tiltAz:p.tiltAz, tiltAlt:p.tiltAlt };
+               roll:p.roll, fitL:p.fitL, fitR:p.fitR,
+               pressure:p.pressure, tiltAz:p.tiltAz, tiltAlt:p.tiltAlt };
     }),
     mesh: null, selected: false
   };

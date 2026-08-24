@@ -146,17 +146,18 @@ function densifyCurve(l){
   var dense = densifyScreen(l.screen);
   if(dense.length <= l.screen.length) return;
 
-  var world = [], normals = [], screen = [], i;
+  var world = [], normals = [], screen = [], frames = [], i;
   for(i=0;i<dense.length;i++){
     var h = projectSample(dense[i].x, dense[i].y);
     if(!h) continue;
-    world.push(h.point.clone()); normals.push(h.normal.clone()); screen.push(dense[i]);
+    world.push(h.point.clone()); normals.push(h.normal.clone());
+    frames.push(h.frame || null); screen.push(dense[i]);
   }
   if(world.length < 2) return;
 
   l.world = world; l.normals = normals; l.screen = screen;
   l.stroke.pts.length = 0;
-  for(i=0;i<world.length;i++) pushLivePoint(l.stroke, world[i], screen[i], normals[i]);
+  for(i=0;i<world.length;i++) pushLivePoint(l.stroke, world[i], screen[i], normals[i], frames[i]);
 }
 
 /* ==========================================================================
@@ -243,7 +244,7 @@ Tools.begin = function(x, y, ev){
   if(live.stroke){
     live.stroke.seedRef = orientationAxis(live.screen[0].tilt.az, new THREE.Vector3()).clone();
     S.Live.begin(live.stroke);
-    pushLivePoint(live.stroke, first.point, live.screen[0], first.normal);
+    pushLivePoint(live.stroke, first.point, live.screen[0], first.normal, first.frame);
     S.Live.append(live.stroke);
     beginLiveMirror();
   }
@@ -253,12 +254,15 @@ Tools.begin = function(x, y, ev){
 
 /* one point record; `axis` is the tilt-derived cross-section hint that
    freezeFrames turns into a roll angle on commit */
-function pushLivePoint(stroke, world, sample, normal){
+function pushLivePoint(stroke, world, sample, normal, frame){
   stroke.pts.push({
     p: world.clone(), tan:null, ref:null, roll:0,
     pressure: sample.pressure,
     tiltAz: sample.tilt.az, tiltAlt: sample.tilt.alt,
     nrm: normal ? normal.clone() : null,
+    /* where this point sits on the guide, so the nib can be trimmed to the
+       surface's edge. Transient — freezeFrames spends it and drops it. */
+    surf: frame || null,
     axis: orientationAxis(sample.tilt.az, new THREE.Vector3()).clone()
   });
 }
@@ -301,7 +305,7 @@ Tools.extend = function(x, y, ev){
   live.world.push(hit.point.clone());
   live.normals.push(hit.normal.clone());
   if(live.stroke){
-    pushLivePoint(live.stroke, hit.point, sample, hit.normal);
+    pushLivePoint(live.stroke, hit.point, sample, hit.normal, hit.frame);
     S.Live.append(live.stroke);
     extendLiveMirror(hit.point, sample, hit.normal);
   }
@@ -419,12 +423,13 @@ function finishCurve(l){
   if(TOOL.mode === 'shape' && l.screen.length >= 3){
     var fitted = fitShapeScreen(l.screen);
     if(fitted){
-      var world = [], normals = [], screen = [];
+      var world = [], normals = [], screen = [], frames = [];
       for(var i=0;i<fitted.pts.length;i++){
         var h = projectSample(fitted.pts[i].x, fitted.pts[i].y);
         if(!h) continue;
         world.push(h.point.clone());
         normals.push(h.normal.clone());
+        frames.push(h.frame || null);
         screen.push({x:fitted.pts[i].x, y:fitted.pts[i].y,
                      pressure: l.screen[Math.min(i, l.screen.length-1)].pressure,
                      tilt: l.screen[Math.min(i, l.screen.length-1)].tilt});
@@ -433,7 +438,7 @@ function finishCurve(l){
         /* the fitted shape replaces the raw samples wholesale */
         l.world = world; l.normals = normals; l.screen = screen;
         l.stroke.pts.length = 0;
-        for(var k=0;k<world.length;k++) pushLivePoint(l.stroke, world[k], screen[k], normals[k]);
+        for(var k=0;k<world.length;k++) pushLivePoint(l.stroke, world[k], screen[k], normals[k], frames[k]);
       }
       P.toast('Shape: ' + fitted.kind);
     }

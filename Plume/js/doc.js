@@ -43,7 +43,8 @@ function packPoints(pts){
   var p = new Array(n*3), tan = new Array(n*3), ref = new Array(n*3),
       nrm = new Array(n*3), roll = new Array(n), pr = new Array(n),
       az = new Array(n), alt = new Array(n);
-  var hasNrm = false;
+  var fitL = new Array(n), fitR = new Array(n);
+  var hasNrm = false, hasFit = false;
   for(var i=0;i<n;i++){
     var t = pts[i];
     p[i*3]=q(t.p.x); p[i*3+1]=q(t.p.y); p[i*3+2]=q(t.p.z);
@@ -52,12 +53,17 @@ function packPoints(pts){
     if(t.nrm){ hasNrm = true;
       nrm[i*3]=q(t.nrm.x); nrm[i*3+1]=q(t.nrm.y); nrm[i*3+2]=q(t.nrm.z); }
     roll[i] = q(t.roll || 0);
+    fitL[i] = t.fitL === undefined ? 1 : q(t.fitL);
+    fitR[i] = t.fitR === undefined ? 1 : q(t.fitR);
+    if(fitL[i] < 1 || fitR[i] < 1) hasFit = true;
     pr[i]   = q(t.pressure);
     az[i]   = (t.tiltAz === null || t.tiltAz === undefined) ? null : q(t.tiltAz);
     alt[i]  = (t.tiltAlt === undefined) ? 1 : q(t.tiltAlt);
   }
   var out = {n:n, p:p, tan:tan, ref:ref, roll:roll, pressure:pr, tiltAz:az, tiltAlt:alt};
   if(hasNrm) out.nrm = nrm;
+  /* only carried when a nib was actually trimmed to a guide's edge */
+  if(hasFit){ out.fitL = fitL; out.fitR = fitR; }
   return out;
 }
 
@@ -72,6 +78,8 @@ function unpackPoints(d){
              ? new THREE.Vector3(d.ref[i*3], d.ref[i*3+1], d.ref[i*3+2]) : null,
       nrm: d.nrm ? new THREE.Vector3(d.nrm[i*3], d.nrm[i*3+1], d.nrm[i*3+2]) : null,
       roll: d.roll[i],
+      fitL: d.fitL ? d.fitL[i] : 1,
+      fitR: d.fitR ? d.fitR[i] : 1,
       pressure: d.pressure[i],
       tiltAz: d.tiltAz[i],
       tiltAlt: d.tiltAlt[i]
