@@ -1,0 +1,49 @@
+# Publishes the app to GitHub Pages so it can be opened on any device without
+# cloning the repo. Whichever branch was pushed last is what the site serves;
+# build.txt at the site root says which commit that is.
+name: Pages
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer push supersedes one still in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Turns Pages on the first time this runs, so there is no settings
+      # switch to find by hand.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Assemble the site
+        run: python3 .github/pages/build.py site
+        env:
+          PLUME_SHA: ${{ github.sha }}
+          PLUME_REF: ${{ github.ref_name }}
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
