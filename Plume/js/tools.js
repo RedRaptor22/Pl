@@ -745,6 +745,29 @@ function endErase(){
 var smoothSession = null;
 var _sm = {x:0, y:0, z:0};
 
+/* ONE REBUILD PER FRAME, NOT ONE PER EVENT.
+   Smooth and Liquify move points and then have to re-solve the frames and
+   re-cut the mesh of every stroke they touched. Doing that inside the
+   pointer handler rebuilt 173 meshes over a 40-move drag — four strokes
+   per event — and a pen delivers several coalesced moves per frame, so the
+   work piled up faster than it could be drawn.
+
+   The maths reads and writes point POSITIONS, which stay eager, so nothing
+   about the result changes: only the mesh that displays them is deferred,
+   to the frame that is about to show it. */
+var dirtyStrokes = [];
+function markDirty(st){
+  if(dirtyStrokes.indexOf(st) < 0) dirtyStrokes.push(st);
+}
+P.flushDirtyStrokes = function(){
+  if(!dirtyStrokes.length) return;
+  for(var i=0;i<dirtyStrokes.length;i++){
+    S.freezeFrames(dirtyStrokes[i]);
+    S.rebuild(dirtyStrokes[i]);
+  }
+  dirtyStrokes.length = 0;
+};
+
 /* ==========================================================================
    Liquify  (FACT: documented tool)
    --------------------------------------------------------------------------
@@ -824,6 +847,7 @@ function stepLiquify(x, y){
 
   for(var i=0;i<s.strokes.length;i++){
     var st = s.strokes[i], pts = st.pts, touched = false;
+    if(S.farFromDisc(st, x, y, rPx)) continue;
     for(var j=0;j<pts.length;j++){
       P.worldToScreen(pts[j].p, _lqScr);
       if(_lqScr.z < -1 || _lqScr.z > 1) continue;
@@ -859,7 +883,7 @@ function stepLiquify(x, y){
               .addScaledVector(_lqU, -my * scale);
       touched = true;
     }
-    if(touched){ S.freezeFrames(st); S.rebuild(st); }
+    if(touched) markDirty(st);
   }
 }
 
@@ -868,6 +892,7 @@ function stepLiquify(x, y){
    rather than a hundred times. */
 function endLiquify(){
   var s = liquifySession; liquifySession = null;
+  P.flushDirtyStrokes();
   if(!s || !s.moved) return;
   var after = s.strokes.map(function(st){
     return st.pts.map(function(q){ return q.p.clone(); });
@@ -911,6 +936,7 @@ function stepSmooth(x, y){
   for(var i=0;i<S.list.length;i++){
     var st = S.list[i], pts = st.pts, n = pts.length;
     if(n < 3 || !S.visible(st)) continue;
+    if(S.farFromDisc(st, x, y, rPx)) continue;
     var touched = false;
     /* one pass, endpoints pinned so the curve keeps its extent */
     for(var j=1;j<n-1;j++){
@@ -924,12 +950,13 @@ function stepSmooth(x, y){
       avg.copy(pts[j-1].p).add(pts[j+1].p).multiplyScalar(0.5);
       pts[j].p.lerp(avg, w);
     }
-    if(touched){ S.freezeFrames(st); S.rebuild(st); }
+    if(touched) markDirty(st);
   }
 }
 
 function endSmooth(){
   var s = smoothSession; smoothSession = null;
+  P.flushDirtyStrokes();
   if(!s || !s.strokes.length) return;
   var after = s.strokes.map(function(st){
     return st.pts.map(function(q){ return q.p.clone(); });

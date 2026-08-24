@@ -460,6 +460,7 @@ G.unbendMesh = function(guide){
   guide.mesh.geometry.computeVertexNormals();
   guide.mesh.geometry.computeBoundingSphere();
   guide.mesh.geometry.computeBoundingBox();
+  G.invalidateMask();
   guide.bendPath = null;
 };
 
@@ -576,6 +577,7 @@ G.bendMesh = function(guide, worldPath){
   geom.computeBoundingSphere();
   geom.computeBoundingBox();
   delete geom.userData._adj;               // adjacency is unchanged, bounds are not
+  G.invalidateMask();
   guide.bendPath = worldPath.map(function(p){ return p.clone(); });
   return true;
 };
@@ -760,6 +762,7 @@ function keepInScene(g){
 }
 
 G.setActive = function(guide){
+  G.invalidateMask();
   var prev = G.active;
   G.active = guide || null;
   /* the outgoing guide only leaves the scene if nothing else is holding it */
@@ -1128,8 +1131,48 @@ function nearestOnGuide(ray){
    ========================================================================== */
 var _dir = new THREE.Vector3(), _org = new THREE.Vector3();
 
+/* THE SAME RAY, OVER AND OVER.
+   Three.js has no spatial index, so each test walks every triangle of the
+   guide: on a swept wall that is 4224 of them, about 0.2ms. Smooth and
+   Liquify ask once per point under the pen per pointer event, which timed
+   at 490ms of a 700ms drag — and on paint lying ON the guide every one of
+   those 2321 rays answered "not masked", because there is nothing between
+   the camera and a point on the surface.
+
+   The answer only changes when the camera or the guides do, so it is
+   cached against an epoch that both bump. Points MOVE while a tool drags
+   them, so the key is a rounded position rather than the point itself:
+   measured over a 40-move smooth of a painted wall, the hit rate climbs
+   with cell size and flattens at about 80% by a millimetre — 0.05mm hit
+   37%, 0.25mm 72%, 1mm 79%, and 5mm gained nothing further, because what
+   is left by then are genuinely distinct points. So a millimetre it is,
+   which is also the widest the answer may be wrong: only along the
+   guide's silhouette, where a point within a millimetre of the edge can
+   be judged by its neighbour cell. */
+var maskEpoch = 0, maskCache = null, maskCacheEpoch = -1;
+var MASK_Q = 1 * P.MM;                       // cache cell, in world units
+var MASK_CACHE_MAX = 1e5;                    // a drag that never moves the camera
+G.invalidateMask = function(){ maskEpoch++; };
+P.invalidateMask = G.invalidateMask;
+
 G.isMasked = function(worldPoint){
   if(!G.isolate || !G.hasActive()) return false;
+  if(maskCacheEpoch !== maskEpoch){
+    maskCache = new Map(); maskCacheEpoch = maskEpoch;
+  }
+  var key = Math.round(worldPoint.x/MASK_Q) + ',' +
+            Math.round(worldPoint.y/MASK_Q) + ',' +
+            Math.round(worldPoint.z/MASK_Q);
+  var hit = maskCache.get(key);
+  if(hit === undefined){
+    hit = maskRay(worldPoint);
+    if(maskCache.size >= MASK_CACHE_MAX) maskCache.clear();
+    maskCache.set(key, hit);
+  }
+  return hit;
+};
+
+function maskRay(worldPoint){
   var cam = P.cam(), dist;
   if(P.VIEW.ortho){
     cam.getWorldDirection(_dir);
@@ -1147,7 +1190,7 @@ G.isMasked = function(worldPoint){
   _ray.far  = dist - 1e-3;
   var hits = _ray.intersectObject(G.active.mesh, false);
   return hits.length > 0;
-};
+}
 
 /* ==========================================================================
    12. Ray-pick a guide (Select tool long-press, A.5)

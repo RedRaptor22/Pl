@@ -176,6 +176,8 @@ function watchViewport(){
 
 function tick(now){
   watchViewport();
+  P.flushDirtyStrokes();          // geometry a drag deferred, just before it shows
+
   if(!P.viewAnimating()) P.tickSpin();
   P.tickView(now);
   P.updatePivotMarker();

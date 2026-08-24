@@ -773,9 +773,22 @@ function nibAxis(pt, t, out){
    (free space, closed guides, an off-surface clamp) keep the full nib. */
 var FIT_MIN = 0.02;          // never let a section collapse to zero area
 function fitAt(pt, t, halfWidth){
-  pt.fitL = pt.fitR = 1;
   var f = pt.surf;
-  if(!f || !(halfWidth > EPS)) return;
+  /* KEEP A TRIM WE CANNOT RE-MEASURE.
+     `surf` is spent by the first freeze, so every later one — smooth,
+     liquify, bend, the joystick, an undo — arrives without it. Resetting
+     the fit to 1 here threw the boundary trim away and the paint sprang
+     back out over the edge of the guide it was painted on, measured at
+     116mm past a wall the stroke had been clamped to. A tool that nudges
+     a point by a fraction of a millimetre has not changed how much room
+     that section has, so the measured value stands until something can
+     measure it again. */
+  if(!f || !(halfWidth > EPS)){
+    if(pt.fitL === undefined) pt.fitL = 1;
+    if(pt.fitR === undefined) pt.fitR = 1;
+    return;
+  }
+  pt.fitL = pt.fitR = 1;
   nibAxis(pt, t, _axisT);
   var reach = P.Guides.reachAlong(f, _axisT);
   pt.fitR = P.clamp(reach.pos / halfWidth, FIT_MIN, 1);
@@ -1099,6 +1112,11 @@ function farFromDisc(st, x, y, radiusPx){
   var dx = _s.x - x, dy = _s.y - y;
   return (dx*dx + dy*dy) > rPx*rPx;
 }
+/* Smooth and Liquify sweep a disc over the scene exactly as the eraser does,
+   and paid the same price for not rejecting first. The padding above covers
+   a stroke whose points have moved since its mesh was last rebuilt: a frame
+   of pen travel is small beside a whole brush radius. */
+S.farFromDisc = farFromDisc;
 
 /* Screen-space eraser. The disc is clipped against the centreline as a
    CONTINUOUS polyline, not against its sample points: where it crosses a

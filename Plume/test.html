@@ -1146,6 +1146,123 @@ function run(W){
   P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
   reset();
 
+  /* ================= Smooth over painted work ================= */
+  group('Smooth — cost and what it must not undo');
+  /* Smoothing a wall painted with the wide brush was the slowest thing in
+     the app, and it also quietly threw away the boundary trim. Both are
+     measured here on the same drag. */
+  function paintedWall(){
+    reset();
+    P.setTool('draw');
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var pr15 = [], q15;
+    for(q15=0;q15<=16;q15++) pr15.push({x:CX-240+480*(q15/16), y:CY});
+    pen(pr15);
+    var g15 = P.Guides.active;
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 70; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#2fbf55');
+    for(var k15=0;k15<20;k15++){
+      var col15 = [];
+      for(q15=0;q15<=10;q15++){
+        col15.push({x:CX-230+k15*24+Math.sin(q15*0.7+k15)*5, y:CY-120+q15*24});
+      }
+      pen(col15);
+    }
+    return g15;
+  }
+  function trimCount(){
+    var t = 0;
+    for(var a=0;a<P.Strokes.list.length;a++){
+      var ps = P.Strokes.list[a].pts;
+      for(var b=0;b<ps.length;b++){ if(ps[b].fitL < 0.999 || ps[b].fitR < 0.999) t++; }
+    }
+    return t;
+  }
+  var wallG = paintedWall();
+  var trimBefore = trimCount();
+  var wallBox = new THREE.Box3().setFromObject(wallG.mesh);
+  P.setTool('smooth');
+  var moveTimes = [];
+  penDown(CX-200, CY);
+  for(var s15=0;s15<40;s15++){
+    var t0 = (W.performance || Date).now();
+    penMoveTo(CX-200+s15*10, CY+Math.sin(s15*0.4)*30);
+    moveTimes.push((W.performance || Date).now() - t0);
+  }
+  penUpAt(CX+200, CY);
+  moveTimes.sort(function(a,b){ return a-b; });
+  var moveMax = moveTimes[moveTimes.length-1];
+
+  /* A pointer event must fit inside a frame with room for the render. The
+     drag measured 16.6ms median and 36.5ms worst before this was fixed. */
+  ck('a smooth drag over a painted wall keeps inside a frame',
+     moveMax < 16,
+     '40 moves over 20 wide strokes: median ' + moveTimes[20].toFixed(1) +
+     'ms, worst ' + moveMax.toFixed(1) + 'ms');
+
+  var trimAfter = trimCount();
+  ck('...and does not throw away the boundary trim',
+     trimBefore > 100 && trimAfter > trimBefore * 0.9,
+     trimBefore + ' points trimmed before, ' + trimAfter + ' after');
+
+  var smOver = -1e9;
+  for(var o15=0;o15<P.Strokes.list.length;o15++){
+    var ob = new THREE.Box3().setFromObject(P.Strokes.list[o15].mesh);
+    smOver = Math.max(smOver, ob.max.x - wallBox.max.x, wallBox.min.x - ob.min.x);
+  }
+  ck('...so the paint stays on the guide after smoothing',
+     smOver < 5 * P.MM,
+     'worst overflow ' + (smOver/P.MM).toFixed(0) + 'mm');
+
+  /* The occlusion mask is cached against a viewpoint. Moving the camera has
+     to drop it, or a curve that just came out from behind a guide would
+     still be treated as hidden. */
+  reset();
+  P.Guides.isolate = true;
+  var maskCalls = 0;
+  ck('the occlusion mask answers without a ray once it has been asked',
+     (function(){
+       var wall16 = paintedWall();
+       if(!wall16) return false;
+       var probe = P.Strokes.list[0].pts[2].p.clone();
+       /* count real raycasts by watching the guide mesh */
+       var rays = 0, geo = wall16.mesh;
+       var oRay = geo.raycast;
+       geo.raycast = function(){ rays++; return oRay.apply(this, arguments); };
+       P.Guides.isMasked(probe);
+       var first = rays;
+       for(var r16=0;r16<50;r16++) P.Guides.isMasked(probe);
+       var after = rays;
+       geo.raycast = oRay;
+       maskCalls = first + '/' + (after - first);
+       return first === 1 && after === first;
+     })(),
+     'first ask cast ' + maskCalls + ' rays, fifty repeats cast the rest');
+
+  ck('...and forgets it when the camera moves', (function(){
+    var wall17 = paintedWall();
+    if(!wall17) return false;
+    var probe = P.Strokes.list[0].pts[2].p.clone();
+    var rays = 0, geo = wall17.mesh, oRay = geo.raycast;
+    geo.raycast = function(){ rays++; return oRay.apply(this, arguments); };
+    P.Guides.isMasked(probe);
+    var before = rays;
+    P.VIEW.theta += 0.4; P.applyCamera();
+    P.Guides.isMasked(probe);
+    var after = rays;
+    geo.raycast = oRay;
+    return before === 1 && after === 2;
+  })(), 'a moved camera re-casts rather than reusing the old answer');
+
+  P.setTool('draw');
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
+  reset();
+
   /* ================= Liquify ================= */
   group('Liquify — push, pinch and comb');
   /* FACT: "select the curves or sketches you want to modify and tap Liquify.

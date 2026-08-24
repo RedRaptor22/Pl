@@ -102,6 +102,8 @@ P.worldToScreen = function(p, out){
 var _e = new THREE.Vector3();
 
 function applyCamera(){
+  /* the guide occlusion cache is keyed to this viewpoint */
+  if(P.invalidateMask) P.invalidateMask();
   VIEW.phi    = P.clamp(VIEW.phi, 0.0025, Math.PI-0.0025);
   VIEW.radius = P.clamp(VIEW.radius, T.radiusMin, T.radiusMax);
   VIEW.focal  = P.clamp(VIEW.focal, T.focalMin, T.focalMax);
