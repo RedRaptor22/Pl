@@ -29,9 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Turns Pages on the first time this runs, so there is no settings
-      # switch to find by hand.
+      # ONE-TIME SETUP: Settings -> Pages -> Build and deployment ->
+      # Source: GitHub Actions. The token this workflow runs with is not
+      # allowed to create the Pages site itself, so the attempt below is
+      # allowed to fail; everything after it works once the switch is set.
       - uses: actions/configure-pages@v5
+        continue-on-error: true
         with:
           enablement: true
 

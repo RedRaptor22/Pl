@@ -8,6 +8,9 @@ straight from disk.
 
 **https://redraptor22.github.io/Pl/**
 
+> First time only: Settings -> Pages -> Build and deployment -> Source:
+> **GitHub Actions**. The workflow cannot create the Pages site itself.
+
 The site is rebuilt and redeployed by GitHub Actions on every push, so the URL
 always serves the newest commit — there is nothing to download. The mechanics
 suite runs there too, on whatever device you are holding:
