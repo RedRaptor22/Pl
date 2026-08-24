@@ -851,6 +851,50 @@ S.dedupe = function(stroke){
   for(i=1;i<pts.length;i++){
     if(pts[i].p.distanceToSquared(out[out.length-1].p) > 1e-10) out.push(pts[i]);
   }
+
+  /* AND NO SPURS EITHER.
+     Clamping onto a guide does not only bunch samples, it can fold them: a
+     stroke painted across a narrow guide came back with steps of 1.72mm,
+     0.75mm and 0.40mm where the chord straight PAST the middle one measured
+     0.35mm - shorter than either step beside it, so the path doubles back
+     inside one sample. Consecutive tangents then point opposite ways, the ring
+     between them is built inside out, and a wide nib turns that into a plate
+     of paint standing off the surface at a wild angle.
+
+     A point is a spur when the path REVERSES through it - the step in and the
+     step out point opposite ways - and cutting it out moves the path less
+     than this brush could draw anyway, a wiggle far finer than the nib being
+     something the sweep cannot render in any case. That second clause is what
+     keeps a deliberate sharp corner: the tip of a real V stands most of an arm
+     away from the line joining its ends, whatever the brush.
+
+     The excursion has to be measured to the SEGMENT and not to its infinite
+     line. These folds are very nearly straight backtracks, so the tip sits on
+     the line but well outside the span, and a line distance would call a 0.35mm
+     step back zero. */
+  var half = Math.abs(stroke.baseRadius * cfgOf(stroke).wide);
+  var flat = Math.max(0.25 * P.MM, half * 0.01);
+  var ac = new THREE.Vector3(), ab = new THREE.Vector3(), bc = new THREE.Vector3();
+  var changed = true;
+  while(changed && out.length > 2){
+    changed = false;
+    var keep = [out[0]];
+    for(i=1;i<out.length-1;i++){
+      var a = keep[keep.length-1].p, b = out[i].p, c = out[i+1].p;
+      ab.subVectors(b, a); bc.subVectors(c, b);
+      if(ab.dot(bc) < 0){
+        ac.subVectors(c, a);
+        var len2 = ac.lengthSq();
+        var t = len2 > EPS ? P.clamp(ab.dot(ac)/len2, 0, 1) : 0;
+        var off = ab.addScaledVector(ac, -t).length();
+        if(off <= flat){ changed = true; continue; }
+      }
+      keep.push(out[i]);
+    }
+    keep.push(out[out.length-1]);
+    out = keep;
+  }
+
   var dropped = pts.length - out.length;
   if(dropped) stroke.pts = out;
   return dropped;
