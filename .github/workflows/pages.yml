@@ -44,9 +44,25 @@ jobs:
           PLUME_SHA: ${{ github.sha }}
           PLUME_REF: ${{ github.ref_name }}
 
-      - uses: actions/upload-pages-artifact@v3
+      # This is what actions/upload-pages-artifact@v3 does internally, spelled
+      # out so the upload can set overwrite. Artifacts belong to the RUN, not
+      # the attempt, so re-running a job that had already uploaded leaves two
+      # named github-pages and deploy-pages refuses to choose between them.
+      - name: Archive the site
+        run: |
+          tar --dereference --hard-dereference \
+            --directory site \
+            -cf "$RUNNER_TEMP/artifact.tar" \
+            --exclude=.git --exclude=.github \
+            .
+
+      - uses: actions/upload-artifact@v4
         with:
-          path: site
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
 
       - id: deploy
         uses: actions/deploy-pages@v4
