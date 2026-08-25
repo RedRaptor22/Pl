@@ -950,6 +950,73 @@ function surfaceFrameAt(mesh, hit){
   return frameOnTriangle(mesh, hit.face.a, hit.face.b, hit.face.c, hit.point);
 }
 
+/* ==========================================================================
+   The surface as the GRID it is built from
+   --------------------------------------------------------------------------
+   A swept guide is stored as an nu x nv grid of points, and `uvw` carries each
+   node's ARC LENGTH along both directions. That makes the surface addressable
+   in millimetres rather than in vertices: the two axes are separable, so u
+   depends only on the column and v only on the row, and a position anywhere
+   between nodes is one binary search and a bilinear blend away.
+
+   Fill needs this. Laying rows of paint a nib apart means putting them at
+   chosen DISTANCES across the surface, which grid lines do not fall on.
+   ========================================================================== */
+G.surfaceSpan = function(guide){
+  var geom = guide && guide.mesh && guide.mesh.geometry;
+  if(!geom) return null;
+  var nu = geom.userData.nu, nv = geom.userData.nv, uvw = geom.attributes.uvw;
+  if(!nu || !nv || !uvw || nu < 2 || nv < 2) return null;
+  return { nu:nu, nv:nv, Lu:uvw.getX(nu-1), Lv:uvw.getY((nv-1)*nu) };
+};
+
+/* which cell an arc length falls in, and how far across it */
+function spanAt(get, n, s){
+  if(!(s > get(0))) return { i:0, f:0 };
+  if(s >= get(n-1)) return { i:n-2, f:1 };
+  var lo = 0, hi = n-1;
+  while(hi - lo > 1){
+    var mid = (lo + hi) >> 1;
+    if(get(mid) <= s) lo = mid; else hi = mid;
+  }
+  var a = get(lo), b = get(lo+1);
+  return { i:lo, f: (b - a) > EPS ? (s - a)/(b - a) : 0 };
+}
+
+var _s00 = new THREE.Vector3(), _s10 = new THREE.Vector3(),
+    _s01 = new THREE.Vector3(), _s11 = new THREE.Vector3();
+
+/* A point on the guide at arc lengths (su, sv), with the normal and the same
+   kind of frame a drawn sample gets — built by the very code that painting
+   uses, so a filled row trims at a boundary exactly like a hand-drawn one. */
+G.sampleSurface = function(guide, su, sv){
+  var span = G.surfaceSpan(guide);
+  if(!span) return null;
+  var mesh = guide.mesh, geom = mesh.geometry;
+  var uvw = geom.attributes.uvw, pos = geom.attributes.position,
+      nor = geom.attributes.normal, nu = span.nu, nv = span.nv;
+  mesh.updateMatrixWorld();
+  var m = mesh.matrixWorld;
+
+  var cu = spanAt(function(i){ return uvw.getX(i); }, nu, su);
+  var cv = spanAt(function(j){ return uvw.getY(j*nu); }, nv, sv);
+  var a = cv.i*nu + cu.i, b = a + 1, c = a + nu, d = c + 1;
+
+  function blend(attr, out){
+    _s00.fromBufferAttribute(attr, a); _s10.fromBufferAttribute(attr, b);
+    _s01.fromBufferAttribute(attr, c); _s11.fromBufferAttribute(attr, d);
+    _s00.lerp(_s10, cu.f); _s01.lerp(_s11, cu.f);
+    return out.copy(_s00).lerp(_s01, cv.f);
+  }
+  var point = blend(pos, new THREE.Vector3()).applyMatrix4(m);
+  var normal = blend(nor, new THREE.Vector3())
+    .applyMatrix3(new THREE.Matrix3().getNormalMatrix(m));
+  if(normal.lengthSq() < EPS) normal.set(0,0,1); else normal.normalize();
+
+  return { point:point, normal:normal,
+           frame: frameOnTriangle(mesh, a, b, c, point), onSurface:true };
+};
+
 /* How far the surface reaches from `frame` along +dir and -dir, in world
    units. Infinity where the direction runs parallel to that pair of edges. */
 G.reachAlong = function(frame, dir){

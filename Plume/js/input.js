@@ -489,6 +489,7 @@ window.addEventListener('keydown', function(e){
     case 's': P.setTool('select'); break;
     case 'l': P.setTool('lasso');  break;
     case 'm': P.setTool('smooth'); break;
+    case 'k': P.setTool('fill');   break;   // f is View reset
     case 'r': P.setTool('shape');  break;
     case 'o': P.toast(P.toggleProjection()); P.onViewChange(); break;
     case 'f': P.resetView(); P.toast('View reset'); break;

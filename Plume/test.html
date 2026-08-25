@@ -1297,6 +1297,102 @@ function run(W){
   P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
   reset();
 
+  /* ================= Fill ================= */
+  group('Fill — coat a whole guide in one go');
+
+  /* A bucket fill that lays down ORDINARY STROKES, so everything downstream
+     still works on it. It takes the current brush and colour because it is
+     the current brush. */
+  function fillWall(brush, mm){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof17 = [];
+    for(var q17=0;q17<=16;q17++) prof17.push({x:CX-240+480*(q17/16), y:CY});
+    pen(prof17);
+    var wall17 = P.Guides.active;
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = brush; P.TOOL.sizeMM = mm; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#2fbf55');
+    return { guide: wall17, made: P.Tools.fillGuide() };
+  }
+
+  var fill17 = fillWall('wide', 70);
+  ck('filling a guide makes ordinary strokes', !!fill17.made &&
+     fill17.made.length > 0 && fill17.made.length === P.Strokes.list.length &&
+     fill17.made.every(function(x){ return x.pts.length > 1 && !!x.mesh; }),
+     (fill17.made ? fill17.made.length : 0) + ' strokes');
+
+  ck('...in the brush and colour you have chosen',
+     fill17.made.every(function(x){
+       return x.brush === 'wide' &&
+              Math.abs(x.color.getHex() - 0x2fbf55) === 0; }),
+     'brush ' + fill17.made[0].brush + ', #' + fill17.made[0].color.getHexString());
+
+  /* EDGE TO EDGE. The rows sit half a pitch in from each side so the outermost
+     nib hangs over and gets trimmed back, exactly like a hand-painted edge. */
+  var gBox17 = new THREE.Box3().setFromObject(fill17.guide.mesh);
+  var pBox17 = new THREE.Box3();
+  for(var f17=0; f17<P.Strokes.list.length; f17++){
+    pBox17.union(new THREE.Box3().setFromObject(P.Strokes.list[f17].mesh));
+  }
+  var over17  = Math.max(pBox17.max.x - gBox17.max.x, gBox17.min.x - pBox17.min.x);
+  var short17 = Math.max(gBox17.max.x - pBox17.max.x, pBox17.min.x - gBox17.min.x);
+  ck('...reaching the edges without running past them',
+     over17 < 2*P.MM && short17 < 5*P.MM,
+     'overflow ' + (over17/P.MM).toFixed(1) + 'mm, shortfall ' +
+     (short17/P.MM).toFixed(1) + 'mm on a 960mm guide');
+
+  /* NO GROOVES BETWEEN THE ROWS. Spacing rounds the row count UP: rounding it
+     down left a step wider than the nib and a 2mm gap down every seam. */
+  P.Guides.setActive(null);
+  P.renderer.render(P.scene, P.cam());
+  var solid17 = (function(){
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpF = P.viewport(), buf17 = new W.Uint8Array(4*900);
+    gl.readPixels(0, Math.round((vpF.h - CY)*dpr), 900, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf17);
+    var runs17 = [], cur17 = 0, painted17 = 0;
+    for(var q=0;q<900;q++){
+      var r17 = buf17[q*4], g17 = buf17[q*4+1], b17 = buf17[q*4+2];
+      if(g17 > r17+20 && g17 > b17+20){ cur17++; painted17++; }
+      else if(cur17){ runs17.push(cur17); cur17 = 0; }
+    }
+    if(cur17) runs17.push(cur17);
+    return { runs: runs17.length, painted: painted17 };
+  })();
+  ck('...as one unbroken sheet, with no grooves between the rows',
+     solid17.painted > 300 && solid17.runs === 1,
+     solid17.painted + ' pixels across ' + solid17.runs + ' run(s)');
+
+  /* one history step for the whole coat */
+  var count17 = P.Strokes.list.length;
+  P.History.undo();
+  var undone17 = P.Strokes.list.length;
+  P.History.redo();
+  ck('a fill undoes in one step, not one per row',
+     undone17 === 0 && P.Strokes.list.length === count17,
+     count17 + ' strokes -> ' + undone17 + ' -> ' + P.Strokes.list.length);
+
+  /* a wider nib needs fewer passes */
+  var fine17 = fillWall('wide', 40).made.length;
+  var broad17 = fillWall('wide', 160).made.length;
+  ck('a wider brush fills the same guide in fewer strokes',
+     broad17 < fine17 && broad17 >= 1,
+     fine17 + ' strokes at 40mm, ' + broad17 + ' at 160mm');
+
+  /* and it declines politely when there is nothing to fill */
+  reset();
+  P.Guides.setActive(null);
+  var none17 = P.Tools.fillGuide();
+  ck('filling with no guide does nothing rather than throwing',
+     none17 === null && P.Strokes.list.length === 0,
+     'returned ' + none17 + ', ' + P.Strokes.list.length + ' strokes');
+  reset();
+
   /* ================= Liquify ================= */
   group('Liquify — push, pinch and comb');
   /* FACT: "select the curves or sketches you want to modify and tap Liquify.
@@ -1776,8 +1872,19 @@ function run(W){
     }
     ck('compact tool buttons meet a 44px target', small === 0 && tb.length > 0,
        tb.length + ' visible buttons');
-    ck('toggle pairs stay merged when compact', tb.length === 4,
-       tb.map(function(b){ return b.dataset.tool; }).join(','));
+    /* The rule, rather than a count: a toggle pair shows ONE of its two
+       buttons and keeps the other in the DOM behind a repeat tap. Stated as a
+       magic number this needed editing every time a tool was added, which is
+       how it came to assert a stale 4. */
+    var hidden17 = Array.from(D.getElementById('tools')
+                     .querySelectorAll('button[data-tool].alt'))
+                     .filter(function(b){ return b.getBoundingClientRect().width > 0; });
+    var expect17 = D.getElementById('tools')
+                     .querySelectorAll('button[data-tool]:not(.alt)').length;
+    ck('toggle pairs stay merged when compact',
+       tb.length === expect17 && hidden17.length === 0,
+       tb.map(function(b){ return b.dataset.tool; }).join(',') +
+       ' visible, ' + hidden17.length + ' partners showing');
 
     var dk = rect('dock');
     ck('dock is pinned to the bottom', Math.abs(dk.bottom - vh) < 2);

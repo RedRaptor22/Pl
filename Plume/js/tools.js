@@ -207,6 +207,7 @@ Tools.begin = function(x, y, ev){
 
   if(mode === 'erase' || mode === 'vacuum'){ beginErase(x, y); return; }
   if(mode === 'smooth'){ beginSmooth(x, y); return; }
+  if(mode === 'fill'){ Tools.fillGuide(); return; }
   if(mode === 'liquify'){ beginLiquify(x, y); return; }
   if(mode === 'lasso'){ beginLasso(x, y); return; }
   if(mode === 'select'){ return; }                  // handled on tap/hold
@@ -995,6 +996,94 @@ function endSmooth(){
   });
   P.onSceneChange();
 }
+
+/* ==========================================================================
+   Fill — coat a whole guide in one go
+   --------------------------------------------------------------------------
+   A bucket fill, for blocking in a large shape without dragging the nib back
+   and forth across it fifty times.
+
+   It lays down ORDINARY STROKES, one per row, rather than some new kind of
+   filled object. That is the whole point: everything downstream already knows
+   what a stroke is, so a fill can be erased, liquified, smoothed, bent,
+   grouped, exported and undone like anything else you drew, and it picks up
+   the current brush and colour because it IS the current brush.
+
+   Rows, not one long snake. A serpentine path would turn 180 degrees at the
+   end of every row, and a hairpin is precisely the case a swept cross-section
+   cannot round: it is the fold that dedupe exists to delete. Parallel strokes
+   avoid the question, and overlapping paint has read as one flat surface ever
+   since the shading was taken from the guide.
+
+   Spacing divides the crossing distance into a whole number of rows rather
+   than stepping by a fixed nib width and leaving a remainder at the far edge.
+   Rows sit half a pitch in from each edge, so the outermost nib hangs over by
+   half its width and gets trimmed back to the boundary — the same trim a
+   hand-painted edge stroke gets. */
+var FILL_OVERLAP = 0.9;      // rows this fraction of a nib apart, so no seams
+var FILL_MAX_ROWS = 400;     // a runaway fill is a hang; refuse instead
+
+Tools.fillGuide = function(guide){
+  var g = guide || G.active;
+  if(!g){ P.toast('Select a guide to fill'); return null; }
+  var span = G.surfaceSpan(g);
+  if(!span){ P.toast('This guide cannot be filled'); return null; }
+
+  var proto = newStroke();
+  var cfg = P.BRUSH[P.brushName(proto.brush)];
+  var half = S.nibHalfWidth(proto, baseRadius() * cfg.wide);
+  var pitch = Math.max(half * 2 * FILL_OVERLAP, 1e-5);
+
+  /* run the strokes the LONG way, so a fill is a few long curves and not
+     hundreds of stubs */
+  var alongV  = span.Lv >= span.Lu;
+  var lengthL = alongV ? span.Lv : span.Lu;
+  var across  = alongV ? span.Lu : span.Lv;
+  if(!(lengthL > P.EPS) || !(across > P.EPS)){ P.toast('This guide is too small to fill'); return null; }
+
+  /* CEIL, NOT ROUND. Rounding down leaves a step wider than the nib and the
+     rows stop touching: a 960mm guide under a 238mm nib rounded to 4 rows at
+     240mm apart and left a 2mm groove down every seam. Rounding up can only
+     make rows overlap more, which is invisible. */
+  var rows = Math.max(1, Math.ceil(across / pitch));
+  if(rows > FILL_MAX_ROWS){
+    P.toast('Brush too fine to fill this guide — make it larger');
+    return null;
+  }
+  var step = across / rows;
+
+  /* follow the surface at its own resolution along the stroke */
+  var nodes = alongV ? span.nv : span.nu;
+  var steps = P.clamp(nodes, 2, 240);
+
+  var made = [], r, i;
+  for(r=0; r<rows; r++){
+    var lateral = (r + 0.5) * step;
+    var st = newStroke();
+    for(i=0; i<steps; i++){
+      var along = lengthL * (i/(steps-1));
+      var hit = G.sampleSurface(g, alongV ? lateral : along, alongV ? along : lateral);
+      if(!hit) continue;
+      pushLivePoint(st, hit.point, {pressure:1, tilt:{az:null, alt:1}},
+                    hit.normal, hit.frame);
+    }
+    if(st.pts.length < 2) continue;
+    S.dedupe(st);
+    S.freezeFrames(st);
+    S.rebuild(st);
+    made.push(st);
+  }
+  if(!made.length){ P.toast('Nothing to fill'); return null; }
+
+  P.History.run({
+    label: 'fill', cost: P.History.costOf(made),
+    redo: function(){ for(var k=0;k<made.length;k++) S.add(made[k]); },
+    undo: function(){ for(var k=0;k<made.length;k++) S.remove(made[k]); }
+  });
+  P.toast('Filled with ' + made.length + (made.length === 1 ? ' stroke' : ' strokes'));
+  P.onSceneChange();
+  return made;
+};
 
 /* ==========================================================================
    Lasso select — drag a loop, take everything inside it
