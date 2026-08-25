@@ -172,7 +172,12 @@ function newStroke(){
     color: TOOL.color.clone(),
     baseRadius: baseRadius(),
     opacity: TOOL.opacity,
-    pressureTarget: TOOL.pressureOn ? TOOL.pressureTarget : 'none',
+    /* A brush may insist on WHICH property pressure drives - the pencil wants
+       tone, not width, because pressing harder lays more graphite rather than
+       a broader mark. It still only applies when pressure is switched on. */
+    pressureTarget: TOOL.pressureOn
+      ? (P.BRUSH[P.brushName(TOOL.brush)].pressure || TOOL.pressureTarget)
+      : 'none',
     seedRef: null,
     group: S.ensureGroup().id,        // a curve is drawn INTO a group
     pts: [], mesh: null, selected: false

@@ -48,19 +48,45 @@ var VERT = [
   'attribute vec4 vcolor;',
   'varying vec4 vCol;',
   'varying vec3 vN;',
+  'varying vec3 vPos;',
   'void main(){',
   '  vCol = vcolor;',
   '  vN = normalize(normalMatrix * normal);',
+  /* stroke geometry is written in world coordinates, so object space IS world
+     space and the grain can be anchored to the sketch rather than to the nib */
+  '  vPos = position;',
   '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);',
   '}'
 ].join('\n');
 
 var FRAG = [
+  /* the grain samples position in MILLIMETRES, which runs to a few thousand
+     across a sketch - mediump would alias the hash into bands */
+  'precision highp float;',
   'uniform float uSelect;',
   'uniform float uShade;',
   'uniform float uGlow;',
+  'uniform float uGrit;',
   'varying vec4 vCol;',
   'varying vec3 vN;',
+  'varying vec3 vPos;',
+  /* ---- paper tooth ----
+     Value noise, two octaves, sampled in world millimetres so the grain is a
+     property of the PAPER and not of the nib: it stays the same size whatever
+     the brush size, and two strokes crossing agree about where the tooth is,
+     which is what makes overlapping pencil read as one surface being shaded
+     rather than as two marks. */
+  'float gHash(vec3 p){',
+  '  return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);',
+  '}',
+  'float gNoise(vec3 p){',
+  '  vec3 i = floor(p), f = fract(p);',
+  '  f = f*f*(3.0 - 2.0*f);',
+  '  return mix(mix(mix(gHash(i), gHash(i+vec3(1,0,0)), f.x),',
+  '                 mix(gHash(i+vec3(0,1,0)), gHash(i+vec3(1,1,0)), f.x), f.y),',
+  '             mix(mix(gHash(i+vec3(0,0,1)), gHash(i+vec3(1,0,1)), f.x),',
+  '                 mix(gHash(i+vec3(0,1,1)), gHash(i+vec3(1,1,1)), f.x), f.y), f.z);',
+  '}',
   'void main(){',
   '  vec3 n = normalize(vN);',
   '  if(!gl_FrontFacing) n = -n;',
@@ -75,7 +101,18 @@ var FRAG = [
   '    rgb = vCol.rgb * (0.55 + 1.15*rim);',
   '  }',
   '  rgb = mix(rgb, vec3(0.36,0.62,1.0), uSelect*0.55);',
-  '  gl_FragColor = vec4(rgb, vCol.a);',
+  '  float a = vCol.a;',
+  /* GRIT eats into the tone rather than into the outline. The silhouette is
+     left exactly as the sweep built it - the retired `grain` parameter jittered
+     the radius instead and was the only source of visibly jagged geometry in
+     the brush set. */
+  '  if(uGrit > 0.5){',
+  '    vec3 mm = vPos * 1000.0;',
+  '    float tooth = gNoise(mm * 0.75) * 0.65 + gNoise(mm * 2.4) * 0.35;',
+  '    a *= clamp(0.32 + 1.15 * tooth, 0.0, 1.0);',
+  '    if(a < 0.012) discard;',
+  '  }',
+  '  gl_FragColor = vec4(rgb, a);',
   '}'
 ].join('\n');
 
@@ -86,7 +123,8 @@ function makeMaterial(stroke, needsAlpha){
     uniforms: {
       uSelect:{value:0},
       uShade:{value: (P.ENV.shaded && !glow) ? 1 : 0},
-      uGlow:{value: glow}
+      uGlow:{value: glow},
+      uGrit:{value: cfg.grit ? 1 : 0}
     },
     vertexShader: VERT, fragmentShader: FRAG,
     /* FRONT FACES ONLY. A stroke is a closed tube, so its far wall is never
@@ -97,8 +135,8 @@ function makeMaterial(stroke, needsAlpha){
        faces measures 0.487. Every brush is capped (below) so the tube really
        is closed and nothing can be seen through an open end. */
     side: THREE.FrontSide,
-    transparent: !!needsAlpha || !!glow,
-    depthWrite: glow ? false : !needsAlpha,
+    transparent: !!needsAlpha || !!glow || !!cfg.grit,
+    depthWrite: (glow || cfg.grit) ? false : !needsAlpha,
     /* FACT (C.5): "a Glow material enables glowing lines" — additive blending
        is what makes overlapping strokes bloom instead of just stacking */
     blending: glow ? THREE.AdditiveBlending : THREE.NormalBlending
@@ -154,6 +192,14 @@ function makeMaterial(stroke, needsAlpha){
 var BRUSH = P.BRUSH = {
   /* the default: a plain round nib, crisp at both ends. Unchanged. */
   pen:    { flat:1.00, square:0.00, taper:0, tip:0,    caps:true, wide:1.00, glow:0 },
+  /* sketch pencil: a chisel edge lying along the surface, laid down at part
+     strength through a paper tooth. Roughly 3:1 across the surface to off it,
+     so it reads as a slanted pencil rather than a rod; ELLIPTICAL, because a
+     pencil edge wears round rather than square. It shades from the surface
+     like the other area brushes, so scribbling over the same ground reads as
+     one surface being darkened instead of a heap of separate marks. */
+  sketch: { flat:0.34, square:0.00, taper:0, tip:0, caps:true, wide:1.15, glow:0,
+            paint:1, grit:1, tone:0.5, pressure:'opacity' },
   /* tapered / pointy tip */
   taper:  { flat:1.00, square:0.00, taper:9, tip:0.04, caps:true, wide:1.00, glow:0 },
   /* square tip / flat: blocky and uniform, for structure */
@@ -273,6 +319,11 @@ function shadeAt(stroke, i, arc){
       rMul *= tip + (1-tip)*Math.min(1, fromEnd/L);
     }
   }
+  /* A BRUSH THAT BUILDS UP cannot lay full strength in one pass, or a second
+     pass over the same ground would have nowhere to go. `tone` is how much of
+     the chosen opacity a single pass deposits; the rest arrives by going over
+     it again, which is how shading with a pencil actually works. */
+  if(cfg.tone !== undefined) alpha *= cfg.tone;
   return { radius: stroke.baseRadius*rMul, alpha: alpha, lift: lift };
 }
 

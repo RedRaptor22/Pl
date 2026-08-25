@@ -2022,7 +2022,7 @@ function run(W){
   group('Brushes');
   reset();
   var names = Object.keys(P.BRUSH);
-  ck('six brush profiles are defined', names.length === 6, names.join(', '));
+  ck('seven brush profiles are defined', names.length === 7, names.join(', '));
 
   /* No two brushes may be the same brush wearing another name — that is what
      the old ten-entry set was: `pencil` was round at 0.7x and `chisel`,
@@ -2171,6 +2171,123 @@ function run(W){
      secWide.wideMM > secSquare.wideMM && secWide.wideMM > secPen.wideMM,
      [secPen.wideMM, secTaper.wideMM, secSquare.wideMM, secCube.wideMM, secWide.wideMM]
        .map(function(x){ return x.toFixed(0); }).join(' / ') + 'mm across');
+  /* ---- the sketch pencil ----
+     A chisel edge lying along the surface, laid down at part strength through
+     a paper tooth, so going over the same ground darkens it. */
+  var secSketch = nibSection('sketch');
+  /* `corner` is the furthest point of the outline over the nearest, so for a
+     FLATTENED section it already equals the aspect ratio however round the
+     section is - a squared-off one pushes its corners out by a further root
+     two on top of that. Comparing the two is what separates a soft chisel
+     from a hard one; comparing corner against 1 would only ever have been
+     true for a circle. */
+  var sketchRatio = secSketch.wideMM / secSketch.thinMM;
+  ck('the sketch pencil is a flattened chisel, not a rod',
+     sketchRatio > 2.2 && sketchRatio < 4,
+     'ratio ' + sketchRatio.toFixed(1) + ':1');
+  ck('...with a rounded edge rather than a squared-off one',
+     secSketch.corner < sketchRatio * 1.15 &&
+     secSquare.corner > (secSquare.wideMM/secSquare.thinMM) * 1.2,
+     'pencil corners ' + secSketch.corner.toFixed(2) + 'x vs its ' +
+     sketchRatio.toFixed(2) + ':1 section; rectangle ' +
+     secSquare.corner.toFixed(2) + 'x vs ' +
+     (secSquare.wideMM/secSquare.thinMM).toFixed(2) + ':1');
+  ck('...and it does not taper to a point like the tapered brush',
+     secSketch.endOverMid > 0.9,
+     (secSketch.endOverMid*100).toFixed(0) + '% at the end');
+
+  /* GRIT AND BUILD-UP, measured off the framebuffer. A wall painted straight
+     on, scanned across the mark: the pencil should show many tone levels where
+     a pen shows one flat value, and should DARKEN as passes accumulate while
+     the pen cannot get darker than opaque. */
+  function pencilBand(brush18, passes18){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof18 = [];
+    for(var q18=0;q18<=16;q18++) prof18.push({x:CX-240+480*(q18/16), y:CY});
+    pen(prof18);
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = brush18; P.TOOL.sizeMM = 60; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#2fbf55');
+    for(var k18=0;k18<passes18;k18++){
+      var col18 = [];
+      for(q18=0;q18<=10;q18++) col18.push({x:CX-160+q18*32, y:CY});
+      pen(col18);
+    }
+    P.Guides.setActive(null);
+    P.renderer.render(P.scene, P.cam());
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpP = P.viewport(), buf18 = new W.Uint8Array(4*700);
+    gl.readPixels(120, Math.round((vpP.h - CY)*dpr), 700, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf18);
+    /* the unpainted ground, read from the edge of the same scanline */
+    var bg18 = buf18[1];
+    var seen18 = {}, n18 = 0, sum18 = 0;
+    for(var t18=0;t18<700;t18++){
+      var r18 = buf18[t18*4], g18 = buf18[t18*4+1], b18 = buf18[t18*4+2];
+      if(g18 > r18+12 && b18 < 200){
+        seen18[g18] = 1; n18++; sum18 += Math.abs(g18 - bg18);
+      }
+    }
+    /* HOW FAR THE MARK HAS MOVED FROM THE GROUND, not the raw channel. Paint
+       laid on a dark ground raises the green channel and on a light one lowers
+       it, so a test that assumed a direction passed or failed on the theme
+       rather than on the brush. */
+    return { painted:n18, tones:Object.keys(seen18).length,
+             strength: sum18/(n18 || 1) };
+  }
+  var gritty18 = pencilBand('sketch', 1), plain18 = pencilBand('pen', 1);
+  ck('the pencil lays down a gritty tone, where the pen lays a flat one',
+     gritty18.painted > 200 && plain18.painted > 200 &&
+     gritty18.tones >= 4 && gritty18.tones > plain18.tones,
+     gritty18.tones + ' tone levels against the pen\'s ' + plain18.tones);
+
+  var p1 = pencilBand('sketch', 1).strength,
+      p2 = pencilBand('sketch', 2).strength,
+      p4 = pencilBand('sketch', 4).strength;
+  var q1 = pencilBand('pen', 1).strength, q4 = pencilBand('pen', 4).strength;
+  ck('going over the pencil again darkens it',
+     p2 > p1 + 2 && p4 > p2 + 2,
+     'strength ' + p1.toFixed(1) + ' -> ' + p2.toFixed(1) + ' -> ' + p4.toFixed(1) +
+     ' over 1, 2 and 4 passes');
+  ck('...while an opaque brush cannot get darker than it already is',
+     Math.abs(q4 - q1) < 1.5,
+     'pen ' + q1.toFixed(1) + ' -> ' + q4.toFixed(1));
+
+  /* PRESSURE drives tone for this brush and nothing else - but only when the
+     pressure toggle is on, exactly like every other brush. */
+  function targetFor(on18, chosen18){
+    reset();
+    P.TOOL.brush = 'sketch'; P.TOOL.pressureOn = on18;
+    P.TOOL.pressureTarget = chosen18;
+    pen([{x:CX-100,y:CY},{x:CX,y:CY},{x:CX+100,y:CY}]);
+    return P.Strokes.list[0] && P.Strokes.list[0].pressureTarget;
+  }
+  ck('the pencil takes pressure as tone, whatever else is selected',
+     targetFor(true, 'size') === 'opacity' && targetFor(true, 'both') === 'opacity',
+     'with size chosen -> ' + targetFor(true, 'size'));
+  ck('...and ignores pressure entirely when the toggle is off',
+     targetFor(false, 'size') === 'none',
+     'toggle off -> ' + targetFor(false, 'size'));
+  /* a brush WITHOUT an opinion still follows the global choice */
+  (function(){
+    reset();
+    P.TOOL.brush = 'pen'; P.TOOL.pressureOn = true; P.TOOL.pressureTarget = 'size';
+    pen([{x:CX-100,y:CY},{x:CX,y:CY},{x:CX+100,y:CY}]);
+    ck('...and other brushes still follow whatever you picked',
+       P.Strokes.list[0].pressureTarget === 'size',
+       'pen -> ' + P.Strokes.list[0].pressureTarget);
+  })();
+
+  /* the retired `pencil` name still means the old round nib, not this */
+  ck('the old "pencil" name still resolves to the pen, not the sketch pencil',
+     P.brushName('pencil') === 'pen', 'pencil -> ' + P.brushName('pencil'));
+
   P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
   reset();
 
