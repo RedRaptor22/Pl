@@ -120,6 +120,11 @@ function penMove(e){
       penTapPending.moved = true;
       cancelHold();
     }
+    /* once a select press has moved it is a SWEEP, picking up every curve it
+       crosses. The tap is still the tap while it holds still. */
+    if(penTapPending.moved && TOOL.mode === 'select'){
+      Tools.sweepSelect(e.clientX, e.clientY, penTapPending);
+    }
     return;
   }
   if(holdOrigin && Math.hypot(e.clientX-holdOrigin.x, e.clientY-holdOrigin.y) > HOLD_SLOP) cancelHold();
@@ -144,8 +149,11 @@ function penEnd(e){
   try{ el.releasePointerCapture(e.pointerId); }catch(err){}
   if(penTapPending){
     var tp = penTapPending; penTapPending = null;
+    if(tp.moved && TOOL.mode === 'select'){ Tools.endSweepSelect(); return; }
     if(!tp.moved){
-      if(TOOL.mode === 'select') Tools.tapSelect(tp.x, tp.y, e.shiftKey);
+      /* a tap ADDS rather than replacing; there is no modifier key on a
+         tablet, and picking two curves has to be possible without one */
+      if(TOOL.mode === 'select') Tools.tapSelect(tp.x, tp.y, true);
       else if(TOOL.mode === 'loft'){
         Tools.loftPick(tp.x, tp.y);
         P.onSceneChange();

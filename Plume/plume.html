@@ -61,8 +61,11 @@
   #stage{position:fixed;inset:0;width:100%;height:100%;touch-action:none;display:block;}
 
   #overlay{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:4;}
-  #lassoPath{fill:rgba(91,157,255,.14);stroke:var(--blue);stroke-width:1.5;
-    stroke-dasharray:6 4;display:none;}
+  /* the loop has to read at arm's length on a tablet, so it is drawn a little
+     heavier than a desktop hairline and carries a soft fill to show the AREA
+     it will take, not just the path the hand took */
+  #lassoPath{fill:rgba(91,157,255,.18);stroke:var(--blue);stroke-width:2.5;
+    stroke-dasharray:8 5;stroke-linejoin:round;display:none;}
 
   /* 4 overlay · 5 chrome · 20 sheets · 28 docked · 30 modal · 40 walkthrough
      50 toast · 60 tooltip */

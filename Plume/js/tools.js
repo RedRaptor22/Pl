@@ -1481,18 +1481,22 @@ function sample(x, y){
 /* ==========================================================================
    Selection  (A.9 mask applies)
    ========================================================================== */
+/* TAPPING ADDS. `additive` used to come from the shift key, which a tablet
+   does not have, so every tap threw away what you had picked and there was no
+   way to select two curves by tapping at all. A tap on a curve now toggles it
+   in or out of the selection; a tap on empty space clears, which is the only
+   gesture that needs to mean "start again". */
 Tools.tapSelect = function(x, y, additive){
+  if(additive === undefined) additive = true;
   var hit = S.hitTest(x, y);
   if(!hit){
-    if(!additive){
-      var had = S.selection.slice();
-      if(had.length){
-        P.History.run({
-          label:'deselect',
-          redo: function(){ S.clearSelection(); },
-          undo: function(){ for(var i=0;i<had.length;i++) S.setSelected(had[i], true); }
-        });
-      }
+    var had = S.selection.slice();
+    if(had.length){
+      P.History.run({
+        label:'deselect',
+        redo: function(){ S.clearSelection(); },
+        undo: function(){ for(var i=0;i<had.length;i++) S.setSelected(had[i], true); }
+      });
     }
     return null;
   }
@@ -1518,6 +1522,70 @@ Tools.tapSelect = function(x, y, additive){
   P.onSceneChange();
   return st;
 };
+
+/* SWEEPING PICKS UP EVERYTHING IT CROSSES.
+   Tapping curve after curve is fine for two and tedious for twenty, and a
+   selection is usually a run of neighbouring strokes - the ones you just drew.
+   Dragging over them adds each in turn. It shares the tap's gesture: the press
+   is a tap until it moves, and only then does this take over, so one gesture
+   serves both without a mode to choose between them.
+
+   Strokes are marked as they are crossed, for feedback, and the whole sweep is
+   ONE history step - undoing a sweep should not walk back through it curve by
+   curve. */
+var sweepSel = null;
+
+var SWEEP_STEP_PX = 4;
+
+Tools.sweepSelect = function(x, y, origin){
+  /* the sweep starts where the PRESS did, not where the first move landed:
+     a curve sitting right under the finger at the start was otherwise the one
+     stroke a sweep across four reliably missed */
+  if(!sweepSel){
+    sweepSel = { before: S.selection.slice(), added: [],
+                 last: origin ? {x:origin.x, y:origin.y} : null };
+  }
+  /* ALONG THE SEGMENT, not just at the point. A pen crossing a thin curve
+     covers it in a fraction of a frame: sampling only where the pointer landed
+     picked up one stroke in four when sweeping across strokes a few pixels
+     wide. Walking the gap between this sample and the last catches what the
+     hand actually passed over. */
+  var from = sweepSel.last || {x:x, y:y};
+  var dx = x - from.x, dy = y - from.y;
+  var steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / SWEEP_STEP_PX));
+  for(var i=1;i<=steps;i++){
+    var hit = S.hitTest(from.x + dx*(i/steps), from.y + dy*(i/steps));
+    if(!hit) continue;
+    var st = hit.stroke;
+    if(!st.selected){
+      S.setSelected(st, true);
+      sweepSel.added.push(st);
+      P.onSceneChange();
+    }
+  }
+  sweepSel.last = {x:x, y:y};
+  return sweepSel.added.length;
+};
+
+Tools.endSweepSelect = function(){
+  var sw = sweepSel; sweepSel = null;
+  if(!sw || !sw.added.length) return 0;
+  var after = S.selection.slice();
+  P.History.push({
+    label: 'select',
+    redo: function(){
+      S.clearSelection();
+      for(var i=0;i<after.length;i++) S.setSelected(after[i], true);
+    },
+    undo: function(){
+      S.clearSelection();
+      for(var i=0;i<sw.before.length;i++) S.setSelected(sw.before[i], true);
+    }
+  });
+  P.onSceneChange();
+  return sw.added.length;
+};
+Tools.sweepingSelection = function(){ return !!sweepSel; };
 
 /* FACT (A.5): Select tool + long-press on the guide turns it translucent green
    and hands it to the joystick. */
@@ -1616,6 +1684,21 @@ Tools.loftPick = function(x, y){
   Tools.loftPreview();
   return loftSel.length;
 };
+/* LOFT TAKES THE SELECTION YOU ALREADY MADE.
+   It used to be the other way round - choose Loft, then pick curves with it -
+   which meant the selection you had in hand was thrown away at the door and
+   made again with a different tool. Entering Loft now adopts whatever is
+   selected, so the order is the one you would expect: pick the curves, then
+   say what to do with them. Tapping more curves still adds and removes them. */
+Tools.loftAdopt = function(){
+  if(loftSel.length) return loftSel.length;        // already staging
+  var sel = S.selection.slice();
+  if(sel.length < 2) return 0;
+  for(var i=0;i<sel.length;i++) loftSel.push(sel[i]);
+  Tools.loftPreview();
+  return loftSel.length;
+};
+
 Tools.loftCount = function(){ return loftSel.length; };
 Tools.loftClear = function(){
   for(var i=0;i<loftSel.length;i++) S.setSelected(loftSel[i], false);

@@ -45,7 +45,12 @@ P.lassoPreview = function(pts){
   if(!lassoPath || !pts || pts.length < 2){ return; }
   var d = 'M' + pts.map(function(p){ return p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join('L') + 'Z';
   lassoPath.setAttribute('d', d);
-  lassoPath.style.display = '';
+  /* 'block', not ''. The stylesheet carries `display:none` for the resting
+     state, and clearing the INLINE style just lets that rule apply again - so
+     the loop was drawn on an element that could never show it. The path had a
+     `d` and a display the whole time, which is why this looked like it worked
+     from the outside. */
+  lassoPath.style.display = 'block';
 };
 P.clearLasso = function(){
   if(!lassoPath) lassoPath = document.getElementById('lassoPath');
@@ -226,12 +231,16 @@ P.setTool = function(mode){
   /* Liquify works ON the selection — "select the curves you want to modify
      and tap Liquify" — so it is the one tool you can leave Select for without
      losing what you just picked. */
-  if(TOOL.mode === 'select' && mode !== 'select' && mode !== 'liquify'){
+  if(TOOL.mode === 'select' && mode !== 'select' && mode !== 'liquify' &&
+     mode !== 'loft'){
     S.clearSelection();
     if(G.active) G.setSelected(G.active, false);
   }
   TOOL.mode = mode;
 
+  /* Loft works ON the selection, the way Liquify does: whatever is picked when
+     you reach for it is what gets lofted. */
+  if(mode === 'loft') Tools.loftAdopt();
   if(mode === 'prim') Tools.primPreview(P.UI ? P.UI.primKind : 'cube',
                                         P.UI ? P.UI.primSeg : 24,
                                         P.UI ? P.UI.primTaper : 1);

@@ -2226,6 +2226,99 @@ function run(W){
      Object.keys(P.BRUSH).length + ' brushes');
   P.TOOL.brush = 'pen'; P.UI.refresh();
 
+  /* ================= selecting ================= */
+  group('Select — tapping, sweeping, lassoing');
+
+  function fourStrokes24(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof24 = [];
+    for(var q24=0;q24<=12;q24++) prof24.push({x:CX-220+440*(q24/12), y:CY});
+    pen(prof24);
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false; P.TOOL.sizeMM = 16;
+    for(var k24=0;k24<4;k24++){
+      pen([{x:CX-170+k24*95, y:CY-110},{x:CX-170+k24*95, y:CY},
+           {x:CX-170+k24*95, y:CY+110}]);
+    }
+    P.setTool('select');
+    P.Strokes.clearSelection();
+    return P.Strokes.list.slice();
+  }
+
+  /* A TAP ADDS. There is no modifier key on a tablet, so a tap that replaced
+     the selection left no way to pick two curves by tapping at all. */
+  fourStrokes24();
+  P.Tools.tapSelect(CX-170, CY, true);
+  var tap1 = P.Strokes.selection.length;
+  P.Tools.tapSelect(CX-75, CY, true);
+  var tap2 = P.Strokes.selection.length;
+  ck('tapping a second curve keeps the first',
+     tap1 === 1 && tap2 === 2, tap1 + ' then ' + tap2 + ' selected');
+  P.Tools.tapSelect(CX-75, CY, true);
+  ck('...and tapping it again takes it back out',
+     P.Strokes.selection.length === 1, P.Strokes.selection.length + ' selected');
+  P.Tools.tapSelect(CX, CY+240, true);
+  ck('...while a tap on empty space clears',
+     P.Strokes.selection.length === 0, P.Strokes.selection.length + ' selected');
+
+  /* SWEEPING picks up everything the hand crossed, including the curve under
+     the press and any the sampling would otherwise have stepped over. */
+  fourStrokes24();
+  penDown(CX-200, CY);
+  for(var q25=1;q25<=24;q25++) penMoveTo(CX-200+q25*17, CY);
+  penUpAt(CX+208, CY);
+  ck('sweeping across curves selects every one it crossed',
+     P.Strokes.selection.length === 4,
+     P.Strokes.selection.length + ' of 4, sampled every 17px across 16mm curves');
+  P.History.undo();
+  ck('...and the whole sweep undoes in one step',
+     P.Strokes.selection.length === 0,
+     P.Strokes.selection.length + ' left selected');
+
+  /* THE LASSO IS VISIBLE. The stylesheet holds display:none for the resting
+     state, and clearing the inline style let that rule apply again - so the
+     loop had a path and a display the whole time and still never showed. */
+  fourStrokes24();
+  P.setTool('lasso');
+  var lassoEl = D.getElementById('lassoPath');
+  penDown(CX-230, CY-150);
+  var shownMid = null;
+  [[CX+230,CY-150],[CX+230,CY+150],[CX-230,CY+150],[CX-230,CY-150]]
+    .forEach(function(pt24, i24){
+      penMoveTo(pt24[0], pt24[1]);
+      if(i24 === 1){
+        shownMid = { display: W.getComputedStyle(lassoEl).display,
+                     d: (lassoEl.getAttribute('d')||'').length };
+      }
+    });
+  ck('the lasso loop is drawn on screen while you drag it',
+     shownMid.display !== 'none' && shownMid.d > 10,
+     'display ' + shownMid.display + ', path of ' + shownMid.d + ' chars');
+  penUpAt(CX-230, CY-150);
+  ck('...it takes what it enclosed, and clears itself away',
+     P.Strokes.selection.length === 4 &&
+     W.getComputedStyle(lassoEl).display === 'none',
+     P.Strokes.selection.length + ' selected, then ' +
+     W.getComputedStyle(lassoEl).display);
+
+  /* LOFT TAKES THE SELECTION rather than asking for it again */
+  fourStrokes24();
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  P.Strokes.setSelected(P.Strokes.list[2], true);
+  var loftBefore = P.Strokes.selection.length;
+  P.setTool('loft');
+  ck('choosing Loft adopts the curves already selected',
+     loftBefore === 2 && P.Tools.loftCount() === 2 && !!P.Tools.loftPreview(),
+     loftBefore + ' selected became ' + P.Tools.loftCount() + ' staged');
+  P.Tools.stagedCancel();
+  P.setTool('draw');
+  reset();
+
   /* ================= hover preview ================= */
   group('Hover preview — the nib you are about to draw with');
 
