@@ -2343,6 +2343,127 @@ function run(W){
   P.LIGHT.color.set('#ffffff'); P.applyLight();
   reset();
 
+  /* ================= post-processing ================= */
+  group('Post — depth of field, grain, pixelation');
+
+  /* Tools.begin resets the draw plane to the pivot when no guide is active,
+     so you cannot ask to draw AT a depth. Draw them together, then push them
+     apart along the view, which is the only way this scene has real depth in
+     it - and the reason a first pass at this check found DOF doing nothing. */
+  function threeDepths(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.autoGuide = false;
+    P.VIEW.pinned = true; P.VIEW.pivot.set(0,0,0);
+    P.VIEW.theta = 0.35; P.VIEW.phi = 1.2; P.VIEW.radius = 3.0; P.applyCamera();
+    P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 55; P.TOOL.opacity = 1;
+    var cols28 = ['#d9534f','#4a90d9','#e8c34a'], k28, i28;
+    for(k28=0;k28<3;k28++){
+      P.TOOL.color.set(cols28[k28]);
+      var c28 = [];
+      for(i28=0;i28<=14;i28++){
+        var t28 = i28/14*Math.PI*2;
+        c28.push({x:CX-150+k28*150+Math.cos(t28)*48, y:CY-40+Math.sin(t28)*48});
+      }
+      pen(c28);
+    }
+    var fwd28 = P.cam().getWorldDirection(new THREE.Vector3());
+    [-1.1, 0, 1.1].forEach(function(dz28, j28){
+      var st28 = P.Strokes.list[j28];
+      if(!st28 || !dz28) return;
+      for(var q28=0;q28<st28.pts.length;q28++) st28.pts[q28].p.addScaledVector(fwd28, dz28);
+      P.Strokes.freezeFrames(st28); P.Strokes.rebuild(st28);
+    });
+    P.Guides.setActive(null);
+    P.ENV.render = true;
+    P.FX.dofOn = false; P.FX.grainOn = false; P.FX.pixelOn = false;
+  }
+  /* how much a block of the image differs between two renders */
+  function frameDiff(setup28){
+    function grab(){
+      if(!P.renderWithFX(P.scene, P.cam())) P.renderer.render(P.scene, P.cam());
+      var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+      var vpF = P.viewport();
+      var w28 = Math.round(300*dpr), h28 = Math.round(200*dpr);
+      var b28 = new W.Uint8Array(4*w28*h28);
+      gl.readPixels(Math.round((CX-260)*dpr), Math.round((vpF.h - CY - 60)*dpr),
+                    w28, h28, gl.RGBA, gl.UNSIGNED_BYTE, b28);
+      return b28;
+    }
+    var before28 = grab();
+    setup28();
+    var after28 = grab();
+    var diff = 0;
+    for(var q=0;q<before28.length;q+=4){
+      if(Math.abs(before28[q] - after28[q]) > 6) diff++;
+    }
+    return diff / (before28.length/4);
+  }
+
+  threeDepths();
+  ck('depth of field blurs what is not at the orbit point',
+     frameDiff(function(){ P.FX.dofOn = true; P.FX.fstop = 1.8; }) > 0.04,
+     'rings sit at 1.9, 3.0 and 4.1 from a camera focused at 3.0');
+
+  /* THE SHARP ONE MUST STAY SHARP - a blur that ate the whole image would pass
+     the check above just as well. Sharpness measured as LOCAL CONTRAST: a
+     crisp edge steps between ink and ground in a pixel or two, a defocused one
+     ramps across a dozen. Trying to classify each pixel as ink or ground
+     instead put 9 soft pixels on the sharp ring and 7 on the blurred one -
+     three ink colours, their shadows and a lilac ground do not sort into two
+     buckets. */
+  (function(){
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpS = P.viewport();
+    if(!P.renderWithFX(P.scene, P.cam())) P.renderer.render(P.scene, P.cam());
+    function contrast(x0, wide){
+      var w29 = Math.round(wide*dpr), h29 = Math.round(190*dpr);
+      var b = new W.Uint8Array(4*w29*h29);
+      gl.readPixels(Math.round(x0*dpr), Math.round((vpS.h - CY - 60)*dpr), w29, h29,
+                    gl.RGBA, gl.UNSIGNED_BYTE, b);
+      var sum = 0, n = 0;
+      for(var y=0;y<h29;y++){
+        for(var x=1;x<w29;x++){
+          var i = (y*w29 + x)*4, j = i - 4;
+          sum += Math.abs(b[i] - b[j]); n++;
+        }
+      }
+      return sum / Math.max(n,1);
+    }
+    var nearBlur = contrast(CX-350, 220);      // the ring pushed towards us
+    var atFocus  = contrast(CX-80,  200);      // the one on the orbit point
+    ck('...while what is at the orbit point stays sharp',
+       atFocus > nearBlur * 1.6,
+       'edge contrast ' + atFocus.toFixed(2) + ' at the focused ring against ' +
+       nearBlur.toFixed(2) + ' at the near one');
+  })();
+  P.FX.dofOn = false;
+
+  threeDepths();
+  ck('grain lays noise over the image',
+     frameDiff(function(){ P.FX.grainOn = true; P.FX.grain = 80; }) > 0.25,
+     'at 80% level');
+  P.FX.grainOn = false;
+
+  threeDepths();
+  ck('pixelation quantises it to blocks',
+     frameDiff(function(){ P.FX.pixelOn = true; P.FX.pixel = 10; }) > 0.03,
+     'at a 10px block');
+  P.FX.pixelOn = false;
+
+  /* NONE OF IT OUTSIDE RENDER MODE. The pass is a cost you ask for. */
+  threeDepths();
+  P.FX.dofOn = true; P.FX.grainOn = true; P.FX.pixelOn = true;
+  P.ENV.render = false;
+  ck('no effect runs outside render mode',
+     P.fxActive() === false &&
+     P.renderWithFX(P.scene, P.cam()) === false,
+     'render mode off, so the pass declines and the frame goes straight out');
+  P.ENV.render = true;
+  ck('...and they all come back with it', P.fxActive() === true);
+  P.FX.dofOn = false; P.FX.grainOn = false; P.FX.pixelOn = false;
+  P.ENV.render = false;
+  reset();
+
   /* ================= ground shadow ================= */
   group('Ground shadow — the sketch thrown down the light');
 

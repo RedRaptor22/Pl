@@ -462,6 +462,12 @@ UI.init = function(){
   on($('lightPick'), 'input', function(){
     P.LIGHT.color.set(this.value); P.applyLight(); UI.refresh();
   });
+  on($('optDof'),   'click', function(){ P.FX.dofOn   = !P.FX.dofOn;   UI.refresh(); });
+  on($('optGrain'), 'click', function(){ P.FX.grainOn = !P.FX.grainOn; UI.refresh(); });
+  on($('optPixel'), 'click', function(){ P.FX.pixelOn = !P.FX.pixelOn; UI.refresh(); });
+  dragValue($('fstopVal'),  'fstop');
+  dragValue($('grainVal'),  'grainLevel');
+  dragValue($('pixelVal'),  'pixelSize');
   dragValue($('lightIntVal'), 'lightInt');
   dragValue($('lightAmbVal'), 'lightAmb');
   bindLightPad($('lightPad'));
@@ -700,7 +706,13 @@ var LQ = {
   lightInt:   { get:function(){ return P.LIGHT.intensity*100; },
                 set:function(v){ P.LIGHT.intensity = P.clamp(v/100, 0, 3); P.applyLight(); } },
   lightAmb:   { get:function(){ return P.LIGHT.ambient*100; },
-                set:function(v){ P.LIGHT.ambient = P.clamp(v/100, 0, 1); P.applyLight(); } }
+                set:function(v){ P.LIGHT.ambient = P.clamp(v/100, 0, 1); P.applyLight(); } },
+  fstop:      { get:function(){ return P.FX.fstop; },
+                set:function(v){ P.FX.fstop = P.clamp(v, 1.4, 22); }, log:true },
+  grainLevel: { get:function(){ return P.FX.grain; },
+                set:function(v){ P.FX.grain = Math.round(P.clamp(v, 0, 100)); } },
+  pixelSize:  { get:function(){ return P.FX.pixel; },
+                set:function(v){ P.FX.pixel = Math.round(P.clamp(v, 1, 40)); }, log:true }
 };
 
 /* THE LIGHT PAD. Sideways turns the key light around the sketch, up and down
@@ -1465,6 +1477,12 @@ UI.refresh = function(){
   if($('lightPick'))   $('lightPick').value = '#' + P.LIGHT.color.getHexString();
   setOn($('optToon'), P.LIGHT.toon);
   setOn($('optRender'), P.ENV.render);
+  setOn($('optDof'),   P.FX.dofOn);
+  setOn($('optGrain'), P.FX.grainOn);
+  setOn($('optPixel'), P.FX.pixelOn);
+  if($('fstopVal')) $('fstopVal').textContent = 'f/' + P.FX.fstop.toFixed(1);
+  if($('grainVal')) $('grainVal').textContent = Math.round(P.FX.grain) + '%';
+  if($('pixelVal')) $('pixelVal').textContent = Math.round(P.FX.pixel) + 'px';
   setOn($('optShadow'), P.ENV.groundShadow);
   placeLightDot();
 

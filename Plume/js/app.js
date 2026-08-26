@@ -282,7 +282,8 @@ function tick(now){
   P.tickView(now);
   P.updatePivotMarker();
   P.updateGroundShadow();         // cached; only redrawn when the light or the sketch moves
-  P.renderer.render(P.scene, P.cam());
+  /* the post pass renders the scene itself when it is on, and says so */
+  if(!P.renderWithFX(P.scene, P.cam())) P.renderer.render(P.scene, P.cam());
   requestAnimationFrame(tick);
 }
 

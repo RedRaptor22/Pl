@@ -755,6 +755,16 @@
     <div class="row"><label class="lab grow">Lighting</label>
       <button id="optToon" data-tip="Toon shading — bands instead of a gradient.<br><i>Shaded material only.</i>">Toon</button>
     </div>
+    <div class="row"><label class="lab grow">Effects</label></div>
+    <div class="igrid">
+      <button id="optDof"   data-tip="Depth of field — what you orbit around stays sharp.<br><i>Render mode only.</i>">DOF</button>
+      <button id="optGrain" data-tip="Film grain over the image">Grain</button>
+      <button id="optPixel" data-tip="Pixelate the image">Pixel</button>
+    </div>
+    <div class="row"><label class="lab grow">F-stop</label><span class="val" id="fstopVal">f/5.6</span></div>
+    <div class="row"><label class="lab grow">Grain level</label><span class="val" id="grainVal">35%</span></div>
+    <div class="row"><label class="lab grow">Block size</label><span class="val" id="pixelVal">4px</span></div>
+
     <div class="row lightRow">
       <div id="lightPad" data-tip="Light direction — slide sideways to turn it, up and down to raise it"><div id="lightDot"></div></div>
       <div class="col grow">
@@ -938,6 +948,7 @@
 <script src="js/guides.js"></script>
 <script src="js/import.js"></script>
 <script src="js/export.js"></script>
+<script src="js/fx.js"></script>
 <script src="js/doc.js"></script>
 <script src="js/tools.js"></script>
 <script src="js/app.js"></script>
