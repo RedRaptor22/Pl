@@ -202,19 +202,26 @@ var BRUSH = P.BRUSH = {
             paint:1, grit:1, tone:0.5, pressure:'opacity' },
   /* tapered / pointy tip */
   taper:  { flat:1.00, square:0.00, taper:9, tip:0.04, caps:true, wide:1.00, glow:0 },
-  /* square tip / flat: blocky and uniform, for structure */
+  /* square tip / flat: blocky and uniform, for structure. `paint` for the same
+     reason the ribbon has it — see the note below. */
   rectangle: { flat:1.00, square:1.00, taper:0, tip:0, caps:true, wide:1.60, glow:0,
-               halfWidthMM:11.2 },
+               halfWidthMM:11.2, paint:1 },
   /* cube: an EXTRUSION FROM the surface. Same hard square section, but it
      stands on the stroke rather than straddling it (rise), and the size slider
      is the length it stands off by — geometry to deform later, not a line. */
   cube:   { flat:1.00, square:1.00, taper:0, tip:0,    caps:true, wide:1.00, glow:0,
-            rise:1 },
+            rise:1, paint:1 },
+  /* flat: the ribbon whose thinness scales with its width, so it is a SHEET at
+     every size — 0.04 puts a 100mm nib at 13mm thick and a 20mm nib at 3mm. */
+  flat:   { flat:0.04, square:1.00, taper:0, tip:0,    caps:true, wide:3.40, glow:0,
+            paint:1 },
   /* FACT: the "Wide Brush ... paint larger areas faster" (1.5), as a ribbon.
      `paint` shades it by the surface it lies on instead of by its own facets —
-     see writeRing. A sheet, not a slab: 0.04 puts a 100mm nib at 13mm thick. */
+     see writeRing. Same section as `flat`, but always 2mm thick however wide
+     it gets: a skin over the guide rather than a slab that fattens with the
+     slider. */
   wide:   { flat:0.04, square:1.00, taper:0, tip:0,    caps:true, wide:3.40, glow:0,
-            paint:1 },
+            paint:1, thickMM:2 },
   /* FACT (C.5): "a Glow material enables glowing lines" */
   glow:   { flat:1.00, square:0.00, taper:6, tip:0.10, caps:true, wide:1.30, glow:1 }
 };
@@ -226,7 +233,11 @@ P.BRUSH_ALIAS = {
   round:  'pen',      // identical
   pencil: 'pen',      // was round at 0.7x
   ink:    'taper',    // was round with tapered ends
-  flat:   'rectangle',  // Feather names this brush "square tip / flat"
+  /* NOTE: `flat` used to alias the rectangle, on the strength of Feather
+     naming that brush "square tip / flat". It is a brush in its own right now
+     - the ribbon whose thinness scales - so the alias is gone and a sketch
+     saved with the retired name opens as the ribbon rather than the hard nib
+     it was drawn with. Nothing in a document distinguishes the two. */
   marker: 'rectangle',  // hard nib, 1.7x -> hard square nib, 1.6x
   chisel: 'rectangle',  // hard blade -> the blocky nib
   square: 'rectangle',  // renamed: its section is no longer a square
@@ -357,6 +368,19 @@ function nibHalfWidth(stroke, shadeRadius){
 }
 S.nibHalfWidth = nibHalfWidth;
 
+/* AND HOW THICK IT IS, off the surface.
+   Normally that is the shaded radius times the section's flatness, so a wider
+   nib is a proportionally thicker one. A brush with thickMM set holds its
+   thickness instead: the ribbon stays a 2mm skin over the guide however far
+   the slider is pushed, where the same section left to scale becomes a slab
+   13mm thick at a 100mm nib. Everything that needs the off-surface
+   measurement asks here — the ring, and the hover preview. */
+function nibHalfThick(stroke, shadeRadius){
+  var cfg = cfgOf(stroke);
+  return cfg.thickMM ? cfg.thickMM * P.MM * 0.5 : shadeRadius * cfg.flat;
+}
+S.nibHalfThick = nibHalfThick;
+
 function sectionPoint(ang, square, out){
   var c = Math.cos(ang), s = Math.sin(ang);
   if(square <= 0){ out.x = c; out.y = s; return out; }
@@ -376,7 +400,7 @@ function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
   var sh = shadeAt(stroke, i, arc);
   var cfg = cfgOf(stroke);
   var rx = Math.max(nibHalfWidth(stroke, sh.radius), 1e-5);
-  var ry = Math.max(sh.radius * cfg.flat, 1e-5);
+  var ry = Math.max(nibHalfThick(stroke, sh.radius), 1e-5);
   var pt = stroke.pts[i];
   var sq = cfg.square || 0;
 
@@ -437,7 +461,21 @@ function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
 
        Only the brushes that are FOR filling do this. A pen is a tube and
        should still look like one where two of them cross. */
-    if(paintN) _nrm.copy(paintN);
+    /* `paint:1` hands EVERY vertex the surface normal, which is right for a
+       sheet: a ribbon's sides are a couple of millimetres of nothing and were
+       measurably the source of the dark line at every seam.
+
+       `paint:'top'` hands it only to the faces that already look the same way
+       the surface does, leaving the sides to light themselves.
+
+       For a brush that STANDS OFF the surface the two are a real trade, and
+       measured on eighteen overlapping strokes it goes one way: 'top' keeps
+       the cube's form but brings the seams back - 18 shades and 21 visible
+       steps against a flat 1 and 0 - because where extrusions overlap it is
+       precisely their SIDES you are looking at. The seams and the form are the
+       same shading. Flat wins here since a cube is laid down to block out
+       mass; 'top' is a word away for anyone who would rather keep the depth. */
+    if(paintN && (cfg.paint !== 'top' || _nrm.dot(paintN) > 0.5)) _nrm.copy(paintN);
 
     var o = 2 + i*seg + k;
     pos[o*3]   = pt.p.x + _dir.x + riseX;

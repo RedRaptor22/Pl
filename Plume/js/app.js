@@ -139,8 +139,9 @@ P.updateHoverCursor = function(x, y, ev){
   } else {
     var cfg = P.Strokes.cfgOf({ brush: TOOL.brush });
     var r = Tools.baseRadius() * cfg.wide;
-    rx = P.Strokes.nibHalfWidth({ brush: TOOL.brush, baseRadius: Tools.baseRadius() }, r);
-    ry = r * cfg.flat;
+    var proto = { brush: TOOL.brush, baseRadius: Tools.baseRadius() };
+    rx = P.Strokes.nibHalfWidth(proto, r);
+    ry = P.Strokes.nibHalfThick(proto, r);
     square = cfg.square || 0;
   }
   /* a cursor is small on screen and cheap either way, so a round section gets
