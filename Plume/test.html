@@ -2123,6 +2123,54 @@ function run(W){
   DD.getElementById('btnStage').click();
   ck('stage panel clears the tool rail', scan(base.concat(['stagePanel'])).length === 0,
      scan(base.concat(['stagePanel'])).join(', ') || 'clean');
+
+  /* The Scene tab grew from two rows to a dozen. Every control in it has to
+     stay reachable, and the background swatch in particular has to keep an
+     edge you can see even when it holds the panel's own colour — with no ring
+     it reads as an empty label and the setting looks like it was removed. */
+  (function sceneTab(){
+    /* the compact-layout block above unhides every sheet, so btnStage's toggle
+       parity cannot be relied on — put the panel in a known state first */
+    DD.getElementById('stagePanel').classList.remove('hidden');
+    P.UI.refresh();
+    var tab = DD.querySelector('#stageTabs [data-tab="env"]');
+    tab.click();
+    var sp = DD.getElementById('stagePanel');
+    ck('Scene tab shows the background colour picker',
+       !DD.getElementById('bodyEnv').classList.contains('hidden') &&
+       DD.getElementById('bgPick').getBoundingClientRect().width > 10);
+
+    var spb = sp.getBoundingClientRect(), spill = [];
+    var kids = DD.querySelectorAll('#bodyEnv button, #bodyEnv input, #bodyEnv .val');
+    for(var q=0;q<kids.length;q++){
+      var kb = kids[q].getBoundingClientRect();
+      if(kb.width > 0 && (kb.right > spb.right + 0.5 || kb.left < spb.left - 0.5))
+        spill.push(kids[q].id || kids[q].textContent.trim());
+    }
+    ck('no Scene control spills past the panel edge', spill.length === 0,
+       spill.join(', ') || 'clean');
+    ck('the Scene panel needs no sideways scroll', sp.scrollWidth <= sp.clientWidth,
+       sp.scrollWidth + ' <= ' + sp.clientWidth);
+
+    /* the ring is on the input, not on ::-webkit-color-swatch: the input's own
+       overflow:hidden would clip a shadow drawn inside it */
+    var ring = W.getComputedStyle(DD.getElementById('bgPick')).boxShadow;
+    ck('the background swatch carries its own ring', /\d/.test(ring) && ring !== 'none',
+       ring.slice(0, 46));
+
+    /* and it is wired to the scene, not just present */
+    var was = P.ENV.bg.getHexString();
+    var pick = DD.getElementById('bgPick');
+    pick.value = '#3366cc';
+    pick.dispatchEvent(new W.Event('input', { bubbles: true }));
+    ck('editing it repaints the background', P.ENV.bg.getHexString() === '3366cc',
+       '#' + P.ENV.bg.getHexString());
+    pick.value = '#' + was;
+    pick.dispatchEvent(new W.Event('input', { bubbles: true }));
+
+    DD.querySelector('#stageTabs [data-tab="group"]').click();
+  })();
+
   DD.getElementById('btnStage').click();
 
   ck('joystick is hidden while nothing is selected', !shown('joy'));

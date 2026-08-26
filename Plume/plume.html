@@ -138,8 +138,9 @@
     height:2px;background:var(--ink);border-radius:2px;}
 
   /* a grid of option icons, 4 across */
-  .igrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+  .igrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;}
   .igrid button{width:100%;height:40px;border-radius:12px;background:var(--panel2);}
+  .igrid.three{grid-template-columns:repeat(3,minmax(0,1fr));}
   .igrid button:hover{background:var(--panel3);}
   .igrid button.on{background:var(--active);color:var(--onActive);}
 
@@ -159,11 +160,15 @@
   input[type=range]::-moz-range-track{height:4px;background:var(--panel3);border-radius:3px;}
   input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;border:0;
     background:var(--panel);box-shadow:0 1px 4px rgba(0,0,0,.28);}
+  /* the ring lives on the input, not on ::-webkit-color-swatch: the input's own
+     overflow:hidden clips an outset shadow drawn inside it, and a swatch holding
+     the panel's own colour then has no edge at all. */
   input[type=color]{width:30px;height:30px;padding:0;border:0;border-radius:50%;
-    background:transparent;cursor:pointer;flex:0 0 auto;overflow:hidden;}
+    background:transparent;cursor:pointer;flex:0 0 auto;overflow:hidden;
+    box-shadow:0 0 0 2px var(--dim);}
   input[type=color]::-webkit-color-swatch-wrapper{padding:0;}
-  input[type=color]::-webkit-color-swatch{border:0;border-radius:50%;
-    box-shadow:0 0 0 1px var(--line);}
+  input[type=color]::-webkit-color-swatch{border:0;border-radius:50%;}
+  input[type=color]::-moz-color-swatch{border:0;border-radius:50%;}
 
   .sw{width:19px;height:19px;border-radius:50%;border:0;cursor:pointer;padding:0;
     min-height:0;flex:0 0 auto;box-shadow:0 0 0 1px var(--line);}
@@ -742,8 +747,9 @@
   </div>
 
   <div id="bodyEnv" class="col hidden">
-    <div class="row"><label class="lab grow">Background</label><input type="color" id="bgPick" value="#eceaf3"></div>
-    <div class="igrid">
+    <div class="row"><label class="lab grow">Background</label>
+      <input type="color" id="bgPick" value="#eceaf3" data-tip="Background colour — the fog and the ground follow it"></div>
+    <div class="igrid three">
       <button id="optGrid"   class="on" data-tip="Ground grid — one unit = 1000mm">Grid</button>
       <button id="optAxis"   data-tip="Global axis, RGB = XYZ">Axis</button>
       <button id="optFog"    data-tip="Fog follows the background">Fog</button>
@@ -755,16 +761,6 @@
     <div class="row"><label class="lab grow">Lighting</label>
       <button id="optToon" data-tip="Toon shading — bands instead of a gradient.<br><i>Shaded material only.</i>">Toon</button>
     </div>
-    <div class="row"><label class="lab grow">Effects</label></div>
-    <div class="igrid">
-      <button id="optDof"   data-tip="Depth of field — what you orbit around stays sharp.<br><i>Render mode only.</i>">DOF</button>
-      <button id="optGrain" data-tip="Film grain over the image">Grain</button>
-      <button id="optPixel" data-tip="Pixelate the image">Pixel</button>
-    </div>
-    <div class="row"><label class="lab grow">F-stop</label><span class="val" id="fstopVal">f/5.6</span></div>
-    <div class="row"><label class="lab grow">Grain level</label><span class="val" id="grainVal">35%</span></div>
-    <div class="row"><label class="lab grow">Block size</label><span class="val" id="pixelVal">4px</span></div>
-
     <div class="row lightRow">
       <div id="lightPad" data-tip="Light direction — slide sideways to turn it, up and down to raise it"><div id="lightDot"></div></div>
       <div class="col grow">
@@ -776,6 +772,17 @@
           <span class="val" id="lightAmbVal">66%</span></div>
       </div>
     </div>
+
+    <div class="row"><label class="lab grow">Effects</label></div>
+    <div class="igrid">
+      <button id="optDof"   data-tip="Depth of field — what you orbit around stays sharp.<br><i>Render mode only.</i>">DOF</button>
+      <button id="optGrain" data-tip="Film grain over the image">Grain</button>
+      <button id="optPixel" data-tip="Pixelate the image">Pixel</button>
+    </div>
+    <div class="row"><label class="lab grow">F-stop</label><span class="val" id="fstopVal">f/5.6</span></div>
+    <div class="row"><label class="lab grow">Grain level</label><span class="val" id="grainVal">35%</span></div>
+    <div class="row"><label class="lab grow">Block size</label><span class="val" id="pixelVal">4px</span></div>
+
   </div>
 </div>
 
