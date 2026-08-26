@@ -189,6 +189,9 @@ function run(W){
     P.History.clear(); P.TOOL.mirror = null; P.Guides.isolate = true;
     P.TOOL.sizeMM = 14; P.TOOL.eraserMM = 20;
     P.TOOL.autoGuide = false; P.TOOL.brush = 'pen';
+    /* back to the default, so a group that switched hold-to-shape off cannot
+       quietly disarm it for every group after it */
+    P.TOOL.shapeHold = true; P.TOOL.opacity = 1;
     P.VIEW.theta = 0.6; P.VIEW.phi = 1.1; P.VIEW.radius = 4; P.VIEW.roll = 0;
     P.VIEW.ortho = false; P.VIEW.focal = 50;
     P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true; P.applyCamera();
@@ -1391,6 +1394,119 @@ function run(W){
   ck('filling with no guide does nothing rather than throwing',
      none17 === null && P.Strokes.list.length === 0,
      'returned ' + none17 + ', ' + P.Strokes.list.length + ' strokes');
+  reset();
+
+  /* ================= flat shape guide ================= */
+  group('Flat shape guide — the outline you drew, facing you');
+
+  function flatGuide(pts20){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.shapeHold = false;
+    P.VIEW.ortho = true; P.VIEW.radius = 3.2; P.VIEW.pivot.set(0,0,0);
+    P.VIEW.pinned = true; P.VIEW.theta = 0; P.VIEW.phi = 0.9; P.applyCamera();
+    P.setTool('flatguide');
+    pen(pts20);
+    P.setTool('draw');
+    return P.Guides.active;
+  }
+  function ellipse20(rx, ry, n){
+    var o = [];
+    for(var a20=0; a20<=(n||32); a20++){
+      var t20 = a20/(n||32)*Math.PI*2;
+      o.push({x:CX+Math.cos(t20)*rx, y:CY+Math.sin(t20)*ry});
+    }
+    return o;
+  }
+
+  var flat = flatGuide(ellipse20(180, 120));
+  ck('a closed outline becomes a flat guide',
+     !!flat && flat.kind === 'flat' && !!flat.plane &&
+     flat.mesh.geometry.attributes.position.count > 3,
+     flat ? flat.kind + ', ' +
+       (flat.mesh.geometry.index ? flat.mesh.geometry.index.count/3 : 0) + ' triangles'
+          : 'none made');
+
+  /* IT FACES YOU. That is the whole difference from the swept guide, which
+     takes the stroke as a profile and extrudes it away along the view. */
+  var camDir20 = P.cam().getWorldDirection(new THREE.Vector3());
+  ck('...lying in the plane you drew it on, not extruded away from it',
+     Math.abs(flat.plane.normal.dot(camDir20)) > 0.999,
+     'normal against view ' + Math.abs(flat.plane.normal.dot(camDir20)).toFixed(4));
+  ck('...and it spans the shape that was drawn',
+     Math.abs(flat.plane.Lu / flat.plane.Lv - 1.5) < 0.05,
+     (flat.plane.Lu/P.MM).toFixed(0) + ' x ' + (flat.plane.Lv/P.MM).toFixed(0) +
+     'mm for a 3:2 ellipse');
+
+  /* the swept guide, drawn identically, does NOT lie in the screen plane */
+  reset();
+  P.VIEW.ortho = true; P.VIEW.radius = 3.2; P.VIEW.pivot.set(0,0,0);
+  P.VIEW.pinned = true; P.VIEW.theta = 0; P.VIEW.phi = 0.9; P.applyCamera();
+  P.setTool('guide');
+  pen(ellipse20(180, 120));
+  P.setTool('draw');
+  var swept20 = P.Guides.active;
+  ck('...where the ordinary guide extrudes along the view instead',
+     !!swept20 && !!swept20.sweep && !swept20.plane,
+     swept20 ? (swept20.sweep ? 'swept' : 'no sweep') : 'none');
+
+  /* DRAWING AND FILLING both stay inside the outline */
+  flat = flatGuide(ellipse20(180, 120));
+  P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 60; P.TOOL.opacity = 1;
+  var fillMade = P.Tools.fillGuide();
+  var gBox20 = new THREE.Box3().setFromObject(flat.mesh), pBox20 = new THREE.Box3();
+  for(var f20=0; f20<P.Strokes.list.length; f20++){
+    pBox20.union(new THREE.Box3().setFromObject(P.Strokes.list[f20].mesh));
+  }
+  var over20 = Math.max(pBox20.max.x - gBox20.max.x, gBox20.min.x - pBox20.min.x,
+                        pBox20.max.y - gBox20.max.y, gBox20.min.y - pBox20.min.y);
+  ck('a flat guide fills, and the paint stays inside the outline',
+     !!fillMade && fillMade.length > 0 && over20 < 6*P.MM,
+     fillMade.length + ' strokes, worst overflow ' + (over20/P.MM).toFixed(0) + 'mm');
+
+  /* ROWS ARE CUT BY THE SHAPE. Across an ellipse the middle row is the widest;
+     across a horseshoe a row crossing the gap must come out as TWO strokes
+     rather than one drawn straight over the hole. */
+  var lengths20 = fillMade.map(function(x){
+    var L = 0;
+    for(var q20=1;q20<x.pts.length;q20++) L += x.pts[q20].p.distanceTo(x.pts[q20-1].p);
+    return L;
+  });
+  ck('...and rows are cut to the shape, not run to its bounding box',
+     Math.max.apply(null, lengths20) > Math.min.apply(null, lengths20) * 1.15,
+     lengths20.map(function(x){ return (x/P.MM).toFixed(0); }).join(' / ') + 'mm rows');
+
+  var horse = [];
+  for(var h20=0; h20<=20; h20++){                    // outer arc, left to right
+    var ta = Math.PI * (h20/20);
+    horse.push({x:CX-Math.cos(ta)*200, y:CY-Math.sin(ta)*200});
+  }
+  for(h20=20; h20>=0; h20--){                        // inner arc, back again
+    var tb = Math.PI * (h20/20);
+    horse.push({x:CX-Math.cos(tb)*100, y:CY-Math.sin(tb)*100});
+  }
+  var uShape = flatGuide(horse);
+  P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 40; P.TOOL.opacity = 1;
+  var horseFill = P.Tools.fillGuide();
+  /* a row that crosses the opening of the horseshoe must not bridge it: with
+     more strokes than rows, some row was broken in two */
+  var rowsAcross = Math.ceil(Math.min(uShape.plane.Lu, uShape.plane.Lv) /
+                             (P.Strokes.nibHalfWidth(horseFill[0], horseFill[0].baseRadius *
+                               P.BRUSH[horseFill[0].brush].wide) * 2 * 0.9));
+  ck('a row crossing a gap in the shape comes out as two strokes',
+     horseFill.length > rowsAcross,
+     horseFill.length + ' strokes for about ' + rowsAcross + ' rows');
+
+  /* SAVE AND RELOAD */
+  var flatJson = JSON.stringify(P.Doc.serialize());
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(flatJson));
+  var back20 = P.Guides.active;
+  ck('a flat guide survives a save and reload',
+     !!back20 && back20.kind === 'flat' && !!back20.plane &&
+     Math.abs(back20.plane.Lu - uShape.plane.Lu) < 1e-4 &&
+     back20.plane.outline.length === uShape.plane.outline.length,
+     back20 ? back20.kind + ', outline of ' + back20.plane.outline.length + ' points'
+            : 'nothing came back');
   reset();
 
   /* ================= Liquify ================= */

@@ -513,6 +513,7 @@
   <symbol id="i-select" viewBox="0 0 24 24"><path d="M5.5 4.5 19 11l-5.8 1.8L11 19z"/></symbol>
   <symbol id="i-lasso" viewBox="0 0 24 24"><ellipse cx="12" cy="10" rx="8" ry="6"/><path d="M8.5 15.4c-.4 2 .6 3.4 2.2 3.9"/></symbol>
   <symbol id="i-smooth" viewBox="0 0 24 24"><path d="M3 14c3-7 6 7 9 0s6-7 9 0"/></symbol>
+  <symbol id="i-flatguide" viewBox="0 0 24 24"><path d="M4.5 8.5c2-3 6-4.5 9-3.5s5.5 4 5.5 7-2 5.5-5 6-7-.5-8.5-3-3-3.5-1-6.5z"/><path d="M8 11.5c1.5-1 3.5-1 5 0"/></symbol>
   <symbol id="i-fill" viewBox="0 0 24 24"><path d="M4.5 12.5 11 6l6.5 6.5-6.5 6.5z"/><path d="M4.5 12.5h13"/><path d="M20 14.5c1.2 1.6 1.8 2.7 1.8 3.4a1.8 1.8 0 0 1-3.6 0c0-.7.6-1.8 1.8-3.4z"/></symbol>
   <symbol id="i-erase" viewBox="0 0 24 24"><path d="M8 18 4.5 14.5 13 6l6.5 6.5-5.5 5.5z"/><path d="M4 20h16"/></symbol>
   <symbol id="i-vacuum" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><path d="M6.5 6.5 17.5 17.5"/></symbol>
@@ -629,6 +630,7 @@
 <!-- ==================== bottom context menu: guide tools ==================== -->
 <div id="ctx" class="panel">
   <button class="ico" data-tool="guide" data-tip="Draw 3D Guide — extrudes along the view direction<br><i>G</i>"><svg><use href="#i-guide"/></svg></button>
+  <button class="ico" data-tool="flatguide" data-tip="Flat Shape Guide — draw a closed outline and it fills in where you drew it, facing you<br><i>Sits at the depth of whatever is under the stroke.</i>"><svg><use href="#i-flatguide"/></svg></button>
   <button class="ico" data-tool="bend"  data-tip="Bend — redraw the sweep from another viewpoint<br><i>B</i>"><svg><use href="#i-bend"/></svg></button>
   <button class="ico" data-tool="loft"  data-tip="Loft — connect two or more curves"><svg><use href="#i-loft"/></svg></button>
   <button class="ico" data-tool="prim"  data-tip="Primitives — cube, pyramid, sphere, tube"><svg><use href="#i-solid"/></svg></button>

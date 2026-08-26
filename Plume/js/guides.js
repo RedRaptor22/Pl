@@ -361,6 +361,119 @@ G.createFromStroke = function(worldPts, viewDir, camRight, camUp){
   });
 };
 
+/* ==========================================================================
+   5b. A FLAT guide: the shape you drew, facing you
+   --------------------------------------------------------------------------
+   The ordinary guide takes your stroke as a PROFILE and extrudes it away along
+   the view, which is why a circle becomes a tube. This one takes the stroke as
+   an OUTLINE and fills it in place: what you drew is what you get, a flat sheet
+   sitting in the plane you drew it on, covering the area the loop encloses.
+
+   It is triangulated to the outline rather than built as a grid clipped to it,
+   so the edge is the curve you drew and not a staircase of cells. That costs
+   the (u,v) grid every other guide has, so the plane states its own extent and
+   carries its outline; frameOnTriangle reads both, reachAlong trims to the
+   outline, and Fill tests against it.
+   ========================================================================== */
+function planeBasisFrom(normal, camRight){
+  var n = normal.clone().normalize();
+  var r = camRight.clone().addScaledVector(n, -camRight.dot(n));
+  if(r.lengthSq() < EPS) P.perpTo(n, r);
+  r.normalize();
+  return { normal:n, right:r, up: new THREE.Vector3().crossVectors(n, r).normalize() };
+}
+
+G.createFlatFromStroke = function(worldPts, viewDir, camRight){
+  if(!worldPts || worldPts.length < 3) return null;
+  var basis = planeBasisFrom(viewDir, camRight);
+
+  /* the loop, in plane coordinates, closed */
+  var mid = new THREE.Vector3(), i;
+  for(i=0;i<worldPts.length;i++) mid.add(worldPts[i]);
+  mid.multiplyScalar(1/worldPts.length);
+
+  var d = new THREE.Vector3(), raw = [];
+  var minU = Infinity, minV = Infinity, maxU = -Infinity, maxV = -Infinity;
+  for(i=0;i<worldPts.length;i++){
+    d.subVectors(worldPts[i], mid);
+    var u = d.dot(basis.right), v = d.dot(basis.up);
+    if(raw.length){
+      var last = raw[raw.length-1];
+      if(Math.abs(u-last.u) < 1e-9 && Math.abs(v-last.v) < 1e-9) continue;
+    }
+    raw.push({u:u, v:v});
+    if(u<minU) minU=u; if(u>maxU) maxU=u;
+    if(v<minV) minV=v; if(v>maxV) maxV=v;
+  }
+  if(raw.length < 3) return null;
+  var Lu = maxU - minU, Lv = maxV - minV;
+  if(!(Lu > EPS) || !(Lv > EPS)) return null;
+
+  /* origin at the corner of the bounding box, so u and v run 0..Lu, 0..Lv and
+     read like the arc lengths every other guide hands out */
+  var origin = mid.clone()
+    .addScaledVector(basis.right, minU)
+    .addScaledVector(basis.up,    minV);
+  var outline = raw.map(function(q){ return { u:q.u-minU, v:q.v-minV }; });
+
+  var guide = newGuide('flat');
+  guide.plane = { origin: origin, right: basis.right.clone(), up: basis.up.clone(),
+                  normal: basis.normal.clone(), Lu: Lu, Lv: Lv, outline: outline };
+  rebuildFlat(guide);
+  return guide;
+};
+
+function rebuildFlat(guide){
+  var pl = guide.plane, outline = pl.outline;
+  var shape = new THREE.Shape();
+  shape.moveTo(outline[0].u, outline[0].v);
+  for(var i=1;i<outline.length;i++) shape.lineTo(outline[i].u, outline[i].v);
+  shape.closePath();
+
+  var flat = new THREE.ShapeGeometry(shape);
+  var src = flat.attributes.position, n = src.count;
+  var pos = new Float32Array(n*3), nor = new Float32Array(n*3), uvw = new Float32Array(n*2);
+  var p = new THREE.Vector3();
+  for(i=0;i<n;i++){
+    var u = src.getX(i), v = src.getY(i);
+    p.copy(pl.origin).addScaledVector(pl.right, u).addScaledVector(pl.up, v);
+    pos[i*3] = p.x; pos[i*3+1] = p.y; pos[i*3+2] = p.z;
+    nor[i*3] = pl.normal.x; nor[i*3+1] = pl.normal.y; nor[i*3+2] = pl.normal.z;
+    uvw[i*2] = u; uvw[i*2+1] = v;
+  }
+  var geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  geom.setAttribute('normal',   new THREE.BufferAttribute(nor,3));
+  geom.setAttribute('uvw',      new THREE.BufferAttribute(uvw,2));
+  var idx = flat.index ? Array.prototype.slice.call(flat.index.array) : null;
+  if(idx) geom.setIndex(new THREE.BufferAttribute(
+    n < 65536 ? new Uint16Array(idx) : new Uint32Array(idx), 1));
+  geom.computeBoundingSphere();
+  geom.userData.Lu = pl.Lu; geom.userData.Lv = pl.Lv;
+  geom.userData.outline = outline;
+  flat.dispose();
+  attachMesh(guide, geom, 0);
+}
+G.rebuildFlat = rebuildFlat;
+
+/* Rebuild a flat guide from stored plane data, so a reloaded one is identical
+   to a drawn one. */
+G.fromPlaneData = function(d){
+  var out = [];
+  for(var i=0;i+1<d.outline.length;i+=2) out.push({ u:d.outline[i], v:d.outline[i+1] });
+  if(out.length < 3) return null;
+  var guide = newGuide('flat');
+  guide.plane = {
+    origin: new THREE.Vector3(d.origin[0], d.origin[1], d.origin[2]),
+    right:  new THREE.Vector3(d.right[0],  d.right[1],  d.right[2]),
+    up:     new THREE.Vector3(d.up[0],     d.up[1],     d.up[2]),
+    normal: new THREE.Vector3(d.normal[0], d.normal[1], d.normal[2]),
+    Lu: d.Lu, Lv: d.Lv, outline: out
+  };
+  rebuildFlat(guide);
+  return guide;
+};
+
 /* Build a swept guide straight from sweep data. Creation and document restore
    both land here, so a reloaded guide is bit-identical to a drawn one and can
    be bent again exactly the same way. */
@@ -924,7 +1037,8 @@ function frameOnTriangle(mesh, ia, ib, ic, point){
   var geom = mesh.geometry;
   var nu = geom.userData.nu, nv = geom.userData.nv;
   var uvw = geom.attributes.uvw, pos = geom.attributes.position;
-  if(!nu || !nv || !uvw) return null;
+  if(!uvw) return null;
+  if((!nu || !nv) && geom.userData.Lu === undefined) return null;
   var m = mesh.matrixWorld;
   _fA.fromBufferAttribute(pos, ia).applyMatrix4(m);
   _fB.fromBufferAttribute(pos, ib).applyMatrix4(m);
@@ -939,9 +1053,17 @@ function frameOnTriangle(mesh, ia, ib, ic, point){
   gradientOf(uvw.getY(ib) - v0, uvw.getY(ic) - v0, _gv);
   if(_gu.lengthSq() < EPS || _gv.lengthSq() < EPS) return null;
 
+  /* How far the surface runs. A swept guide reads it off the last node of the
+     grid; a flat one is triangulated to an outline and has no grid to index,
+     so it states its own extent. The OUTLINE, where there is one, is what the
+     nib is actually trimmed against - see reachAlong. */
+  var Lu = geom.userData.Lu, Lv = geom.userData.Lv;
+  if(Lu === undefined) Lu = uvw.getX(nu-1);
+  if(Lv === undefined) Lv = uvw.getY((nv-1)*nu);
+
   _rel.copy(point).sub(_fA);
   return { su: u0 + _gu.dot(_rel), sv: v0 + _gv.dot(_rel),
-           Lu: uvw.getX(nu-1), Lv: uvw.getY((nv-1)*nu),
+           Lu: Lu, Lv: Lv, outline: geom.userData.outline || null,
            uDir: _gu.clone().normalize(), vDir: _gv.clone().normalize() };
 }
 
@@ -963,6 +1085,11 @@ function surfaceFrameAt(mesh, hit){
    chosen DISTANCES across the surface, which grid lines do not fall on.
    ========================================================================== */
 G.surfaceSpan = function(guide){
+  /* a flat guide has no grid: it IS a plane, and says so */
+  if(guide && guide.plane){
+    return { nu:0, nv:0, Lu:guide.plane.Lu, Lv:guide.plane.Lv,
+             outline:guide.plane.outline };
+  }
   var geom = guide && guide.mesh && guide.mesh.geometry;
   if(!geom) return null;
   var nu = geom.userData.nu, nv = geom.userData.nv, uvw = geom.attributes.uvw;
@@ -990,6 +1117,16 @@ var _s00 = new THREE.Vector3(), _s10 = new THREE.Vector3(),
    kind of frame a drawn sample gets — built by the very code that painting
    uses, so a filled row trims at a boundary exactly like a hand-drawn one. */
 G.sampleSurface = function(guide, su, sv){
+  if(guide && guide.plane){
+    var pl = guide.plane;
+    /* outside the drawn shape there is no surface, so Fill skips it */
+    if(!insideOutline(pl.outline, su, sv)) return null;
+    var pt = pl.origin.clone()
+      .addScaledVector(pl.right, su).addScaledVector(pl.up, sv);
+    return { point: pt, normal: pl.normal.clone(), onSurface: true,
+             frame: { su:su, sv:sv, Lu:pl.Lu, Lv:pl.Lv, outline:pl.outline,
+                      uDir: pl.right.clone(), vDir: pl.up.clone() } };
+  }
   var span = G.surfaceSpan(guide);
   if(!span) return null;
   var mesh = guide.mesh, geom = mesh.geometry;
@@ -1021,6 +1158,15 @@ G.sampleSurface = function(guide, su, sv){
    units. Infinity where the direction runs parallel to that pair of edges. */
 G.reachAlong = function(frame, dir){
   var a = dir.dot(frame.uDir), b = dir.dot(frame.vDir);
+
+  /* AN OUTLINE IS THE REAL EDGE. A swept guide is a rectangle in (u,v) and the
+     box test below is exact for it. A flat guide is whatever shape was drawn,
+     so the distance to its edge is a ray-polygon intersection in the surface's
+     own coordinates - the same sum the box test does, over the shape's actual
+     sides rather than four implied ones. */
+  if(frame.outline && frame.outline.length > 2){
+    return { pos: outlineReach(frame, a, b, 1), neg: outlineReach(frame, a, b, -1) };
+  }
   function side(sign){
     var t = Infinity, aa = a*sign, bb = b*sign;
     if(Math.abs(aa) > 1e-6) t = Math.min(t, aa > 0 ? (frame.Lu - frame.su)/aa : -frame.su/aa);
@@ -1029,6 +1175,37 @@ G.reachAlong = function(frame, dir){
   }
   return { pos: side(1), neg: side(-1) };
 };
+
+/* nearest crossing of the outline along (a,b) from (su,sv) */
+function outlineReach(frame, a, b, sign){
+  var du = a*sign, dv = b*sign;
+  if(Math.abs(du) < 1e-12 && Math.abs(dv) < 1e-12) return 0;
+  var poly = frame.outline, best = Infinity;
+  for(var i=0;i<poly.length;i++){
+    var p = poly[i], q = poly[(i+1) % poly.length];
+    var ex = q.u - p.u, ey = q.v - p.v;
+    var den = du*ey - dv*ex;
+    if(Math.abs(den) < 1e-12) continue;             // parallel to this side
+    var rx = p.u - frame.su, ry = p.v - frame.sv;
+    var t = (rx*ey - ry*ex) / den;                  // along the ray
+    var s2 = (rx*dv - ry*du) / den;                 // along the side
+    if(t >= 0 && s2 >= 0 && s2 <= 1) best = Math.min(best, t);
+  }
+  return best === Infinity ? 0 : best;
+}
+
+/* is (u,v) inside the outline? even-odd, which is what a self-crossing
+   freehand loop deserves */
+function insideOutline(poly, u, v){
+  var inside = false;
+  for(var i=0, j=poly.length-1; i<poly.length; j=i++){
+    var a = poly[i], b = poly[j];
+    if((a.v > v) !== (b.v > v) &&
+       u < (b.u - a.u) * (v - a.v) / (b.v - a.v) + a.u) inside = !inside;
+  }
+  return inside;
+}
+G.insideOutline = insideOutline;
 
 G.project = function(x, y){
   if(!G.hasActive()) return null;

@@ -221,7 +221,8 @@ Tools.begin = function(x, y, ev){
   /* Guide-making roles. C.1: with autoGuide on and nothing active, the first
      stroke becomes the guide — the documented Feather premise. */
   var role = 'curve';
-  if(mode === 'guide') role = 'guide';
+  if(mode === 'flatguide') role = 'flat';
+  else if(mode === 'guide') role = 'guide';
   else if(mode === 'bend' && G.hasActive()) role = 'bend';
   else if(mode === 'draw' && TOOL.autoGuide && !G.hasActive()) role = 'guide';
 
@@ -230,6 +231,12 @@ Tools.begin = function(x, y, ev){
      through the centre of the mesh for a deform bend */
   if(role === 'bend'){
     P.refreshDrawPlane(G.active.sweep ? G.active.sweep.anchor : G.centreOf(G.active));
+  }
+  else if(role === 'flat'){
+    /* AT THE DEPTH OF WHAT IS UNDER THE STROKE. Drawing an outline over
+       existing work should put the sheet where that work is, not at the pivot
+       behind it. Nothing under the finger falls back to the pivot plane. */
+    P.refreshDrawPlane(depthUnder(x, y));
   }
   else if(role === 'guide' || !G.hasActive()) P.refreshDrawPlane();
 
@@ -386,6 +393,7 @@ Tools.finish = function(){
   clearLiveMirror();
   P.clearPreview();
 
+  if(l.role === 'flat')   return finishFlatGuide(l);
   if(l.role === 'guide')  return finishGuide(l);
   if(l.role === 'bend')   return finishBend(l);
   return finishCurve(l);
@@ -470,6 +478,38 @@ function finishCurve(l){
   P.onSceneChange();
 }
 
+/* the first thing the pointer is over: a curve, or a guide, or nothing */
+function depthUnder(x, y){
+  var r = P.rayFrom(x, y), hits = [];
+  for(var i=0;i<S.list.length;i++){
+    var st = S.list[i];
+    if(st.mesh && S.visible(st)) hits.push(st.mesh);
+  }
+  for(i=0;i<G.resources.length;i++){
+    if(G.resources[i].mesh) hits.push(G.resources[i].mesh);
+  }
+  if(G.active && G.active.mesh && hits.indexOf(G.active.mesh) < 0) hits.push(G.active.mesh);
+  if(!hits.length) return null;
+  var got = r.intersectObjects(hits, false);
+  return got.length ? got[0].point.clone() : null;
+}
+
+function finishFlatGuide(l){
+  if(l.world.length < 3){ P.toast('Draw a closed shape to make a flat guide'); return; }
+  var viewDir = P.cam().getWorldDirection(new THREE.Vector3());
+  P.camBasis(camRight, camUp, camFwd);
+  var made = G.createFlatFromStroke(l.world, viewDir, camRight);
+  if(!made){ P.toast('That shape encloses no area'); return; }
+  var prev = G.active;
+  P.History.run({
+    label: 'create flat guide',
+    redo: function(){ G.setActive(made); },
+    undo: function(){ G.setActive(prev); }
+  });
+  P.toast('Flat guide created — draw on it, or Fill it');
+  P.onSceneChange();
+}
+
 function finishGuide(l){
   if(l.world.length < 2){ return; }
   P.camBasis(camRight, camUp, camFwd);
@@ -494,14 +534,23 @@ function finishBend(l){
      curve deform of their mesh instead of by replacing a path */
   if(!guide.sweep){
     var wasBent = guide.bendPath ? guide.bendPath.map(function(p){ return p.clone(); }) : null;
+    /* A FLAT GUIDE STOPS BEING FLAT once it is bent. Drawing and trimming
+       carry on working - both read the mesh's own parameterisation, which the
+       deform moves but does not invalidate - but the analytic plane behind
+       Fill would be describing a sheet that is no longer there, so it is given
+       up rather than left to lie. Fill then declines on this guide, which is
+       the honest answer until the sampler can walk a deformed sheet. */
+    var wasPlane = guide.plane || null;
     if(!G.bendMesh(guide, l.world)) return;
+    if(wasPlane) delete guide.plane;
     var nowBent = guide.bendPath.map(function(p){ return p.clone(); });
     P.History.run({
       label:'bend guide',
-      redo: function(){ G.bendMesh(guide, nowBent); },
+      redo: function(){ G.bendMesh(guide, nowBent); if(wasPlane) delete guide.plane; },
       undo: function(){
         if(wasBent) G.bendMesh(guide, wasBent);
         else G.unbendMesh(guide);
+        if(wasPlane) guide.plane = wasPlane;
       }
     });
     P.onSceneChange();
@@ -604,7 +653,7 @@ var shapeHoldTimer = null;
    guides", and holding is how you reach it without switching tools. It is a
    deliberate pause with the pen still down, so it does not fire while you are
    moving, and it can be switched off entirely. */
-var HOLD_ROLES = { curve:1, guide:1, bend:1 };
+var HOLD_ROLES = { curve:1, guide:1, bend:1, flat:1 };
 
 function armShapeHold(){
   if(!TOOL.shapeHold) return;
@@ -1025,6 +1074,17 @@ function endSmooth(){
    Rows sit half a pitch in from each edge, so the outermost nib hangs over by
    half its width and gets trimmed back to the boundary — the same trim a
    hand-painted edge stroke gets. */
+/* finish a run of samples as a stroke, if it is long enough to be one */
+function closeRun(run, into){
+  if(run && run.pts.length >= 2){
+    S.dedupe(run);
+    S.freezeFrames(run);
+    S.rebuild(run);
+    into.push(run);
+  }
+  return null;
+}
+
 var FILL_OVERLAP = 0.9;      // rows this fraction of a nib apart, so no seams
 var FILL_MAX_ROWS = 400;     // a runaway fill is a hang; refuse instead
 
@@ -1057,26 +1117,32 @@ Tools.fillGuide = function(guide){
   }
   var step = across / rows;
 
-  /* follow the surface at its own resolution along the stroke */
+  /* follow the surface at its own resolution along the stroke; a flat guide
+     has no grid to follow, so sample it every few millimetres instead - fine
+     enough to cut a row cleanly where it crosses the outline */
   var nodes = alongV ? span.nv : span.nu;
-  var steps = P.clamp(nodes, 2, 240);
+  var steps = nodes >= 2 ? P.clamp(nodes, 2, 240)
+                         : P.clamp(Math.ceil(lengthL / (2*P.MM)), 2, 240);
 
   var made = [], r, i;
   for(r=0; r<rows; r++){
     var lateral = (r + 0.5) * step;
-    var st = newStroke();
+    /* A ROW IS NOT ALWAYS ONE STROKE. Off a rectangle it is, but a drawn
+       outline can be concave or pinched, and a row crossing the gap in a
+       horseshoe leaves the shape and comes back. Skipping the missing samples
+       would join the two halves with a stroke straight across the hole, so a
+       row is broken into runs of consecutive samples that are actually on the
+       surface, and each run becomes its own stroke. */
+    var run = null;
     for(i=0; i<steps; i++){
       var along = lengthL * (i/(steps-1));
       var hit = G.sampleSurface(g, alongV ? lateral : along, alongV ? along : lateral);
-      if(!hit) continue;
-      pushLivePoint(st, hit.point, {pressure:1, tilt:{az:null, alt:1}},
+      if(!hit){ run = closeRun(run, made); continue; }
+      if(!run) run = newStroke();
+      pushLivePoint(run, hit.point, {pressure:1, tilt:{az:null, alt:1}},
                     hit.normal, hit.frame);
     }
-    if(st.pts.length < 2) continue;
-    S.dedupe(st);
-    S.freezeFrames(st);
-    S.rebuild(st);
-    made.push(st);
+    closeRun(run, made);
   }
   if(!made.length){ P.toast('Nothing to fill'); return null; }
 

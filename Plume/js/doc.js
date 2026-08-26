@@ -138,6 +138,17 @@ function packGuide(g){
       basisT: packVec(sw.basisT), depth: q(sw.depth)
     };
   }
+  if(g.plane){
+    /* a flat guide is its plane and the outline drawn on it - the mesh is
+       triangulated back from those on load */
+    var pl = g.plane, out = new Array(pl.outline.length*2);
+    for(var k=0;k<pl.outline.length;k++){
+      out[k*2] = q(pl.outline[k].u); out[k*2+1] = q(pl.outline[k].v);
+    }
+    o.plane = { origin: packVec(pl.origin), right: packVec(pl.right),
+                up: packVec(pl.up), normal: packVec(pl.normal),
+                Lu: q(pl.Lu), Lv: q(pl.Lv), outline: out };
+  }
   if(g.kind === 'primitive'){
     o.prim = { kind:g.primKind, seg:g.primSeg, taper:q(g.primTaper) };
   }
@@ -183,6 +194,8 @@ function unpackGuide(d){
       new Float32Array(mg.attributes.position.count*2), 2));
     mg.computeBoundingSphere(); mg.computeBoundingBox();
     g = G.fromModel(mg, d.name);
+  } else if(d.plane){
+    g = G.fromPlaneData(d.plane);
   } else if(d.kind === 'primitive' && d.prim){
     g = G.primitive(d.prim.kind, d.prim.seg, d.prim.taper);
   } else if(d.kind === 'loft' && d.loft){
