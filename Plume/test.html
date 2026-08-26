@@ -2134,6 +2134,92 @@ function run(W){
   P.Strokes.clearSelection(); P.onSceneChange();
   ck('joystick hides again', !shown('joy'));
 
+  /* ---- the axis handles stay where you left them ----
+     They used to be drawn wherever each world axis happened to project to, so
+     the handle you were reaching for slid out from under your thumb every time
+     you orbited, and two axes could crowd into one place while the third had a
+     third of the ring to itself. */
+  reset();
+  P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+  pen([{x:CX-80,y:CY},{x:CX,y:CY},{x:CX+80,y:CY}]);
+  var joySt = P.Strokes.list[0];
+  P.Strokes.setSelected(joySt, true);
+  P.setTool('select'); P.UI.refresh();
+
+  function labAt(k21){
+    var el21 = D.getElementById('lab' + k21);
+    return { x:+el21.getAttribute('x'), y:+el21.getAttribute('y') };
+  }
+  function allLabs(){ return { X:labAt('X'), Y:labAt('Y'), Z:labAt('Z') }; }
+  function lookFrom(th21, ph21){
+    P.VIEW.theta = th21; P.VIEW.phi = ph21; P.applyCamera(); P.UI.layoutJoystick();
+    return allLabs();
+  }
+  var view1 = lookFrom(0, 1.1), view2 = lookFrom(1.9, 0.5), view3 = lookFrom(-2.6, 2.2);
+  function sameSpot(a21, b21){
+    return ['X','Y','Z'].every(function(k21){
+      return Math.abs(a21[k21].x - b21[k21].x) < 0.01 &&
+             Math.abs(a21[k21].y - b21[k21].y) < 0.01;
+    });
+  }
+  ck('the joystick axis handles do not move when the camera orbits',
+     sameSpot(view1, view2) && sameSpot(view1, view3),
+     'X at ' + view1.X.x + ',' + view1.X.y + ' from every angle');
+
+  var C21 = 54;
+  var angs21 = ['X','Y','Z'].map(function(k21){
+    return Math.atan2(view1[k21].y - C21, view1[k21].x - C21) * 180/Math.PI;
+  }).sort(function(m21, n21){ return m21 - n21; });
+  var gaps21 = [angs21[1]-angs21[0], angs21[2]-angs21[1],
+                360 - (angs21[2]-angs21[0])];
+  ck('...and sit a third of the ring apart',
+     gaps21.every(function(g21){ return Math.abs(g21 - 120) < 0.5; }),
+     gaps21.map(function(g21){ return g21.toFixed(0); }).join(' / ') + ' degrees');
+
+  /* ONLY THE PLACEMENT IS FIXED. Dragging an axis still has to move along that
+     world axis, using its real screen direction — which is exactly what fixing
+     the arcs could have broken. */
+  (function(){
+    P.VIEW.theta = 0.8; P.VIEW.phi = 1.0; P.applyCamera(); P.UI.layoutJoystick();
+    var before21 = joySt.pts[0].p.clone();
+    var pad = D.getElementById('joyPad'), r21 = pad.getBoundingClientRect();
+    /* press on the X arc: a third of the ring right and down from centre */
+    var px = r21.left + r21.width  * (54 + Math.cos(Math.PI/6)*43) / 108;
+    var py = r21.top  + r21.height * (54 + Math.sin(Math.PI/6)*43) / 108;
+    function padEv(t21, x21, y21, b21){
+      pad.dispatchEvent(new W.PointerEvent(t21, {pointerId:77, pointerType:'touch',
+        clientX:x21, clientY:y21, buttons:b21, bubbles:true, cancelable:true}));
+    }
+    padEv('pointerdown', px, py, 1);
+    padEv('pointermove', px + 40, py + 24, 1);
+    padEv('pointerup',   px + 40, py + 24, 0);
+    var moved = joySt.pts[0].p.clone().sub(before21);
+    ck('...while dragging one still moves along that world axis',
+       moved.length() > 1e-6 &&
+       Math.abs(moved.x) > 20 * Math.max(Math.abs(moved.y), Math.abs(moved.z)),
+       'moved (' + moved.x.toFixed(3) + ', ' + moved.y.toFixed(3) + ', ' +
+       moved.z.toFixed(3) + ')');
+  })();
+  reset();
+
+  /* ---- the rail shows the brush you are holding ---- */
+  var railBtn = D.getElementById('brushType');
+  var brushMarks = {}, allMatch = true;
+  Object.keys(P.BRUSH).forEach(function(bn21){
+    P.TOOL.brush = bn21; P.UI.refresh();
+    var gridBtn = D.querySelector('#brushGrid button[data-brush="' + bn21 + '"]');
+    if(!gridBtn || railBtn.innerHTML !== gridBtn.innerHTML) allMatch = false;
+    brushMarks[railBtn.innerHTML] = 1;
+  });
+  ck('the brush button wears the icon of the brush in hand',
+     allMatch, allMatch ? 'all ' + Object.keys(P.BRUSH).length + ' match their grid icon'
+                        : 'a brush showed the wrong mark');
+  ck('...and every brush has its own mark, not a shared one',
+     Object.keys(brushMarks).length === Object.keys(P.BRUSH).length,
+     Object.keys(brushMarks).length + ' distinct icons for ' +
+     Object.keys(P.BRUSH).length + ' brushes');
+  P.TOOL.brush = 'pen'; P.UI.refresh();
+
   /* ================= restyling a selection ================= */
   group('Restyle — the brush panel edits selected curves');
 
@@ -3556,15 +3642,21 @@ function run(W){
   ck('all three axis arcs are drawn',
      !!dX0 && !!rid('arcY').getAttribute('d') && !!rid('arcZ').getAttribute('d'));
   P.VIEW.theta += 1.1; P.applyCamera(); P.onViewChange();
-  ck('the arcs re-aim as the camera orbits', rid('arcX').getAttribute('d') !== dX0);
+  ck('the arcs hold their place as the camera orbits',
+     rid('arcX').getAttribute('d') === dX0,
+     'arcX unchanged through a 63 degree orbit');
 
-  /* where does an axis sit on the pad right now? */
-  function arcSpot(axisVec){
+  /* Where an axis HANDLE sits (fixed, a third of the ring apart) and which way
+     that axis runs ON SCREEN (which does follow the camera). The two used to be
+     the same angle; separating them is the whole change. */
+  var FIXED_ANG = { x: Math.PI/6, y: -Math.PI/2, z: Math.PI*5/6 };
+  function arcSpot(key, axisVec){
     var c = P.Tools.transformCentre();
     var a = P.worldToScreen(c, {});
     var b = P.worldToScreen(c.clone().add(axisVec), {});
-    var ang = Math.atan2(b.y-a.y, b.x-a.x);
-    return {x:54 + Math.cos(ang)*35, y:54 + Math.sin(ang)*35, ang:ang};
+    var at = FIXED_ANG[key];
+    return { x: 54 + Math.cos(at)*35, y: 54 + Math.sin(at)*35,
+             ang: Math.atan2(b.y-a.y, b.x-a.x) };
   }
   function padDrag(spot, dx, dy){
     var pad = rid('joyPad'), r = pad.getBoundingClientRect();
@@ -3578,7 +3670,7 @@ function run(W){
   }
 
   var pStart = jst.pts[0].p.clone();
-  var sx1 = arcSpot(new THREE.Vector3(1,0,0));
+  var sx1 = arcSpot('x', new THREE.Vector3(1,0,0));
   padDrag(sx1, Math.cos(sx1.ang)*60, Math.sin(sx1.ang)*60);
   var dv = jst.pts[0].p.clone().sub(pStart);
   ck('grabbing the X arc moves along world X only',
@@ -3587,7 +3679,7 @@ function run(W){
   P.History.undo();
 
   pStart = jst.pts[0].p.clone();
-  var sy1 = arcSpot(new THREE.Vector3(0,1,0));
+  var sy1 = arcSpot('y', new THREE.Vector3(0,1,0));
   padDrag(sy1, Math.cos(sy1.ang)*60, Math.sin(sy1.ang)*60);
   dv = jst.pts[0].p.clone().sub(pStart);
   ck('grabbing the Y arc moves along world Y only',
@@ -3605,7 +3697,7 @@ function run(W){
 
   rid('joyMode').querySelector('[data-joy="rotate"]').click();
   var rBefore = jst.pts.map(function(q){ return q.p.clone(); });
-  var sz1 = arcSpot(new THREE.Vector3(0,0,1));
+  var sz1 = arcSpot('z', new THREE.Vector3(0,0,1));
   padDrag(sz1, -Math.sin(sz1.ang)*50, Math.cos(sz1.ang)*50);
   ck('sweeping round an arc rotates about that axis',
      jst.pts.some(function(q,k){ return q.p.distanceTo(rBefore[k]) > 1e-4; }));

@@ -1055,10 +1055,18 @@ function markSwatch(hex){
    widget always means what the screen shows regardless of the orbit.
    ========================================================================== */
 /* ==========================================================================
-   The three coloured arcs are the world axes, drawn where each axis actually
-   points on screen — so they swing round as you orbit. Grab an arc and the
-   drag is constrained to that axis; grab the middle and it moves freely in the
-   view plane, as before.
+   The three coloured arcs are the world axes. They sit at FIXED, equally
+   spaced positions on the ring - Y up, X to the lower right, Z to the lower
+   left - and stay there however the camera orbits. Earlier they were drawn
+   where each axis happened to project to on screen, which meant the handle you
+   were reaching for slid out from under your thumb every time you moved the
+   view, and two axes could crowd into the same place while the third had a
+   third of the ring to itself.
+
+   Only the PLACEMENT is fixed. Dragging still uses each axis's real screen
+   direction and its real pixels-per-unit, so pulling the X arc moves along
+   world X by the distance the drag actually covers, and an axis pointing at
+   the camera still dims, because there is no sensible direction to drag it in.
    ========================================================================== */
 var AXES = [
   {key:'x', vec:new THREE.Vector3(1,0,0), arc:'arcX', lab:'labX'},
@@ -1066,6 +1074,10 @@ var AXES = [
   {key:'z', vec:new THREE.Vector3(0,0,1), arc:'arcZ', lab:'labZ'}
 ];
 var PAD_C = 54, PAD_R = 43, PAD_INNER = 19;   // in the pad's 108-unit viewBox
+
+/* where each arc lives, a third of the ring apart. SVG angles run clockwise
+   from east, so -90 degrees is straight up. */
+var AXIS_ANG = [Math.PI/6, -Math.PI/2, Math.PI*5/6];   // x, y, z
 
 /* Where does this world axis point on screen, and how many pixels is one world
    unit along it? Returns null when the axis is nearly end-on, where the
@@ -1104,11 +1116,12 @@ UI.layoutJoystick = function(){
       lab.setAttribute('opacity', '0');
       continue;
     }
+    var at = AXIS_ANG[i];
     arc.classList.remove('dim');
-    arc.setAttribute('d', arcPath(PAD_C, PAD_C, PAD_R, info.ang - SPAN, info.ang + SPAN));
+    arc.setAttribute('d', arcPath(PAD_C, PAD_C, PAD_R, at - SPAN, at + SPAN));
     lab.setAttribute('opacity', '0.9');
-    lab.setAttribute('x', (PAD_C + Math.cos(info.ang)*(PAD_R - 13)).toFixed(1));
-    lab.setAttribute('y', (PAD_C + Math.sin(info.ang)*(PAD_R - 13)).toFixed(1));
+    lab.setAttribute('x', (PAD_C + Math.cos(at)*(PAD_R - 13)).toFixed(1));
+    lab.setAttribute('y', (PAD_C + Math.sin(at)*(PAD_R - 13)).toFixed(1));
   }
 };
 
@@ -1117,10 +1130,10 @@ function pickAxis(localX, localY){
   var dx = localX - PAD_C, dy = localY - PAD_C;
   var r = Math.hypot(dx, dy);
   if(r < PAD_INNER) return null;
-  var ang = Math.atan2(dy, dx), best = null, bestD = 0.75;   // ~43 degrees
+  var ang = Math.atan2(dy, dx), best = null, bestD = 1.0;   // ~57 degrees
   for(var i=0;i<AXES.length;i++){
-    if(!axisInfo[i]) continue;
-    var d = Math.abs(((ang - axisInfo[i].ang + Math.PI*3) % (Math.PI*2)) - Math.PI);
+    if(!axisInfo[i]) continue;                 // end-on: nothing to drag along
+    var d = Math.abs(((ang - AXIS_ANG[i] + Math.PI*3) % (Math.PI*2)) - Math.PI);
     if(d < bestD){ bestD = d; best = i; }
   }
   return best;
@@ -1437,7 +1450,23 @@ UI.refresh = function(){
   $('opacity').value = Math.round(TOOL.opacity*100);
   $('colorPick').value = '#' + TOOL.color.getHexString();
   var bs = $('brushGrid').querySelectorAll('button');
-  for(i=0;i<bs.length;i++) bs[i].classList.toggle('on', bs[i].dataset.brush === TOOL.brush);
+  var picked = null;
+  for(i=0;i<bs.length;i++){
+    var isOn = bs[i].dataset.brush === TOOL.brush;
+    bs[i].classList.toggle('on', isOn);
+    if(isOn) picked = bs[i];
+  }
+  /* THE RAIL SHOWS THE BRUSH YOU ARE HOLDING. The button that opens the brush
+     grid used to carry one generic mark whatever was selected, so the rail
+     could not tell you a pencil from a ribbon without opening it. It now wears
+     the chosen brush's own icon, copied from the grid button rather than kept
+     as a second drawing of the same thing - two copies would eventually
+     disagree, and the tapered nib and the pencil are only a curve apart. */
+  var railIcon = $('brushType');
+  if(railIcon && picked && railIcon.dataset.shows !== TOOL.brush){
+    railIcon.dataset.shows = TOOL.brush;
+    railIcon.innerHTML = picked.innerHTML;
+  }
 
   /* ---- bottom bar: one row that shows staging, else the guide, else a hint */
   var staging = (TOOL.mode === 'loft' || TOOL.mode === 'prim');

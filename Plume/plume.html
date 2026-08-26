@@ -93,6 +93,9 @@
   /* icon buttons — square, icon-only, tooltip carries the name */
   .ico{width:38px;height:38px;padding:0;display:inline-flex;align-items:center;
     justify-content:center;border-radius:12px;}
+  /* the brush-type button mirrors the grid's icon, which is drawn in a wider
+     box than the 24-square the other rail icons use */
+  #brushType svg{width:24px;height:17px;}
   .ico svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.5;
     stroke-linecap:round;stroke-linejoin:round;}
   .ico.sm{width:32px;height:32px;border-radius:10px;}
@@ -680,8 +683,8 @@
     <svg viewBox="0 0 108 108">
       <circle cx="54" cy="54" r="43" fill="none" stroke="var(--line)" stroke-width="1"/>
       <circle cx="54" cy="54" r="19" fill="none" stroke="var(--line)" stroke-width="1"/>
-      <!-- the three arcs are positioned in JS: each sits where its world axis
-           points on screen, so they rotate as the camera orbits -->
+      <!-- the three arcs are positioned in JS at fixed, equally spaced points
+           on the ring, so a handle stays where you last reached for it -->
       <path id="arcX" class="axisArc" stroke="#f2545b"></path>
       <path id="arcY" class="axisArc" stroke="#4cc38a"></path>
       <path id="arcZ" class="axisArc" stroke="#5b9dff"></path>
