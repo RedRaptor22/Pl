@@ -315,21 +315,34 @@ UI.init = function(){
   });
 
   /* ---- brush panel ---- */
-  seg($('brushGrid'), 'brush', function(v){ TOOL.brush = v; });
+  seg($('brushGrid'), 'brush', function(v){
+    TOOL.brush = v;
+    styleOnce('restyle brush', { brush: v });
+  });
   seg($('pressSeg'), 'p',     function(v){ TOOL.pressureTarget = v; });
 
   on($('size'), 'input', function(){
-    UI.setSize(parseFloat(this.value));
+    var v = parseFloat(this.value);
+    if(beginStyleEdit('resize')) applyStyle({ scale: v / sizeAtEditStart() });
+    UI.setSize(v);
     UI.refresh();
   });
+  on($('size'), 'change', endStyleEdit);
   on($('opacity'), 'input', function(){
-    TOOL.opacity = parseFloat(this.value)/100;
+    var v = parseFloat(this.value)/100;
+    if(beginStyleEdit('restyle opacity')) applyStyle({ opacity: v });
+    TOOL.opacity = v;
     UI.refresh();
   });
+  on($('opacity'), 'change', endStyleEdit);
   dragValue($('sizeVal'),    'size');
   dragValue($('opacityVal'), 'opacity');
   on($('btnPressure'), 'click', function(){ TOOL.pressureOn = !TOOL.pressureOn; UI.refresh(); });
-  on($('colorPick'), 'input', function(){ TOOL.color.set(this.value); markSwatch(this.value); });
+  on($('colorPick'), 'input', function(){
+    TOOL.color.set(this.value); markSwatch(this.value);
+    if(beginStyleEdit('recolour')) applyStyle({ color: TOOL.color });
+  });
+  on($('colorPick'), 'change', endStyleEdit);
   on($('btnEyedrop'), 'click', function(){ P.setTool('eyedrop'); P.toast('Tap a curve to sample its colour'); });
   on($('btnInject'),  'click', function(){ P.setTool('inject');  P.toast('Tap a curve to sample its brush'); });
   on($('btnUndo'), 'click', function(){ P.History.undo(); P.onSceneChange(); });
@@ -667,6 +680,106 @@ var LQ = {
                 set:function(v){ TOOL.liquify.strength = Math.round(P.clamp(v, 1, 100)); } }
 };
 
+/* ==========================================================================
+   The brush panel, pointed at a selection
+   --------------------------------------------------------------------------
+   With curves selected the panel edits them as well as the tool: the tool
+   still takes the new value, so the next stroke matches what you just set, and
+   the selection takes it too.
+
+   A slider drag is ONE history entry, not one per frame. The snapshot is taken
+   when the gesture starts and the entry pushed when it ends; every frame in
+   between scales from that same snapshot, so dragging back and forth cannot
+   compound. A discrete change - a swatch, a brush, a typed number - opens and
+   closes the gesture in one go.
+   ========================================================================== */
+var styleEdit = null;
+
+function styleTargets(){
+  return P.Strokes.selection.length ? P.Strokes.selection.slice() : null;
+}
+
+function beginStyleEdit(label){
+  if(styleEdit) return styleEdit;
+  var st = styleTargets();
+  if(!st) return null;
+  /* the slider's reading BEFORE this gesture moved it, which is what a
+     proportional resize is measured against */
+  styleEdit = { strokes: st, before: P.Strokes.styleSnapshot(st),
+                label: label, sizeFrom: UI.getSize() };
+  return styleEdit;
+}
+function sizeAtEditStart(){
+  return (styleEdit && styleEdit.sizeFrom > 0) ? styleEdit.sizeFrom : UI.getSize();
+}
+
+function applyStyle(changes){
+  if(!styleEdit) return false;
+  P.Strokes.restyle(styleEdit.strokes, changes, styleEdit.before);
+  return true;
+}
+
+function endStyleEdit(){
+  var e = styleEdit;
+  styleEdit = null;
+  if(!e) return;
+  var after = P.Strokes.styleSnapshot(e.strokes);
+  var moved = false;
+  for(var i=0;i<after.length;i++){
+    var a = after[i], b = e.before[i];
+    if(a.brush !== b.brush || a.opacity !== b.opacity ||
+       a.baseRadius !== b.baseRadius || a.color.getHex() !== b.color.getHex()){
+      moved = true; break;
+    }
+  }
+  if(!moved) return;
+  P.History.push({
+    label: e.label,
+    redo: function(){ P.Strokes.styleRestore(e.strokes, after); },
+    undo: function(){ P.Strokes.styleRestore(e.strokes, e.before); }
+  });
+  P.onSceneChange();
+}
+UI.endStyleEdit = endStyleEdit;
+
+/* Every one of these edits is a GESTURE, and a gesture ends when the finger
+   comes up - on the wheel, on a swatch, on a slider, anywhere. Listening once
+   here beats threading an end through every control, and it is a no-op when no
+   edit is open. */
+document.addEventListener('pointerup', endStyleEdit, true);
+document.addEventListener('pointercancel', endStyleEdit, true);
+
+/* one-shot: for controls that change by a tap rather than a drag */
+/* SELECTING LOADS THE PANEL. Otherwise the panel would have two truths at
+   once - the tool's number and the selection's - and dragging the size to 80mm
+   while the readout showed the selection's average of 63mm would be nonsense.
+   Adopting on selection means the panel always shows the tool, the tool always
+   shows what you last picked, and a proportional resize starts from where the
+   selection actually is. Properties the selection does not agree on are left
+   alone rather than flattened to the first stroke's. */
+var lastSelSig = null;
+function adoptSelectionStyle(){
+  var sel = P.Strokes.selection;
+  var sig = sel.length ? sel.map(function(x){ return x.id; }).join(',') : '';
+  if(sig === lastSelSig) return;
+  lastSelSig = sig;
+  if(!sel.length) return;
+  var st = P.Strokes.styleOf(sel);
+  if(!st) return;
+  if(st.brush)            TOOL.brush = st.brush;
+  if(st.hex !== null)     TOOL.color.setHex(st.hex);
+  if(st.opacity !== null) TOOL.opacity = st.opacity;
+  if(st.sizeMM > 0)       UI.setSize(st.sizeMM);
+}
+UI.adoptSelectionStyle = adoptSelectionStyle;
+
+function styleOnce(label, changes){
+  if(!beginStyleEdit(label)) return;
+  applyStyle(changes);
+  endStyleEdit();
+}
+UI.styleOnce = styleOnce;
+
 /* The size control edits whichever tool is in hand — the eraser carries its
    own size, so switching to it re-points the readout rather than resizing the
    brush underneath you. */
@@ -700,8 +813,16 @@ function dragValue(el, which){
       spec.set(spec.log ? drag.from * Math.exp(dy * SIZE_PER_PX)
                         : drag.from + dy * 0.4);
     }
-    else if(which === 'size') UI.setSize(drag.from * Math.exp(dy * SIZE_PER_PX));
-    else TOOL.opacity = P.clamp(drag.from + dy * OPACITY_PER_PX, 0.05, 1);
+    else if(which === 'size'){
+      var nv = drag.from * Math.exp(dy * SIZE_PER_PX);
+      if(beginStyleEdit('resize')) applyStyle({ scale: nv / sizeAtEditStart() });
+      UI.setSize(nv);
+    }
+    else {
+      var no = P.clamp(drag.from + dy * OPACITY_PER_PX, 0.05, 1);
+      if(beginStyleEdit('restyle opacity')) applyStyle({ opacity: no });
+      TOOL.opacity = no;
+    }
     UI.refresh();
   });
   function end(e){
@@ -735,9 +856,12 @@ function commitKeypad(){
   var v = parseFloat(keypadBuf);
   if(!isNaN(v)){
     if(keypadFor === 'size'){
+      var was = UI.getSize();
       UI.setSize(v);
+      if(was > 0) styleOnce('resize', { scale: UI.getSize() / was });
     } else {
       TOOL.opacity = P.clamp(v/100, 0.05, 1);
+      styleOnce('restyle opacity', { opacity: TOOL.opacity });
     }
   }
   $('keypad').classList.add('hidden');
@@ -865,6 +989,7 @@ function placeKnobs(){
 function pushColor(){
   var rgb = hsvToRgb(hsv.h, hsv.s, hsv.v);
   TOOL.color.setRGB(rgb[0]/255, rgb[1]/255, rgb[2]/255);
+  if(beginStyleEdit('recolour')) applyStyle({ color: TOOL.color });
   paintSV(); placeKnobs();
   UI.refresh();
 }
@@ -913,6 +1038,7 @@ function buildSwatches(){
     TOOL.color.set(b.dataset.col);
     $('colorPick').value = b.dataset.col;
     markSwatch(b.dataset.col);
+    styleOnce('recolour', { color: TOOL.color });
   });
 }
 function markSwatch(hex){
@@ -1206,6 +1332,9 @@ function about(c, m){
    Refresh
    ========================================================================== */
 UI.refresh = function(){
+  /* before anything reads the tool: a fresh selection loads its own style into
+     it, so every readout below shows the curves you just picked */
+  adoptSelectionStyle();
   /* tool buttons, in both the pill and the bottom context menu */
   var tools = document.querySelectorAll('button[data-tool]');
   for(var i=0;i<tools.length;i++){
@@ -1302,7 +1431,8 @@ UI.refresh = function(){
   setOn($('btnEyedrop'),   TOOL.mode === 'eyedrop');
   setOn($('btnInject'),    TOOL.mode === 'inject');
 
-  /* brush readouts (they change when the injector samples) */
+  /* brush readouts (they change when the injector samples, and when a
+     selection is made) */
   $('size').value = UI.getSize();
   $('opacity').value = Math.round(TOOL.opacity*100);
   $('colorPick').value = '#' + TOOL.color.getHexString();

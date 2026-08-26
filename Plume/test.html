@@ -2018,6 +2018,95 @@ function run(W){
   P.Strokes.clearSelection(); P.onSceneChange();
   ck('joystick hides again', !shown('joy'));
 
+  /* ================= restyling a selection ================= */
+  group('Restyle — the brush panel edits selected curves');
+
+  function threeStrokes(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    var sizes19 = [20, 40, 80], cols19 = ['#cc3232', '#32cc70', '#3270cc'];
+    for(var k19=0;k19<3;k19++){
+      P.TOOL.brush = 'pen'; P.TOOL.sizeMM = sizes19[k19];
+      P.TOOL.color.set(cols19[k19]); P.TOOL.opacity = 1;
+      pen([{x:CX-150,y:CY-80+k19*70},{x:CX,y:CY-80+k19*70},{x:CX+150,y:CY-80+k19*70}]);
+    }
+    var made19 = P.Strokes.list.slice();
+    for(k19=0;k19<made19.length;k19++) P.Strokes.setSelected(made19[k19], true);
+    P.UI.refresh();
+    return made19;
+  }
+  function widths(){
+    return P.Strokes.list.map(function(x){ return +(x.baseRadius*2/P.MM).toFixed(1); });
+  }
+
+  var trio = threeStrokes();
+  ck('three strokes of different widths are selected', trio.length === 3 &&
+     P.Strokes.selection.length === 3, widths().join(' / ') + 'mm');
+
+  /* SELECTING LOADS THE PANEL, so the slider starts where the selection is */
+  ck('selecting adopts the size the selection averages to',
+     Math.abs(P.UI.getSize() - (20+40+80)/3) < 0.5,
+     'panel reads ' + P.UI.getSize().toFixed(1) + 'mm for 20/40/80');
+  ck('...and the brush and opacity they agree on',
+     P.TOOL.brush === 'pen' && P.TOOL.opacity === 1,
+     P.TOOL.brush + ' at ' + P.TOOL.opacity);
+  /* they were drawn in three different colours, so there is nothing to adopt */
+  var mixedHex = P.Strokes.styleOf(P.Strokes.selection).hex;
+  ck('...but not a colour they do not agree on', mixedHex === null,
+     'shared colour: ' + mixedHex);
+
+  /* PROPORTIONAL: the spread of widths survives */
+  P.UI.styleOnce('resize', { scale: 2 });
+  var doubled = widths();
+  ck('the size control scales the selection proportionally',
+     doubled[0] === 40 && doubled[1] === 80 && doubled[2] === 160,
+     doubled.join(' / ') + 'mm');
+  ck('...so the thick and thin the drawing had is not flattened',
+     doubled[2] / doubled[0] === 4, 'ratio ' + (doubled[2]/doubled[0]).toFixed(1) + ':1');
+
+  /* colour, opacity and brush go on absolutely */
+  P.TOOL.color.set('#ffcc00');
+  P.UI.styleOnce('recolour', { color: P.TOOL.color });
+  P.UI.styleOnce('restyle opacity', { opacity: 0.4 });
+  P.UI.styleOnce('restyle brush', { brush: 'sketch' });
+  var allYellow = P.Strokes.list.every(function(x){ return x.color.getHexString() === 'ffcc00'; }),
+      allFaint  = P.Strokes.list.every(function(x){ return Math.abs(x.opacity - 0.4) < 1e-6; }),
+      allSketch = P.Strokes.list.every(function(x){ return x.brush === 'sketch'; });
+  ck('colour, opacity and brush all apply to the whole selection',
+     allYellow && allFaint && allSketch,
+     'colour ' + allYellow + ', opacity ' + allFaint + ', brush ' + allSketch);
+  ck('...and the strokes are rebuilt, not just relabelled',
+     P.Strokes.list.every(function(x){ return x.mesh && x.mesh.geometry.index.count > 0; }),
+     P.Strokes.list.map(function(x){
+       return x.mesh ? x.mesh.geometry.index.count/3 : 0; }).join('/') + ' triangles');
+
+  /* ONE HISTORY STEP PER EDIT */
+  P.History.undo();
+  ck('each edit is a single undo step', P.Strokes.list.every(function(x){
+       return x.brush === 'pen'; }) &&
+     P.Strokes.list.every(function(x){ return x.color.getHexString() === 'ffcc00'; }),
+     'brush reverted, colour still ' + P.Strokes.list[0].color.getHexString());
+  P.History.undo(); P.History.undo(); P.History.undo();
+  ck('...and unwinding them all restores what was drawn',
+     widths().join('/') === '20/40/80' &&
+     P.Strokes.list[0].color.getHexString() === 'cc3232',
+     widths().join('/') + 'mm, first is #' + P.Strokes.list[0].color.getHexString());
+
+  /* WITH NOTHING SELECTED the panel is only the tool again */
+  reset();
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 30; P.TOOL.color.set('#cc3232');
+  pen([{x:CX-80,y:CY},{x:CX,y:CY},{x:CX+80,y:CY}]);
+  var lone = P.Strokes.list[0], loneWas = lone.baseRadius;
+  P.Strokes.clearSelection();
+  P.TOOL.color.set('#00ff88');
+  P.UI.styleOnce('recolour', { color: P.TOOL.color });
+  P.UI.styleOnce('resize', { scale: 3 });
+  ck('with nothing selected the panel leaves the drawing alone',
+     lone.color.getHexString() === 'cc3232' && lone.baseRadius === loneWas,
+     'stroke is still #' + lone.color.getHexString() + ' at ' +
+     (lone.baseRadius*2/P.MM).toFixed(0) + 'mm');
+  reset();
+
   /* ================= brushes ================= */
   group('Brushes');
   reset();

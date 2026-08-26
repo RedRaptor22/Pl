@@ -1003,6 +1003,75 @@ S.freezeFrames = function(stroke){
 };
 
 /* ==========================================================================
+   Restyling a selection
+   --------------------------------------------------------------------------
+   The brush panel is the tool, but with curves selected it also edits THEM:
+   pick a colour and the selection recolours, drag the size and the selection
+   rescales. Everything here works on a list of strokes and a plain description
+   of the change, so the panel does not have to know how a stroke is built.
+
+   Size is PROPORTIONAL. A selection is rarely all one width, and setting them
+   all to the slider's number would flatten in one drag whatever thick-and-thin
+   the drawing had. Scaling by a factor keeps the relationships and still lets
+   the slider mean what it says, because the factor is measured against what
+   the slider read when the drag began.
+   ========================================================================== */
+S.styleSnapshot = function(strokes){
+  return strokes.map(function(st){
+    return { brush: st.brush, color: st.color.clone(),
+             opacity: st.opacity, baseRadius: st.baseRadius };
+  });
+};
+
+S.styleRestore = function(strokes, snap){
+  for(var i=0;i<strokes.length && i<snap.length;i++){
+    var st = strokes[i], was = snap[i];
+    st.brush = was.brush;
+    st.color.copy(was.color);
+    st.opacity = was.opacity;
+    st.baseRadius = was.baseRadius;
+    S.rebuild(st);
+  }
+};
+
+/* `base` is the snapshot a scale is measured from, so dragging a slider back
+   and forth cannot compound: every frame of the drag scales the ORIGINAL
+   radius, not the one the previous frame left behind. */
+S.restyle = function(strokes, changes, base){
+  var minR = P.TUNE.brushMinMM * P.MM * 0.5,
+      maxR = P.TUNE.brushMaxMM * P.MM * 0.5;
+  for(var i=0;i<strokes.length;i++){
+    var st = strokes[i];
+    if(changes.brush)                 st.brush = P.brushName(changes.brush);
+    if(changes.color)                 st.color.copy(changes.color);
+    if(changes.opacity !== undefined) st.opacity = changes.opacity;
+    if(changes.scale !== undefined){
+      var from = (base && base[i]) ? base[i].baseRadius : st.baseRadius;
+      st.baseRadius = P.clamp(from * changes.scale, minR, maxR);
+    }
+    S.rebuild(st);
+  }
+};
+
+/* What the panel should READ while a selection is up: a property the whole
+   selection agrees on, or null where it does not. Size is averaged instead,
+   since a spread of widths still has a meaningful middle to scale about. */
+S.styleOf = function(strokes){
+  if(!strokes.length) return null;
+  var brush = strokes[0].brush, hex = strokes[0].color.getHex(),
+      opacity = strokes[0].opacity, sum = 0;
+  for(var i=0;i<strokes.length;i++){
+    var st = strokes[i];
+    if(st.brush !== brush)             brush = null;
+    if(st.color.getHex() !== hex)      hex = null;
+    if(st.opacity !== opacity)         opacity = null;
+    sum += st.baseRadius;
+  }
+  return { brush: brush, hex: hex, opacity: opacity,
+           sizeMM: (sum/strokes.length) * 2 / P.MM };
+};
+
+/* ==========================================================================
    Groups
    --------------------------------------------------------------------------
    FACT (C.8): undo covers "add/delete group", so a group is part of the
