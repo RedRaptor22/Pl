@@ -255,6 +255,7 @@ D.serialize = function(){
     env: {
       bg:'#'+E.bg.getHexString(), grid:!!E.grid, axis:!!E.axis,
       fog:!!E.fog, shaded:!!E.shaded,
+      render:!!E.render, groundShadow:!!E.groundShadow,
       /* the light belongs to the sketch: a drawing lit from the left is a
          different drawing, and reopening it under the default sun would be a
          change nobody asked for */
@@ -369,6 +370,8 @@ D.restore = function(doc){
     P.ENV.bg.set(doc.env.bg);
     P.ENV.grid = !!doc.env.grid; P.ENV.axis = !!doc.env.axis;
     P.ENV.fog = !!doc.env.fog; P.ENV.shaded = !!doc.env.shaded;
+    P.ENV.render = !!doc.env.render;
+    if(doc.env.groundShadow !== undefined) P.ENV.groundShadow = !!doc.env.groundShadow;
     P.applyEnv();
     S.setShaded(P.ENV.shaded);
     var L = doc.env.light;

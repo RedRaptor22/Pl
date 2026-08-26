@@ -448,6 +448,14 @@ UI.init = function(){
   on($('optGrid'),   'click', function(){ P.ENV.grid = !P.ENV.grid; P.applyEnv(); UI.refresh(); });
   on($('optAxis'),   'click', function(){ P.ENV.axis = !P.ENV.axis; P.applyEnv(); UI.refresh(); });
   on($('optFog'),    'click', function(){ P.ENV.fog  = !P.ENV.fog;  P.applyEnv(); UI.refresh(); });
+  on($('optRender'), 'click', function(){
+    P.ENV.render = !P.ENV.render; P.invalidateGroundShadow(); UI.refresh();
+    P.toast(P.ENV.render ? 'Render mode — shadows and effects are live'
+                         : 'Draw mode — fast shading');
+  });
+  on($('optShadow'), 'click', function(){
+    P.ENV.groundShadow = !P.ENV.groundShadow; P.invalidateGroundShadow(); UI.refresh();
+  });
   on($('optToon'),   'click', function(){
     P.LIGHT.toon = !P.LIGHT.toon; P.applyLight(); UI.refresh();
   });
@@ -1456,6 +1464,8 @@ UI.refresh = function(){
   if($('lightAmbVal')) $('lightAmbVal').textContent = Math.round(P.LIGHT.ambient*100) + '%';
   if($('lightPick'))   $('lightPick').value = '#' + P.LIGHT.color.getHexString();
   setOn($('optToon'), P.LIGHT.toon);
+  setOn($('optRender'), P.ENV.render);
+  setOn($('optShadow'), P.ENV.groundShadow);
   placeLightDot();
 
   /* the rail's size/opacity readouts, and their popover twins */

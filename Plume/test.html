@@ -189,9 +189,14 @@ function run(W){
     P.History.clear(); P.TOOL.mirror = null; P.Guides.isolate = true;
     P.TOOL.sizeMM = 14; P.TOOL.eraserMM = 20;
     P.TOOL.autoGuide = false; P.TOOL.brush = 'pen';
-    /* back to the default, so a group that switched hold-to-shape off cannot
-       quietly disarm it for every group after it */
+    /* back to the defaults, so one group cannot quietly change the ground
+       every group after it stands on. The background is the one that bit:
+       a document round-trip set it to a dark navy and left it there, which
+       made every later pixel reading in the suite darker than the app it was
+       supposed to be measuring. */
     P.TOOL.shapeHold = true; P.TOOL.opacity = 1;
+    P.ENV.bg.set('#eceaf3'); P.ENV.render = false; P.ENV.groundShadow = true;
+    P.applyEnv();
     P.VIEW.theta = 0.6; P.VIEW.phi = 1.1; P.VIEW.radius = 4; P.VIEW.roll = 0;
     P.VIEW.ortho = false; P.VIEW.focal = 50;
     P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true; P.applyCamera();
@@ -2336,6 +2341,117 @@ function run(W){
   P.LIGHT.toon = false; P.LIGHT.az = 0.4185; P.LIGHT.alt = 0.6664;
   P.LIGHT.intensity = 1; P.LIGHT.ambient = 0.66;
   P.LIGHT.color.set('#ffffff'); P.applyLight();
+  reset();
+
+  /* ================= ground shadow ================= */
+  group('Ground shadow — the sketch thrown down the light');
+
+  function ringScene(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.autoGuide = false;
+    P.VIEW.pinned = true; P.VIEW.pivot.set(0,0,0);
+    P.VIEW.theta = 0.55; P.VIEW.phi = 1.15; P.VIEW.radius = 3.4; P.applyCamera();
+    P.refreshDrawPlane();
+    P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 60; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#d9534f');
+    var c27 = [];
+    for(var q27=0;q27<=14;q27++){
+      var t27 = q27/14*Math.PI*2;
+      c27.push({x:CX+Math.cos(t27)*52, y:CY-70+Math.sin(t27)*52});
+    }
+    pen(c27);
+    P.Guides.setActive(null);
+    P.LIGHT.az = 0.6; P.LIGHT.alt = 0.62; P.LIGHT.intensity = 1.3;
+    P.LIGHT.ambient = 0.5; P.applyLight();
+    P.ENV.groundShadow = true;
+  }
+  /* A BLOCK around the ring, not a guessed line. Where the shadow lands on
+     screen depends on the light, the camera and the ground all at once - the
+     first version of this sampled a row twenty pixels below centre and found
+     only background, because from this angle the ground the shadow falls on
+     projects ABOVE centre. Averaging a block that certainly contains it is
+     insensitive to all of that and still moves when the shadow appears. */
+  function groundMean(){
+    P.invalidateGroundShadow();
+    P.updateGroundShadow();
+    P.renderer.render(P.scene, P.cam());
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpG = P.viewport();
+    var w27 = Math.round(320*dpr), h27 = Math.round(200*dpr);
+    var buf27 = new W.Uint8Array(4*w27*h27), sum27 = 0;
+    gl.readPixels(Math.round((CX-160)*dpr), Math.round((vpG.h - CY - 40)*dpr),
+                  w27, h27, gl.RGBA, gl.UNSIGNED_BYTE, buf27);
+    for(var q=0;q<w27*h27;q++) sum27 += buf27[q*4];
+    return sum27/(w27*h27);
+  }
+
+  ringScene();
+  P.ENV.render = false;
+  var noShadow27 = groundMean();
+  P.ENV.render = true;
+  var withShadow27 = groundMean();
+  ck('render mode casts a shadow on the ground',
+     withShadow27 < noShadow27 - 1.5,
+     'ground reads ' + noShadow27.toFixed(1) + ' in draw mode, ' +
+     withShadow27.toFixed(1) + ' in render mode');
+
+  P.ENV.groundShadow = false;
+  var toggledOff27 = groundMean();
+  ck('...and the shadow toggle turns it off again',
+     Math.abs(toggledOff27 - noShadow27) < 0.5,
+     'back to ' + toggledOff27.toFixed(1) + ' against ' + noShadow27.toFixed(1));
+  P.ENV.groundShadow = true;
+
+  /* A LIGHT BELOW THE HORIZON has nothing sensible to cast. Compared against
+     the same light with shadows switched off, not against the earlier reading:
+     dropping the sun under the horizon darkens the STROKES in the sampled
+     block too, and that has nothing to do with whether a shadow was cast. */
+  var wasAlt27 = P.LIGHT.alt;
+  P.LIGHT.alt = -0.2; P.applyLight();
+  P.ENV.groundShadow = false;
+  var underNoCast = groundMean();
+  P.ENV.groundShadow = true;
+  var belowHorizon27 = groundMean();
+  ck('a light under the horizon casts nothing rather than something wrong',
+     Math.abs(belowHorizon27 - underNoCast) < 0.2,
+     'ground reads ' + belowHorizon27.toFixed(2) + ' against ' +
+     underNoCast.toFixed(2) + ' with casting off');
+  P.LIGHT.alt = wasAlt27; P.applyLight();
+
+  /* THE SHADOW IS CACHED. Orbiting does not move a shadow cast by a fixed
+     light onto a fixed ground, so spinning the view must not redraw it. */
+  P.ENV.render = true;
+  P.invalidateGroundShadow(); P.updateGroundShadow();
+  var passes27 = 0;
+  var realSet27 = P.renderer.setRenderTarget;
+  P.renderer.setRenderTarget = function(t27){
+    if(t27) passes27++;
+    return realSet27.apply(this, arguments);
+  };
+  for(var o27=0;o27<8;o27++){
+    P.VIEW.theta += 0.12; P.applyCamera();
+    P.updateGroundShadow();
+  }
+  var orbitPasses = passes27;
+  P.Strokes.list[0].color.set('#00aa55');
+  P.onSceneChange();
+  P.updateGroundShadow();
+  var afterEdit = passes27;
+  P.renderer.setRenderTarget = realSet27;
+  ck('orbiting does not redraw the shadow, but changing the sketch does',
+     orbitPasses === 0 && afterEdit > orbitPasses,
+     orbitPasses + ' passes over 8 orbits, ' + (afterEdit-orbitPasses) +
+     ' after an edit');
+
+  /* it is only scaffolding that does not cast: an empty sketch casts nothing */
+  P.Strokes.clear();
+  var emptyGround = groundMean();
+  ck('an empty sketch casts no shadow',
+     emptyGround > withShadow27 + 1.5, 'ground reads ' + emptyGround.toFixed(1));
+
+  P.ENV.render = false;
+  P.LIGHT.az = 0.4185; P.LIGHT.alt = 0.6664; P.LIGHT.intensity = 1;
+  P.LIGHT.ambient = 0.66; P.applyLight();
   reset();
 
   /* ================= selecting ================= */

@@ -250,7 +250,8 @@ P.setTool = function(mode){
 /* ==========================================================================
    Change hooks — the UI listens through these
    ========================================================================== */
-P.onSceneChange = function(){ if(P.UI) P.UI.refresh(); };
+P.onSceneChange = function(){
+  P.invalidateGroundShadow(); if(P.UI) P.UI.refresh(); };
 P.onToolChange  = function(){ if(P.UI) P.UI.refresh(); };
 P.onViewChange  = function(){ if(P.UI) P.UI.refreshView(); };
 P.onGuideChange = function(){ if(P.UI) P.UI.refresh(); };
@@ -280,6 +281,7 @@ function tick(now){
   if(!P.viewAnimating()) P.tickSpin();
   P.tickView(now);
   P.updatePivotMarker();
+  P.updateGroundShadow();         // cached; only redrawn when the light or the sketch moves
   P.renderer.render(P.scene, P.cam());
   requestAnimationFrame(tick);
 }

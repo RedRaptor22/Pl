@@ -166,7 +166,11 @@ var ENV = {
   grid    : true,
   axis    : false,             // FACT: Global Axis is off by default
   fog     : false,
-  shaded  : true
+  shaded  : true,
+  /* FACT: Feather shows lighting, shadows and effects accurately only in
+     rendering mode. Drawing stays cheap; you ask for the picture. */
+  render  : false,
+  groundShadow : true
 };
 P.ENV = ENV;
 
@@ -222,6 +226,167 @@ P.applyLight = function(){
   LU.uToon.value     = LIGHT.toon ? 1 : 0;
   LU.uToonStep.value = Math.max(2, Math.round(LIGHT.toonSteps));
   if(P.onLightChange) P.onLightChange();
+};
+
+/* ==========================================================================
+   Ground shadow — the sketch's silhouette, thrown down the light
+   --------------------------------------------------------------------------
+   Feather's Ground Shadow casts onto the ground, and that is all this does.
+
+   NOT A SHADOW MAP. The usual depth-map comparison wants surfaces thick and
+   flat enough to bias against, and almost everything Plume draws is a thin
+   tube: the bias that stops the acne is the bias that lifts the shadow off
+   the object it belongs to. What the ground actually needs is a simpler
+   question - is anything between this patch of ground and the light - and the
+   answer is the sketch's SILHOUETTE seen from the light. So the strokes are
+   drawn flat into a small target from the light's direction, and the ground
+   samples it. No depth compare, no bias, nothing to tune.
+
+   It is redrawn only when something it depends on moves. Orbiting the camera
+   does not change a shadow cast by a fixed light onto a fixed ground, so
+   spinning the view costs nothing.
+   ========================================================================== */
+var SHADOW_SIZE = 1024;
+var shadowTarget = null, shadowCam = null, shadowPlane = null;
+var shadowFlat = new THREE.MeshBasicMaterial({ color:0x000000 });
+var shadowDirty = true, shadowKey = '';
+
+P.invalidateGroundShadow = function(){ shadowDirty = true; };
+P.onLightChange = function(){ shadowDirty = true; };
+
+var GROUND_VERT = [
+  'varying vec4 vLightPos;',
+  'uniform mat4 uLightVP;',
+  'void main(){',
+  '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+  '  vLightPos = uLightVP * wp;',
+  '  gl_Position = projectionMatrix * viewMatrix * wp;',
+  '}'
+].join('\n');
+
+var GROUND_FRAG = [
+  'precision highp float;',
+  'varying vec4 vLightPos;',
+  'uniform sampler2D uMask;',
+  'uniform vec3  uColor;',
+  'uniform float uStrength;',
+  'uniform float uSoft;',
+  'void main(){',
+  '  vec3 lp = vLightPos.xyz / vLightPos.w;',
+  '  vec2 uv = lp.xy * 0.5 + 0.5;',
+  '  if(uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;',
+  /* a few taps, so the edge is soft rather than a stencil cut */
+  '  float o = uSoft;',
+  '  float a = texture2D(uMask, uv).a * 0.4;',
+  '  a += texture2D(uMask, uv + vec2( o, 0.0)).a * 0.15;',
+  '  a += texture2D(uMask, uv + vec2(-o, 0.0)).a * 0.15;',
+  '  a += texture2D(uMask, uv + vec2(0.0,  o)).a * 0.15;',
+  '  a += texture2D(uMask, uv + vec2(0.0, -o)).a * 0.15;',
+  '  if(a < 0.004) discard;',
+  '  gl_FragColor = vec4(uColor, a * uStrength);',
+  '}'
+].join('\n');
+
+function ensureShadow(){
+  if(shadowTarget) return;
+  shadowTarget = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE, {
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat, depthBuffer: true
+  });
+  shadowCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 100);
+  shadowPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.ShaderMaterial({
+      uniforms: {
+        uLightVP  : { value: new THREE.Matrix4() },
+        uMask     : { value: shadowTarget.texture },
+        uColor    : { value: new THREE.Color(0x000000) },
+        uStrength : { value: 0.30 },
+        uSoft     : { value: 1.5 / SHADOW_SIZE }
+      },
+      vertexShader: GROUND_VERT, fragmentShader: GROUND_FRAG,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide
+    })
+  );
+  shadowPlane.rotation.x = -Math.PI/2;             // lie it on y = 0
+  shadowPlane.renderOrder = 1;                     // over the grid, under the ink
+  shadowPlane.visible = false;
+  scene.add(shadowPlane);
+}
+
+/* what the shadow depends on: the light, and where the sketch is */
+function shadowSignature(box){
+  return [LIGHT.az.toFixed(4), LIGHT.alt.toFixed(4),
+          box.min.x.toFixed(3), box.min.y.toFixed(3), box.min.z.toFixed(3),
+          box.max.x.toFixed(3), box.max.y.toFixed(3), box.max.z.toFixed(3)].join(',');
+}
+
+P.updateGroundShadow = function(){
+  var on = ENV.render && ENV.groundShadow && P.Strokes && P.Strokes.list.length;
+  ensureShadow();
+  /* below the horizon there is nothing sensible to cast */
+  if(on && LIGHT.alt < 0.05) on = false;
+  if(!on){ shadowPlane.visible = false; return; }
+
+  var box = P.Strokes.bounds();
+  if(box.isEmpty()){ shadowPlane.visible = false; return; }
+  box.expandByScalar(0.02);
+
+  var key = shadowSignature(box);
+  if(!shadowDirty && key === shadowKey){ shadowPlane.visible = true; return; }
+  shadowDirty = false; shadowKey = key;
+
+  var centre = box.getCenter(new THREE.Vector3());
+  var radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.05);
+  var dir = P.lightDirection(new THREE.Vector3());
+
+  /* the ground the shadow can land on reaches out by however far the light
+     leans: a low sun throws a long one */
+  var reach = radius + Math.abs(centre.y) / Math.max(Math.tan(LIGHT.alt), 0.05);
+  var half = Math.min(radius + reach, radius * 40 + 1);
+
+  shadowCam.left = -half; shadowCam.right = half;
+  shadowCam.top  =  half; shadowCam.bottom = -half;
+  shadowCam.near = 0.01;  shadowCam.far = half*4 + radius*4 + 2;
+  shadowCam.position.copy(centre).addScaledVector(dir, half*2 + radius);
+  shadowCam.lookAt(centre);
+  shadowCam.updateMatrixWorld();
+  shadowCam.updateProjectionMatrix();
+
+  /* STROKES ONLY, and said as a whitelist rather than a list of things to
+     hide. Naming the exceptions is how the first attempt turned the ground
+     into one grey slab: an override material makes EVERYTHING opaque, so the
+     pivot marker - a one-metre sphere kept at zero opacity - became a solid
+     black ball filling the light's whole view. Anything added to the scene
+     later would have found the same trap. Guides are scaffolding and should
+     not throw shade either. */
+  var prevOverride = scene.overrideMaterial;
+  var strokeRoot = P.Strokes.group;
+  var kids = scene.children, wasVisible = new Array(kids.length), ki;
+  for(ki=0; ki<kids.length; ki++){
+    wasVisible[ki] = kids[ki].visible;
+    kids[ki].visible = (kids[ki] === strokeRoot);
+  }
+  scene.overrideMaterial = shadowFlat;
+
+  var prevTarget = renderer.getRenderTarget();
+  renderer.setRenderTarget(shadowTarget);
+  renderer.setClearColor(0x000000, 0);
+  renderer.clear(true, true, false);
+  renderer.render(scene, shadowCam);
+  renderer.setRenderTarget(prevTarget);
+  renderer.setClearColor(ENV.bg, 1);
+
+  scene.overrideMaterial = prevOverride;
+  for(ki=0; ki<kids.length; ki++) kids[ki].visible = wasVisible[ki];
+
+  var u = shadowPlane.material.uniforms;
+  u.uLightVP.value.multiplyMatrices(
+    shadowCam.projectionMatrix, shadowCam.matrixWorldInverse);
+  u.uColor.value.copy(ENV.bg).lerp(new THREE.Color(0x000000), 0.85);
+  shadowPlane.position.set(centre.x, 0, centre.z);
+  shadowPlane.scale.set(half*2, half*2, 1);
+  shadowPlane.visible = true;
 };
 
 var gridHelper = null;
