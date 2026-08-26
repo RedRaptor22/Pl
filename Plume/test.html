@@ -2226,6 +2226,118 @@ function run(W){
      Object.keys(P.BRUSH).length + ' brushes');
   P.TOOL.brush = 'pen'; P.UI.refresh();
 
+  /* ================= lighting ================= */
+  group('Lighting — one key light you can aim, colour and dim');
+
+  function litStroke(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.pinned = true; P.VIEW.theta = 0.4; P.VIEW.phi = 1.1; P.applyCamera();
+    P.TOOL.autoGuide = false; P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 90;
+    P.TOOL.color.set('#c8c8c8'); P.TOOL.opacity = 1;
+    P.refreshDrawPlane();
+    pen([{x:CX-160,y:CY},{x:CX,y:CY},{x:CX+160,y:CY}]);
+    return P.Strokes.list[0];
+  }
+  /* ACROSS the tube: a horizontal stroke's normals barely change along its
+     length, so a lengthwise scan cannot see the shading fall off at all */
+  function acrossTube(){
+    P.renderer.render(P.scene, P.cam());
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpL = P.viewport(), buf26 = new W.Uint8Array(4*200);
+    gl.readPixels(Math.round(CX*dpr), Math.round((vpL.h - CY - 100)*dpr), 1, 200,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf26);
+    var seen26 = {}, n26 = 0, sum26 = 0;
+    for(var q26=0;q26<200;q26++){
+      var r26 = buf26[q26*4], g26 = buf26[q26*4+1], b26 = buf26[q26*4+2];
+      if(Math.abs(r26-g26) < 12 && Math.abs(g26-b26) < 12 && r26 < 215){
+        seen26[r26] = 1; n26++; sum26 += r26;
+      }
+    }
+    return { px:n26, levels:Object.keys(seen26).length, mean:sum26/(n26||1) };
+  }
+
+  var litSt = litStroke();
+  ck('every stroke shares the one light rather than carrying a copy',
+     litSt.mesh.material.uniforms.uLightDir === P.LIGHT_UNIFORMS.uLightDir &&
+     litSt.mesh.material.uniforms.uAmbient === P.LIGHT_UNIFORMS.uAmbient,
+     'uniform objects are shared, so aiming the light is one assignment');
+
+  /* the defaults have to reproduce the light that used to be hardcoded, or
+     every sketch already drawn would shift the day this landed */
+  var dir26 = P.LIGHT_UNIFORMS.uLightDir.value;
+  ck('the default light is the one the shader used to hold hardcoded',
+     Math.abs(dir26.x - 0.319) < 0.002 && Math.abs(dir26.y - 0.618) < 0.002 &&
+     Math.abs(dir26.z - 0.718) < 0.002 && Math.abs(P.LIGHT.ambient - 0.66) < 1e-9,
+     '(' + dir26.x.toFixed(3) + ', ' + dir26.y.toFixed(3) + ', ' +
+     dir26.z.toFixed(3) + ') at ambient ' + P.LIGHT.ambient);
+
+  var base26 = acrossTube();
+  ck('a stroke is shaded across its width, not flat',
+     base26.px > 10 && base26.levels > 8,
+     base26.levels + ' shades over ' + base26.px + ' pixels');
+
+  P.LIGHT.az = -2.0; P.applyLight();
+  var moved26 = acrossTube();
+  ck('aiming the light somewhere else changes the shading',
+     Math.abs(moved26.mean - base26.mean) > 8,
+     'mean ' + base26.mean.toFixed(1) + ' -> ' + moved26.mean.toFixed(1));
+  P.LIGHT.az = 0.4185; P.applyLight();
+
+  P.LIGHT.ambient = 0.05; P.applyLight();
+  var dark26 = acrossTube();
+  ck('dropping the ambient darkens the unlit side',
+     dark26.mean < base26.mean - 8,
+     'mean ' + base26.mean.toFixed(1) + ' -> ' + dark26.mean.toFixed(1));
+  P.LIGHT.ambient = 0.66; P.applyLight();
+
+  P.LIGHT.color.set('#ff4020'); P.applyLight();
+  var warm26 = (function(){
+    P.renderer.render(P.scene, P.cam());
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpW = P.viewport(), bw = new W.Uint8Array(4*400), warm = 0;
+    gl.readPixels(Math.round((CX-200)*dpr), Math.round((vpW.h - CY)*dpr), 400, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, bw);
+    for(var q=0;q<400;q++) if(bw[q*4] > bw[q*4+2] + 25) warm++;
+    return warm;
+  })();
+  ck('a coloured light tints what it falls on', warm26 > 100,
+     warm26 + ' pixels went warm under a red light');
+  P.LIGHT.color.set('#ffffff'); P.applyLight();
+
+  /* TOON bands the same term rather than replacing it */
+  var smooth26 = acrossTube().levels;
+  P.LIGHT.toon = true; P.LIGHT.toonSteps = 4; P.applyLight();
+  var toon26 = acrossTube().levels;
+  ck('toon shading bands the gradient into steps',
+     toon26 < smooth26 / 3 && toon26 >= 2,
+     smooth26 + ' shades became ' + toon26);
+  P.LIGHT.toon = false; P.applyLight();
+
+  /* the pad aims it, and the light belongs to the sketch */
+  var padEl = D.getElementById('lightPad');
+  ck('the environment panel carries a light pad and its readouts',
+     !!padEl && !!D.getElementById('lightIntVal') &&
+     !!D.getElementById('lightAmbVal') && !!D.getElementById('lightPick'));
+
+  P.LIGHT.az = -1.1; P.LIGHT.alt = 0.3; P.LIGHT.intensity = 1.7;
+  P.LIGHT.color.set('#88ccff'); P.LIGHT.toon = true; P.applyLight();
+  var lightJson = JSON.stringify(P.Doc.serialize());
+  P.LIGHT.az = 0; P.LIGHT.alt = 1; P.LIGHT.intensity = 1;
+  P.LIGHT.color.set('#ffffff'); P.LIGHT.toon = false; P.applyLight();
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(lightJson));
+  ck('the light is saved with the sketch and comes back with it',
+     Math.abs(P.LIGHT.az + 1.1) < 1e-3 && Math.abs(P.LIGHT.alt - 0.3) < 1e-3 &&
+     Math.abs(P.LIGHT.intensity - 1.7) < 1e-3 &&
+     P.LIGHT.color.getHexString() === '88ccff' && P.LIGHT.toon === true,
+     'az ' + P.LIGHT.az.toFixed(2) + ', #' + P.LIGHT.color.getHexString() +
+     ', toon ' + P.LIGHT.toon);
+  P.LIGHT.toon = false; P.LIGHT.az = 0.4185; P.LIGHT.alt = 0.6664;
+  P.LIGHT.intensity = 1; P.LIGHT.ambient = 0.66;
+  P.LIGHT.color.set('#ffffff'); P.applyLight();
+  reset();
+
   /* ================= selecting ================= */
   group('Select — tapping, sweeping, lassoing');
 

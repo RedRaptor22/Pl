@@ -170,6 +170,60 @@ var ENV = {
 };
 P.ENV = ENV;
 
+/* ==========================================================================
+   Lighting — one key light and a soft ambient floor
+   --------------------------------------------------------------------------
+   Feather's Lighting panel gives a direction you slide (up and down for
+   altitude, sideways for azimuth), a colour, and an intensity. This is that,
+   kept to a single key plus ambient because a sketchbook wants a predictable
+   read rather than a studio rig.
+
+   THE UNIFORMS ARE SHARED OBJECTS. Every stroke owns its own material, so
+   pointing them all at the same uniform objects makes changing the light one
+   assignment rather than a walk over every stroke in the sketch - which
+   matters when the light is being dragged.
+
+   The defaults reproduce the light that was hardcoded in the stroke shader
+   before there was anything to adjust: direction (0.32, 0.62, 0.72) is
+   altitude 38.2 degrees at azimuth 24, and an ambient of 0.66 with a
+   half-lambert term is exactly the 0.66 + 0.34*(d*0.5+0.5) it used to be. So
+   nothing already drawn changes until you move something. */
+var LIGHT = P.LIGHT = {
+  az       : 0.4185,          // radians, 0 = +Z, turning towards +X
+  alt      : 0.6664,          // radians above the horizon
+  color    : new THREE.Color(0xffffff),
+  intensity: 1,
+  ambient  : 0.66,            // how bright the unlit side stays
+  toon     : false,
+  toonSteps: 4
+};
+
+var LU = P.LIGHT_UNIFORMS = {
+  uLightDir: { value: new THREE.Vector3(0.319, 0.618, 0.718) },
+  uLightCol: { value: new THREE.Color(1,1,1) },
+  uLightInt: { value: 1 },
+  uAmbient : { value: 0.66 },
+  uToon    : { value: 0 },
+  uToonStep: { value: 4 }
+};
+
+P.lightDirection = function(out){
+  var ca = Math.cos(LIGHT.alt);
+  return (out || new THREE.Vector3()).set(
+    ca * Math.sin(LIGHT.az), Math.sin(LIGHT.alt), ca * Math.cos(LIGHT.az)
+  ).normalize();
+};
+
+P.applyLight = function(){
+  P.lightDirection(LU.uLightDir.value);
+  LU.uLightCol.value.copy(LIGHT.color);
+  LU.uLightInt.value = LIGHT.intensity;
+  LU.uAmbient.value  = P.clamp(LIGHT.ambient, 0, 1);
+  LU.uToon.value     = LIGHT.toon ? 1 : 0;
+  LU.uToonStep.value = Math.max(2, Math.round(LIGHT.toonSteps));
+  if(P.onLightChange) P.onLightChange();
+};
+
 var gridHelper = null;
 function buildGrid(){
   if(gridHelper){ scene.remove(gridHelper); gridHelper.geometry.dispose(); gridHelper.material.dispose(); }

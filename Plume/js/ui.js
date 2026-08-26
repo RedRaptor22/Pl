@@ -448,6 +448,15 @@ UI.init = function(){
   on($('optGrid'),   'click', function(){ P.ENV.grid = !P.ENV.grid; P.applyEnv(); UI.refresh(); });
   on($('optAxis'),   'click', function(){ P.ENV.axis = !P.ENV.axis; P.applyEnv(); UI.refresh(); });
   on($('optFog'),    'click', function(){ P.ENV.fog  = !P.ENV.fog;  P.applyEnv(); UI.refresh(); });
+  on($('optToon'),   'click', function(){
+    P.LIGHT.toon = !P.LIGHT.toon; P.applyLight(); UI.refresh();
+  });
+  on($('lightPick'), 'input', function(){
+    P.LIGHT.color.set(this.value); P.applyLight(); UI.refresh();
+  });
+  dragValue($('lightIntVal'), 'lightInt');
+  dragValue($('lightAmbVal'), 'lightAmb');
+  bindLightPad($('lightPad'));
   on($('optShaded'), 'click', function(){
     P.ENV.shaded = !P.ENV.shaded; S.setShaded(P.ENV.shaded); UI.refresh();
   });
@@ -677,8 +686,54 @@ var LQ = {
   lqRange:    { get:function(){ return TOOL.liquify.range; },
                 set:function(v){ TOOL.liquify.range = Math.round(P.clamp(v, 0, 100)); } },
   lqStrength: { get:function(){ return TOOL.liquify.strength; },
-                set:function(v){ TOOL.liquify.strength = Math.round(P.clamp(v, 1, 100)); } }
+                set:function(v){ TOOL.liquify.strength = Math.round(P.clamp(v, 1, 100)); } },
+  /* the light's two numbers ride the same drag-a-readout mechanism the
+     liquify ones do, so there is one way to nudge a number in this app */
+  lightInt:   { get:function(){ return P.LIGHT.intensity*100; },
+                set:function(v){ P.LIGHT.intensity = P.clamp(v/100, 0, 3); P.applyLight(); } },
+  lightAmb:   { get:function(){ return P.LIGHT.ambient*100; },
+                set:function(v){ P.LIGHT.ambient = P.clamp(v/100, 0, 1); P.applyLight(); } }
 };
+
+/* THE LIGHT PAD. Sideways turns the key light around the sketch, up and down
+   raises it from the horizon to overhead - the two things Feather's lighting
+   icon slides between, given a surface big enough to aim with a thumb. The dot
+   is where the light IS, so dragging it left moves the light left. */
+function bindLightPad(el){
+  if(!el) return;
+  var drag = null;
+  function place(e){
+    var r = el.getBoundingClientRect();
+    var fx = P.clamp((e.clientX - r.left) / r.width,  0, 1);
+    var fy = P.clamp((e.clientY - r.top)  / r.height, 0, 1);
+    P.LIGHT.az  = (fx - 0.5) * Math.PI * 2;
+    P.LIGHT.alt = (1 - fy) * (Math.PI/2);        // horizon at the bottom
+    P.applyLight();
+    UI.refresh();
+  }
+  on(el, 'pointerdown', function(e){
+    drag = true; place(e);
+    try{ el.setPointerCapture(e.pointerId); }catch(err){}
+    e.preventDefault();
+  });
+  on(el, 'pointermove', function(e){ if(drag) place(e); });
+  function stop(e){
+    if(!drag) return;
+    drag = null;
+    try{ el.releasePointerCapture(e.pointerId); }catch(err){}
+  }
+  on(el, 'pointerup', stop);
+  on(el, 'pointercancel', stop);
+}
+
+function placeLightDot(){
+  var dot = $('lightDot'), pad = $('lightPad');
+  if(!dot || !pad) return;
+  var fx = P.LIGHT.az / (Math.PI*2) + 0.5;
+  var fy = 1 - P.LIGHT.alt / (Math.PI/2);
+  dot.style.left = (P.clamp(fx,0,1)*100) + '%';
+  dot.style.top  = (P.clamp(fy,0,1)*100) + '%';
+}
 
 /* ==========================================================================
    The brush panel, pointed at a selection
@@ -1395,6 +1450,13 @@ UI.refresh = function(){
       lqb[lq].classList.toggle('on', lqb[lq].dataset.lq === TOOL.liquify.mode);
     }
   }
+
+  /* lighting readouts */
+  if($('lightIntVal')) $('lightIntVal').textContent = Math.round(P.LIGHT.intensity*100) + '%';
+  if($('lightAmbVal')) $('lightAmbVal').textContent = Math.round(P.LIGHT.ambient*100) + '%';
+  if($('lightPick'))   $('lightPick').value = '#' + P.LIGHT.color.getHexString();
+  setOn($('optToon'), P.LIGHT.toon);
+  placeLightDot();
 
   /* the rail's size/opacity readouts, and their popover twins */
   var erasing = UI.sizeKey() === 'eraserMM';

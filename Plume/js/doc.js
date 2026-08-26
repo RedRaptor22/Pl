@@ -254,7 +254,14 @@ D.serialize = function(){
     },
     env: {
       bg:'#'+E.bg.getHexString(), grid:!!E.grid, axis:!!E.axis,
-      fog:!!E.fog, shaded:!!E.shaded
+      fog:!!E.fog, shaded:!!E.shaded,
+      /* the light belongs to the sketch: a drawing lit from the left is a
+         different drawing, and reopening it under the default sun would be a
+         change nobody asked for */
+      light: { az:q(P.LIGHT.az), alt:q(P.LIGHT.alt),
+               color:'#'+P.LIGHT.color.getHexString(),
+               intensity:q(P.LIGHT.intensity), ambient:q(P.LIGHT.ambient),
+               toon:!!P.LIGHT.toon, toonSteps:P.LIGHT.toonSteps }
     },
     tool: {
       brush:T.brush, color:'#'+T.color.getHexString(), sizeMM:q(T.sizeMM),
@@ -364,6 +371,15 @@ D.restore = function(doc){
     P.ENV.fog = !!doc.env.fog; P.ENV.shaded = !!doc.env.shaded;
     P.applyEnv();
     S.setShaded(P.ENV.shaded);
+    var L = doc.env.light;
+    if(L){
+      P.LIGHT.az = L.az; P.LIGHT.alt = L.alt;
+      P.LIGHT.color.set(L.color);
+      P.LIGHT.intensity = L.intensity; P.LIGHT.ambient = L.ambient;
+      P.LIGHT.toon = !!L.toon;
+      if(L.toonSteps) P.LIGHT.toonSteps = L.toonSteps;
+    }
+    P.applyLight();
   }
   if(doc.tool){
     var T = P.TOOL;

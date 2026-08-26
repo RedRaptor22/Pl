@@ -67,6 +67,12 @@ var FRAG = [
   'uniform float uShade;',
   'uniform float uGlow;',
   'uniform float uGrit;',
+  'uniform vec3  uLightDir;',
+  'uniform vec3  uLightCol;',
+  'uniform float uLightInt;',
+  'uniform float uAmbient;',
+  'uniform float uToon;',
+  'uniform float uToonStep;',
   'varying vec4 vCol;',
   'varying vec3 vN;',
   'varying vec3 vPos;',
@@ -90,10 +96,20 @@ var FRAG = [
   'void main(){',
   '  vec3 n = normalize(vN);',
   '  if(!gl_FrontFacing) n = -n;',
-  '  float d = dot(n, normalize(vec3(0.32,0.62,0.72)));',
-  '  float shade = mix(1.0, 0.66 + 0.34*(d*0.5+0.5), uShade);',
+  /* HALF-LAMBERT, so a curved stroke keeps some shape on its dark side rather
+     than falling off a cliff at the terminator - the sketchbook read Feather
+     has, and what the hardcoded term did before there was a light to aim. */
+  '  float hl = dot(n, uLightDir) * 0.5 + 0.5;',
+  /* TOON bands the same term instead of replacing it, so toggling it changes
+     how the light falls off and not where the light is. */
+  '  if(uToon > 0.5){',
+  '    float steps = max(2.0, uToonStep);',
+  '    hl = clamp(floor(hl * steps) / (steps - 1.0), 0.0, 1.0);',
+  '  }',
+  '  float lit = uAmbient + (1.0 - uAmbient) * hl * uLightInt;',
+  '  float shade = mix(1.0, lit, uShade);',
   '  if(vCol.a < 0.004) discard;',
-  '  vec3 rgb = vCol.rgb * shade;',
+  '  vec3 rgb = vCol.rgb * shade * mix(vec3(1.0), uLightCol, uShade);',
   /* glow: emissive core that falls off at grazing angles, so the tube reads
      as a light source rather than a flat additive smear */
   '  if(uGlow > 0.5){',
@@ -124,7 +140,17 @@ function makeMaterial(stroke, needsAlpha){
       uSelect:{value:0},
       uShade:{value: (P.ENV.shaded && !glow) ? 1 : 0},
       uGlow:{value: glow},
-      uGrit:{value: cfg.grit ? 1 : 0}
+      uGrit:{value: cfg.grit ? 1 : 0},
+      /* SHARED references, not copies: changing the light updates every
+         stroke at once instead of walking the whole sketch per frame of a
+         drag. three.js assigns the uniforms object through rather than
+         cloning it, so these stay the very objects applyLight writes to. */
+      uLightDir: P.LIGHT_UNIFORMS.uLightDir,
+      uLightCol: P.LIGHT_UNIFORMS.uLightCol,
+      uLightInt: P.LIGHT_UNIFORMS.uLightInt,
+      uAmbient : P.LIGHT_UNIFORMS.uAmbient,
+      uToon    : P.LIGHT_UNIFORMS.uToon,
+      uToonStep: P.LIGHT_UNIFORMS.uToonStep
     },
     vertexShader: VERT, fragmentShader: FRAG,
     /* FRONT FACES ONLY. A stroke is a closed tube, so its far wall is never

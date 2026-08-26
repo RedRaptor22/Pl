@@ -298,6 +298,7 @@ P.boot = function(){
     count : document.getElementById('dCount')
   };
   P.applyEnv();
+  P.applyLight();
   P.resize();
   P.applyCamera();
   window.addEventListener('resize', P.resize);

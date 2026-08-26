@@ -64,6 +64,16 @@
   /* the loop has to read at arm's length on a tablet, so it is drawn a little
      heavier than a desktop hairline and carries a soft fill to show the AREA
      it will take, not just the path the hand took */
+  /* the light pad: a little sky you drag the sun around in */
+  .lightRow{align-items:stretch;gap:10px;}
+  #lightPad{position:relative;width:84px;height:84px;flex:0 0 auto;border-radius:12px;
+    background:linear-gradient(180deg,var(--panel3),var(--panel2));
+    border:1px solid var(--line);touch-action:none;cursor:grab;overflow:hidden;}
+  #lightPad:active{cursor:grabbing;}
+  #lightDot{position:absolute;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;
+    background:#ffd36b;box-shadow:0 0 0 2px rgba(0,0,0,.18), 0 0 12px 3px rgba(255,211,107,.7);
+    pointer-events:none;}
+
   #lassoPath{fill:rgba(91,157,255,.18);stroke:var(--blue);stroke-width:2.5;
     stroke-dasharray:8 5;stroke-linejoin:round;display:none;}
 
@@ -738,6 +748,21 @@
       <button id="optAxis"   data-tip="Global axis, RGB = XYZ">Axis</button>
       <button id="optFog"    data-tip="Fog follows the background">Fog</button>
       <button id="optShaded" class="on" data-tip="Shaded material">Shade</button>
+    </div>
+
+    <div class="row"><label class="lab grow">Lighting</label>
+      <button id="optToon" data-tip="Toon shading — bands instead of a gradient.<br><i>Shaded material only.</i>">Toon</button>
+    </div>
+    <div class="row lightRow">
+      <div id="lightPad" data-tip="Light direction — slide sideways to turn it, up and down to raise it"><div id="lightDot"></div></div>
+      <div class="col grow">
+        <div class="row"><label class="lab grow">Colour</label>
+          <input type="color" id="lightPick" value="#ffffff"></div>
+        <div class="row"><label class="lab grow">Intensity</label>
+          <span class="val" id="lightIntVal">100%</span></div>
+        <div class="row"><label class="lab grow">Ambient</label>
+          <span class="val" id="lightAmbVal">66%</span></div>
+      </div>
     </div>
   </div>
 </div>
