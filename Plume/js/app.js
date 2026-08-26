@@ -55,36 +55,125 @@ P.clearLasso = function(){
 /* ==========================================================================
    Hover cursor — FACT (C.3): hover previews brush size and colour on a guide
    ========================================================================== */
-var hoverRing = new THREE.Mesh(
-  new THREE.RingGeometry(0.9, 1.0, 44),
-  new THREE.MeshBasicMaterial({color:0xff8a3d, transparent:true, opacity:0.9,
-                               side:THREE.DoubleSide, depthTest:false})
-);
-hoverRing.renderOrder = 900;
-hoverRing.visible = false;
-P.scene.add(hoverRing);
+/* THE PREVIEW IS THE NIB, not a token circle standing in for it. It is built
+   from the very cross-section the brush draws with - S.sectionPoint, the same
+   outline writeRing walks - scaled by the same half-width the trim measures
+   against. So a wide brush previews as the broad ribbon it is rather than at a
+   third of its real size, and the sketch pencil shows its chisel. The old ring
+   sized itself off baseRadius alone and squashed itself only for two brushes
+   by name, so every brush added since previewed as a plain circle at up to a
+   third of the width it would actually lay down.
 
-P.hideHoverCursor = function(){ hoverRing.visible = false; };
+   It lies FLAT ON THE SURFACE, mapping the section's two axes onto the two
+   directions across the guide. INFERENCE: a nib's cross-section stands
+   perpendicular to its path, so a literal one would be edge-on and invisible
+   from the side you draw from. What a preview is for is the footprint - how
+   much ground this brush covers and in what proportion - and that is what
+   lying it down shows.
+
+   Filled at 50%, with the outline kept as the on/off-surface signal: solid
+   where the stroke would land on the guide, faint where it would go in the
+   air. */
+var HOVER_FILL = 0.5;
+
+var hoverGeom = { key:null, geom:null, edge:null };
+function hoverSection(square, seg){
+  var key = square.toFixed(2) + '|' + seg;
+  if(hoverGeom.key === key) return hoverGeom;
+  if(hoverGeom.geom){ hoverGeom.geom.dispose(); hoverGeom.edge.dispose(); }
+
+  var out = {x:0, y:0}, ring = new Float32Array(seg*3), i;
+  for(i=0;i<seg;i++){
+    P.Strokes.sectionPoint(i/seg * Math.PI*2, square, out);
+    ring[i*3] = out.x; ring[i*3+1] = out.y; ring[i*3+2] = 0;
+  }
+  /* a fan about the centre, written as ordinary indexed triangles - three.js
+     dropped Mesh.drawMode, so TriangleFanDrawMode is not a thing to lean on */
+  var fan = new Float32Array((seg+1)*3);          // 0 = centre, then the ring
+  fan.set(ring, 3);
+  var idx = new Uint16Array(seg*3);
+  for(i=0;i<seg;i++){
+    idx[i*3] = 0; idx[i*3+1] = i+1; idx[i*3+2] = (i+1) % seg + 1;
+  }
+
+  var g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(fan, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  var e = new THREE.BufferGeometry();
+  e.setAttribute('position', new THREE.BufferAttribute(ring, 3));
+
+  hoverGeom = { key:key, geom:g, edge:e };
+  return hoverGeom;
+}
+
+var hoverFill = new THREE.Mesh(
+  new THREE.BufferGeometry(),
+  new THREE.MeshBasicMaterial({color:0xff8a3d, transparent:true,
+                               opacity:HOVER_FILL, side:THREE.DoubleSide,
+                               depthTest:false, depthWrite:false})
+);
+var hoverEdge = new THREE.LineLoop(
+  new THREE.BufferGeometry(),
+  new THREE.LineBasicMaterial({color:0xff8a3d, transparent:true, opacity:0.9,
+                               depthTest:false})
+);
+hoverFill.renderOrder = 900; hoverEdge.renderOrder = 901;
+hoverFill.visible = hoverEdge.visible = false;
+hoverFill.frustumCulled = hoverEdge.frustumCulled = false;
+P.scene.add(hoverFill); P.scene.add(hoverEdge);
+
+P.hideHoverCursor = function(){ hoverFill.visible = hoverEdge.visible = false; };
+
+var _hu = new THREE.Vector3(), _hw = new THREE.Vector3(), _hn = new THREE.Vector3(),
+    _hfwd = new THREE.Vector3(), _hm = new THREE.Matrix4();
 
 P.updateHoverCursor = function(x, y, ev){
-  var onGuide = G.hasActive();
-  if(!onGuide) P.refreshDrawPlane();
+  if(!G.hasActive()) P.refreshDrawPlane();
   var hit = Tools.projectSample(x, y);
-  if(!hit){ hoverRing.visible = false; return; }
-
-  hoverRing.position.copy(hit.point);
-  hoverRing.quaternion.copy(P.cam().quaternion);
+  if(!hit){ P.hideHoverCursor(); return; }
 
   var eraser = (TOOL.mode === 'erase' || TOOL.mode === 'vacuum');
-  var r = Tools.baseRadius();
-  var tilt = ev ? Tools.tiltOf(ev) : {az:null, alt:1};
-  var squash = (TOOL.brush === 'flat' || TOOL.brush === 'wide') ? 0.3 : 1;
-  hoverRing.scale.set(Math.max(r, 1e-4), Math.max(r*squash, 1e-4), 1);
-  if(tilt.az !== null && squash < 1) hoverRing.rotateZ(tilt.az + Math.PI/2);
+  var rx, ry, square;
+  if(eraser){
+    rx = ry = Tools.eraserRadius(); square = 0;
+  } else {
+    var cfg = P.Strokes.cfgOf({ brush: TOOL.brush });
+    var r = Tools.baseRadius() * cfg.wide;
+    rx = P.Strokes.nibHalfWidth({ brush: TOOL.brush, baseRadius: Tools.baseRadius() }, r);
+    ry = r * cfg.flat;
+    square = cfg.square || 0;
+  }
+  /* a cursor is small on screen and cheap either way, so a round section gets
+     a smooth outline rather than the eight facets a small nib is built with */
+  var seg = square > 0.5 ? 8 : 48;
+  var built = hoverSection(square, seg);
+  hoverFill.geometry = built.geom;
+  hoverEdge.geometry = built.edge;
 
-  hoverRing.material.color.set(eraser ? 0xff5d7e : TOOL.color.getHex());
-  hoverRing.material.opacity = hit.onSurface ? 0.95 : 0.5;   // dimmer off-surface
-  hoverRing.visible = true;
+  /* lay it on the surface: both section axes across the guide, lifted a hair
+     along the normal so it does not fight the guide for the same pixels */
+  _hn.copy(hit.normal && hit.normal.lengthSq() > 1e-12
+             ? hit.normal : P.cam().getWorldDirection(_hn).negate()).normalize();
+  P.camBasis(_hu, _hw, _hfwd);                          // _hu = camera right
+  _hu.addScaledVector(_hn, -_hu.dot(_hn));
+  if(_hu.lengthSq() < 1e-12) P.perpTo(_hn, _hu);
+  _hu.normalize();
+  _hw.crossVectors(_hn, _hu).normalize();
+
+  _hm.makeBasis(_hu, _hw, _hn);
+  hoverFill.quaternion.setFromRotationMatrix(_hm);
+  hoverEdge.quaternion.copy(hoverFill.quaternion);
+  hoverFill.position.copy(hit.point).addScaledVector(_hn, Math.max(rx, ry) * 0.02);
+  hoverEdge.position.copy(hoverFill.position);
+  hoverFill.scale.set(Math.max(rx, 1e-5), Math.max(ry, 1e-5), 1);
+  hoverEdge.scale.copy(hoverFill.scale);
+
+  var hex = eraser ? 0xff5d7e : TOOL.color.getHex();
+  hoverFill.material.color.setHex(hex);
+  hoverEdge.material.color.setHex(hex);
+  hoverFill.material.opacity = HOVER_FILL;
+  hoverEdge.material.opacity = hit.onSurface ? 0.9 : 0.35;
+  hoverFill.visible = hoverEdge.visible = true;
 };
 
 /* ==========================================================================

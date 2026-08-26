@@ -2220,6 +2220,111 @@ function run(W){
      Object.keys(P.BRUSH).length + ' brushes');
   P.TOOL.brush = 'pen'; P.UI.refresh();
 
+  /* ================= hover preview ================= */
+  group('Hover preview — the nib you are about to draw with');
+
+  /* FACT (C.3): hover previews brush size and colour on a guide. */
+  var hoverFill22 = null, hoverEdge22 = null;
+  P.scene.traverse(function(o22){
+    if(o22.isLineLoop && o22.renderOrder === 901) hoverEdge22 = o22;
+    else if(o22.isMesh && o22.renderOrder === 900) hoverFill22 = o22;
+  });
+  ck('the hover preview exists as a filled shape with an outline',
+     !!hoverFill22 && !!hoverEdge22,
+     (hoverFill22 ? 'fill' : 'no fill') + ', ' + (hoverEdge22 ? 'edge' : 'no edge'));
+
+  (function(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof22 = [];
+    for(var q22=0;q22<=16;q22++) prof22.push({x:CX-240+480*(q22/16), y:CY});
+    pen(prof22);
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.color.set('#2fbf55');
+
+    /* EVERY brush previews at the size it would actually lay down. The old
+       ring sized itself off baseRadius alone, ignoring each brush's own width
+       multiplier, and squashed itself only for two brushes by name. */
+    var wrong22 = [], names22 = Object.keys(P.BRUSH);
+    for(var b22=0; b22<names22.length; b22++){
+      P.TOOL.brush = names22[b22]; P.TOOL.sizeMM = 60;
+      P.updateHoverCursor(CX, CY, null);
+      var cfg22 = P.Strokes.cfgOf({ brush: names22[b22] });
+      var want22 = P.Strokes.nibHalfWidth(
+        { brush: names22[b22], baseRadius: P.Tools.baseRadius() },
+        P.Tools.baseRadius() * cfg22.wide);
+      if(!hoverFill22.visible ||
+         Math.abs(hoverFill22.scale.x - want22) > 1e-6 ||
+         Math.abs(hoverFill22.scale.y - P.Tools.baseRadius()*cfg22.wide*cfg22.flat) > 1e-6){
+        wrong22.push(names22[b22]);
+      }
+    }
+    ck('every brush previews at the size it would actually draw',
+       wrong22.length === 0, wrong22.join(', ') || 'all ' + names22.length + ' match');
+
+    /* the ribbon is the case the old preview got most wrong */
+    P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 60; P.updateHoverCursor(CX, CY, null);
+    var wRatio22 = hoverFill22.scale.x / hoverFill22.scale.y;
+    ck('...so the wide brush previews as a broad ribbon, not a small circle',
+       hoverFill22.scale.x*2/P.MM > 150 && wRatio22 > 8,
+       (hoverFill22.scale.x*2/P.MM).toFixed(0) + ' x ' +
+       (hoverFill22.scale.y*2/P.MM).toFixed(0) + 'mm at a 60mm slider');
+
+    ck('...and the rectangle previews its fixed width and raised height',
+       Math.abs(hoverFill22.scale.x*2/P.MM - 22.4) > 1e6 ? false : (function(){
+         P.TOOL.brush = 'rectangle'; P.TOOL.sizeMM = 60;
+         P.updateHoverCursor(CX, CY, null);
+         return Math.abs(hoverFill22.scale.x*2/P.MM - 22.4) < 0.2 &&
+                hoverFill22.scale.y > hoverFill22.scale.x*3;
+       })(),
+       (hoverFill22.scale.x*2/P.MM).toFixed(1) + ' x ' +
+       (hoverFill22.scale.y*2/P.MM).toFixed(1) + 'mm');
+
+    /* colour and 50% */
+    P.TOOL.brush = 'pen'; P.TOOL.color.set('#3270cc');
+    P.updateHoverCursor(CX, CY, null);
+    ck('the preview carries the brush colour at half opacity',
+       hoverFill22.material.color.getHexString() === '3270cc' &&
+       Math.abs(hoverFill22.material.opacity - 0.5) < 1e-9,
+       '#' + hoverFill22.material.color.getHexString() + ' at ' +
+       hoverFill22.material.opacity);
+
+    /* size follows the slider */
+    P.TOOL.sizeMM = 20; P.updateHoverCursor(CX, CY, null);
+    var small22 = hoverFill22.scale.x;
+    P.TOOL.sizeMM = 80; P.updateHoverCursor(CX, CY, null);
+    ck('...and follows the size slider',
+       Math.abs(hoverFill22.scale.x / small22 - 4) < 0.01,
+       (hoverFill22.scale.x/small22).toFixed(2) + 'x for 20mm -> 80mm');
+
+    /* it lies ON the guide rather than facing the camera */
+    var nrm22 = new THREE.Vector3(0,0,1).applyQuaternion(hoverFill22.quaternion);
+    var hit22 = P.Tools.projectSample(CX, CY);
+    ck('the preview lies flat on the guide, not square to the camera',
+       !!hit22 && Math.abs(nrm22.dot(hit22.normal)) > 0.999,
+       'preview normal against the surface: ' +
+       (hit22 ? Math.abs(nrm22.dot(hit22.normal)).toFixed(4) : 'no hit'));
+
+    /* the eraser keeps its own size and its warning colour */
+    P.setTool('erase'); P.TOOL.eraserMM = 50;
+    P.updateHoverCursor(CX, CY, null);
+    ck('the eraser previews at its own size, in its own colour',
+       hoverFill22.material.color.getHexString() === 'ff5d7e' &&
+       Math.abs(hoverFill22.scale.x*2/P.MM - 50) < 0.2,
+       '#' + hoverFill22.material.color.getHexString() + ' at ' +
+       (hoverFill22.scale.x*2/P.MM).toFixed(0) + 'mm');
+
+    P.hideHoverCursor();
+    ck('...and it goes away when the pen does',
+       !hoverFill22.visible && !hoverEdge22.visible);
+    P.setTool('draw'); reset();
+  })();
+
   /* ================= restyling a selection ================= */
   group('Restyle — the brush panel edits selected curves');
 
