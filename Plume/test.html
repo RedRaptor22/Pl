@@ -393,6 +393,101 @@ function run(W){
      'radius ' + rlo.toFixed(4) + '–' + rhi.toFixed(4) + ', ' + uniq.length + ' pts');
   ck('the fitted circle is closed', ci.pts.length === uniq.length + 1);
 
+  /* ---- and closed means WELDED, not two ends parked on the same spot ----
+     A ring built as a tube gets one cap disc at each end, stacked on the one
+     point and tilted apart by a whole angular step, because the endpoint
+     tangents are one-sided chords. That wedge is the slit that shows at the
+     top of every snapped circle: 360/64 = 5.625 degrees of it, gaping at the
+     outer edge and pinched shut on the inside. */
+  ck('the ring is recognised as a closed loop', P.Strokes.loopsClosed(ci.pts));
+  var t0 = ci.pts[0].tan, tN = ci.pts[ci.pts.length-1].tan;
+  var r0 = ci.pts[0].ref, rN = ci.pts[ci.pts.length-1].ref;
+  /* Measured as the CHORD between the two unit vectors, not acos of their dot.
+     Near zero angle acos amplifies float error — identical vectors come back as
+     1e-6 degrees apart — and a threshold under that noise floor fails on
+     nothing. The chord is 2*sin(a/2), so it degrades gracefully instead. */
+  var chordDeg = function(a,b){
+    return 2 * Math.asin(Math.min(1, a.distanceTo(b)/2)) * 180/Math.PI;
+  };
+  ck('its two ends share one tangent', chordDeg(t0,tN) < 1e-4,
+     chordDeg(t0,tN).toExponential(1) + ' deg, was 5.625 when it slit');
+  ck('and one cross-section, so the tube cannot step at the joint',
+     chordDeg(r0,rN) < 1e-4, chordDeg(r0,rN).toExponential(1) + ' deg');
+
+  /* the real proof: every edge shared by exactly two triangles */
+  function shellOf(stroke){
+    var g = stroke.mesh.geometry, ix = g.index.array, ps = g.attributes.position.array;
+    var map = {}, w = [], q, k;
+    for(q=0;q<ps.length/3;q++){
+      var kk = Math.round(ps[q*3]*1e7)+','+Math.round(ps[q*3+1]*1e7)+','+
+               Math.round(ps[q*3+2]*1e7);
+      if(map[kk] === undefined) map[kk] = Object.keys(map).length;
+      w[q] = map[kk];
+    }
+    var edges = {}, boundary = 0, nonMan = 0, degen = 0;
+    for(q=0;q<ix.length;q+=3){
+      var a = w[ix[q]], b = w[ix[q+1]], c = w[ix[q+2]];
+      if(a===b || b===c || a===c){ degen++; continue; }
+      var pairs = [[a,b],[b,c],[c,a]];
+      for(k=0;k<3;k++){
+        var u = pairs[k][0], v = pairs[k][1];
+        var e = u<v ? u+'_'+v : v+'_'+u;
+        edges[e] = (edges[e]||0)+1;
+      }
+    }
+    Object.keys(edges).forEach(function(e){
+      if(edges[e] === 1) boundary++; else if(edges[e] > 2) nonMan++;
+    });
+    return { boundary:boundary, nonManifold:nonMan, degenerate:degen };
+  }
+  var shell = shellOf(ci);
+  ck('the closed tube is watertight — no open rim at the seam',
+     shell.boundary === 0, shell.boundary + ' boundary edges');
+  ck('and still a clean manifold', shell.nonManifold === 0 && shell.degenerate === 0,
+     shell.nonManifold + ' non-manifold, ' + shell.degenerate + ' degenerate');
+
+  /* every brush, since each one builds its own section */
+  (function everyBrushCloses(){
+    var bad = [], names = Object.keys(P.BRUSHES || {});
+    if(!names.length) names = ['pen','sketch','taper','rectangle','cube','flat','wide','glow'];
+    for(var q=0;q<names.length;q++){
+      reset(); P.setTool('shape'); P.TOOL.brush = names[q]; P.TOOL.sizeMM = 60;
+      pen(circle(CX, CY, 90, 40));
+      var st = P.Strokes.list[0];
+      if(!st || !P.Strokes.loopsClosed(st.pts)){ bad.push(names[q]+':not-closed'); continue; }
+      var sh2 = shellOf(st);
+      if(sh2.boundary !== 0) bad.push(names[q]+':'+sh2.boundary+'-open');
+    }
+    ck('a snapped circle closes for every brush', bad.length === 0,
+       bad.join(', ') || names.length + ' brushes, all sealed');
+  })();
+
+  /* An open stroke must be untouched by any of that — it still needs its caps. */
+  reset(); P.setTool('draw'); P.TOOL.brush = 'pen'; P.TOOL.autoGuide = false;
+  pen([{x:CX-120,y:CY},{x:CX,y:CY-30},{x:CX+120,y:CY}]);
+  var openSt = P.Strokes.list[0];
+  ck('an open stroke is not treated as a loop', !P.Strokes.loopsClosed(openSt.pts));
+  ck('and keeps the sealed ends it always had', shellOf(openSt).boundary === 0);
+
+  /* ---- rebuilding geometry must not rebuild the SHADER ----
+     Disposing a ShaderMaterial drops the last reference to its GL program, so
+     the next frame compiles and links it again. Doing that per pointermove is
+     free on a desktop driver and a multi-second freeze on a phone. */
+  reset(); P.setTool('draw'); P.TOOL.autoGuide = false;
+  pen([{x:CX-100,y:CY},{x:CX,y:CY+20},{x:CX+100,y:CY}]);
+  var reb = P.Strokes.list[0];
+  var mat0 = reb.mesh.material, geo0 = reb.mesh.geometry;
+  P.Strokes.rebuild(reb);
+  ck('a rebuild swaps the geometry', reb.mesh.geometry !== geo0);
+  ck('but keeps the compiled material', reb.mesh.material === mat0);
+  var same = true;
+  for(i=0;i<30;i++){ P.Strokes.rebuild(reb); if(reb.mesh.material !== mat0) same = false; }
+  ck('and still keeps it after 30 more rebuilds', same);
+  /* changing what the material must actually BE still replaces it */
+  P.Strokes.restyle([reb], { brush:'glow' });
+  ck('switching to a glow brush does replace the material',
+     reb.mesh.material !== mat0);
+
   /* ================= C.10 mirror ================= */
   group('C.10  Mirror');
   reset(); P.TOOL.mirror = 'x';

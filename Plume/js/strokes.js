@@ -565,16 +565,39 @@ function writeCaps(stroke, n, T, R, arc, pos, nor, col){
    triangles faced inward before and 0 of 48 after, and the signed volume went
    from an inconsistent -260000 mm^3 to +779999.94 — against 780000.00 for the
    12-gon prism 3r^2*L the tube is supposed to be. */
-function quadIndices(idx, at, i, seg){
+/* A stroke whose last point IS its first is a ring, not a tube that happens to
+   end where it began. Built as a tube it gets two cap discs stacked on the one
+   point, tilted apart by a full angular step, and the wedge between them is the
+   slit you see at the top of every snapped circle.
+
+   Read off the geometry rather than carried as a flag, so it survives save and
+   reload, undo, the joystick and every other thing that rewrites points — and
+   so it covers every route that makes a circle, not just the one that was
+   remembered to set a flag. */
+function loopsClosed(pts){
+  var n = pts.length;
+  if(n < 8) return false;
+  var gap  = pts[0].p.distanceTo(pts[n-1].p);
+  var step = pts[n-2].p.distanceTo(pts[n-1].p);
+  return step > 0 && gap <= step * 1e-3;
+}
+S.loopsClosed = loopsClosed;
+
+/* one band of quads between two rings; `j` is normally i+1, but a closed loop
+   wraps its last band back onto ring 0 */
+function bandIndices(idx, at, i, j, seg){
   for(var k=0;k<seg;k++){
     var a = 2 + i*seg + k,
         b = 2 + i*seg + (k+1)%seg,
-        c = 2 + (i+1)*seg + k,
-        d = 2 + (i+1)*seg + (k+1)%seg;
+        c = 2 + j*seg + k,
+        d = 2 + j*seg + (k+1)%seg;
     idx[at++]=a; idx[at++]=b; idx[at++]=c;
     idx[at++]=b; idx[at++]=d; idx[at++]=c;
   }
   return at;
+}
+function quadIndices(idx, at, i, seg){
+  return bandIndices(idx, at, i, i+1, seg);
 }
 function startFan(idx, at, seg){
   for(var k=0;k<seg;k++){ idx[at++]=0; idx[at++]=2+(k+1)%seg; idx[at++]=2+k; }
@@ -608,35 +631,45 @@ function buildGeometry(stroke){
     return { geom:g, needsAlpha: s0.alpha < 0.995 };
   }
 
+  var closed = loopsClosed(pts);
+
   /* frozen frames if committed, transported frames while still live */
   var T, R, i;
   if(pts[0].ref && pts[n-1].ref && pts[n-1].tan){
     T = pts.map(function(p){ return p.tan; });
     R = pts.map(function(p){ return p.ref; });
   } else {
-    var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef);
+    var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef, closed);
     T = fr.T; R = fr.R;
   }
 
   var arc = arcOf(pts);
-  var vCount = 2 + n*seg;
+  /* A closed loop's last point is its first, so it needs no ring of its own —
+     the final band wraps onto ring 0 instead, which welds the tube shut rather
+     than leaving two coincident rims and a pair of caps jammed between them. */
+  var rings = closed ? n-1 : n;
+  var caps  = cfg.caps && !closed;
+
+  var vCount = 2 + rings*seg;
   var pos = new Float32Array(vCount*3),
       nor = new Float32Array(vCount*3),
       col = new Float32Array(vCount*4);
   var needsAlpha = false;
 
-  for(i=0;i<n;i++){
+  for(i=0;i<rings;i++){
     if(writeRing(stroke, i, T[i], R[i], arc, pos, nor, col, seg) < 0.995) needsAlpha = true;
   }
-  if(cfg.caps) writeCaps(stroke, n, T, R, arc, pos, nor, col);
+  if(caps) writeCaps(stroke, rings, T, R, arc, pos, nor, col);
 
-  var quads = (n-1)*seg*6, fans = cfg.caps ? seg*6 : 0;
+  var bands = closed ? rings : rings-1;
+  var quads = bands*seg*6, fans = caps ? seg*6 : 0;
   var IndexArray = vCount < 65536 ? Uint16Array : Uint32Array;
   var idx = new IndexArray(quads + fans);
   var at = 0;
-  if(cfg.caps) at = startFan(idx, at, seg);
-  for(i=0;i<n-1;i++) at = quadIndices(idx, at, i, seg);
-  if(cfg.caps) at = endFan(idx, at, n-1, seg);
+  if(caps) at = startFan(idx, at, seg);
+  for(i=0;i<rings-1;i++) at = quadIndices(idx, at, i, seg);
+  if(closed) at = bandIndices(idx, at, rings-1, 0, seg);
+  if(caps) at = endFan(idx, at, rings-1, seg);
 
   var geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
@@ -648,21 +681,53 @@ function buildGeometry(stroke){
 }
 S.buildGeometry = buildGeometry;
 
+/* Everything about a material that decides how it is BUILT — the blend mode,
+   the depth write, the transparency. Colour, opacity and shading are not in it:
+   colour rides in the vertex buffer and the other two are uniforms that
+   setShaded and the style code write straight onto the live material. */
+function materialKey(stroke, needsAlpha){
+  var cfg = cfgOf(stroke);
+  return (cfg.glow ? 1:0) + '|' + (cfg.grit ? 1:0) + '|' + (needsAlpha ? 1:0);
+}
+
+/* REUSE THE MATERIAL WHEN ONLY THE GEOMETRY CHANGED. Disposing a ShaderMaterial
+   drops the last reference to its GL program and three.js deletes it, so the
+   next frame compiles and links the whole thing again. Rebuilding the material
+   on every rebuild therefore cost one full compile per pointermove — measured
+   at 90 links and 180 compiles across a 90-move sizing drag. A desktop driver
+   swallows that; a phone GPU stalls tens to hundreds of milliseconds on every
+   link, which is the multi-second freeze while sizing a circle. */
 S.rebuild = function(stroke){
   var built = buildGeometry(stroke);
-  if(stroke.mesh){
-    group.remove(stroke.mesh);
-    stroke.mesh.geometry.dispose();
-    stroke.mesh.material.dispose();
-    stroke.mesh = null;
+  if(!built){
+    if(stroke.mesh){
+      group.remove(stroke.mesh);
+      stroke.mesh.geometry.dispose();
+      stroke.mesh.material.dispose();
+      stroke.mesh = null;
+    }
+    return;
   }
-  if(!built) return;
-  stroke.mesh = new THREE.Mesh(built.geom, makeMaterial(stroke, built.needsAlpha));
-  stroke.mesh.userData.stroke = stroke;
+  var key = materialKey(stroke, built.needsAlpha);
+
+  if(stroke.mesh && stroke.mesh.material.userData.matKey === key){
+    stroke.mesh.geometry.dispose();          // the buffers go, the program stays
+    stroke.mesh.geometry = built.geom;
+  } else {
+    if(stroke.mesh){
+      group.remove(stroke.mesh);
+      stroke.mesh.geometry.dispose();
+      stroke.mesh.material.dispose();
+    }
+    var mat = makeMaterial(stroke, built.needsAlpha);
+    mat.userData.matKey = key;
+    stroke.mesh = new THREE.Mesh(built.geom, mat);
+    stroke.mesh.userData.stroke = stroke;
+    group.add(stroke.mesh);
+  }
   stroke.mesh.material.uniforms.uSelect.value = stroke.selected ? 1 : 0;
   stroke.mesh.frustumCulled = true;
   stroke.mesh.visible = S.visible(stroke);
-  group.add(stroke.mesh);
 };
 
 /* ==========================================================================
@@ -1052,7 +1117,8 @@ S.dedupe = function(stroke){
 S.freezeFrames = function(stroke){
   var pts = stroke.pts;
   if(pts.length === 0) return;
-  var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef);
+  var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef,
+                             loopsClosed(pts));
   var arc = arcOf(pts);
   for(var i=0;i<pts.length;i++){
     var t = fr.T[i], r = fr.R[i], pt = pts[i];

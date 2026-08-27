@@ -63,13 +63,35 @@ P.perpTo = function(t, out){
   return out;
 };
 
-/* Tangents by central difference, with fallbacks for coincident points. */
-P.computeTangents = function(pts){
+/* Tangents by central difference, with fallbacks for coincident points.
+   `closed` means pts[n-1] is pts[0] again — a ring, not a tube with two ends.
+   Its endpoints then take the same wrap-around bisector every interior point
+   gets, so the two ends agree instead of being one-sided chords a full angular
+   step apart. That step is exactly what opened a wedge at a circle's seam:
+   360/64 = 5.625 degrees of tilt between two caps stacked on the same point. */
+P.computeTangents = function(pts, closed){
   var n = pts.length, T = new Array(n), i, v = new THREE.Vector3();
   if(n === 1){ T[0] = new THREE.Vector3(0,0,1); return T; }
+  var loop = !!closed && n >= 3;
   var back = new THREE.Vector3(), fwd = new THREE.Vector3();
   for(i=0;i<n;i++){
-    if(i===0)        v.subVectors(pts[1],     pts[0]);
+    if(loop && (i===0 || i===n-1)){
+      /* the neighbours either side of the joint: the point before the
+         duplicated end, and the one after the start */
+      back.subVectors(pts[0], pts[n-2]);
+      fwd.subVectors(pts[1], pts[0]);
+      var lb0 = back.lengthSq(), lf0 = fwd.lengthSq();
+      if(lb0 > P.EPS && lf0 > P.EPS){
+        back.multiplyScalar(1/Math.sqrt(lb0));
+        fwd.multiplyScalar(1/Math.sqrt(lf0));
+        v.addVectors(back, fwd);
+        if(v.lengthSq() <= P.EPS) v.copy(fwd);
+      }
+      else if(lf0 > P.EPS) v.copy(fwd);
+      else if(lb0 > P.EPS) v.copy(back);
+      else v.set(0,0,0);
+    }
+    else if(i===0)   v.subVectors(pts[1],     pts[0]);
     else if(i===n-1) v.subVectors(pts[n-1],   pts[n-2]);
     else {
       /* THE BISECTOR OF THE TWO UNIT CHORDS, not the chord p[i+1]-p[i-1].
@@ -111,8 +133,8 @@ P.computeTangents = function(pts){
 /* Rotation-minimising frames by double reflection (Wang et al. 2008).
    Used for stroke cross-sections AND as the parallel-transport sweep behind
    Bend, so a profile carried round a curve does not twist. */
-P.transportFrames = function(pts, seedRef){
-  var T = P.computeTangents(pts), n = pts.length, R = new Array(n);
+P.transportFrames = function(pts, seedRef, closed){
+  var T = P.computeTangents(pts, closed), n = pts.length, R = new Array(n);
   var r0 = new THREE.Vector3();
   if(seedRef){
     r0.copy(seedRef).addScaledVector(T[0], -seedRef.dot(T[0]));
@@ -139,6 +161,28 @@ P.transportFrames = function(pts, seedRef){
     var r = rN.clone().addScaledVector(T[i+1], -rN.dot(T[i+1]));
     if(r.lengthSq() < P.EPS) P.perpTo(T[i+1], r); else r.normalize();
     R[i+1] = r;
+  }
+
+  /* CLOSE THE FRAME. Transport around a loop does not come back to where it
+     started — the sweep accumulates a residual twist (holonomy), so the last
+     cross-section lands rotated against the first even though both sit on the
+     same point with the same tangent, and the tube visibly steps at the joint.
+     Unwind that angle evenly along the loop by arc length: every section turns
+     a little, none of them kinks, and the ends meet exactly. */
+  if(closed && n >= 3){
+    var tAx = T[0];
+    var bi = new THREE.Vector3().crossVectors(tAx, R[0]);
+    var theta = Math.atan2(bi.dot(R[n-1]), R[0].dot(R[n-1]));
+    if(Math.abs(theta) > 1e-12){
+      var L = P.arcLengths(pts), total = L[n-1];
+      if(total > P.EPS){
+        for(var q=0;q<n;q++){
+          R[q].applyAxisAngle(T[q], -theta * (L[q]/total)).normalize();
+        }
+      }
+    }
+    R[n-1].copy(R[0]);
+    T[n-1].copy(T[0]);
   }
   return {T:T, R:R};
 };
