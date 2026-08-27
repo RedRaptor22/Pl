@@ -4485,6 +4485,77 @@ function run(W){
     ck('a stroke drawn without pausing still just auto-fits',
        P.Strokes.list.length === 1 && P.Tools.isAdjustingShape() === false);
 
+    /* ---- a bare press, with no travel at all ----
+       FACT (C.9): "press-hold-drag to size a circle". There is no input to
+       auto-correct, so the press seeds a circle where it landed and the drag
+       out of it becomes the radius. */
+    reset(); P.TOOL.stableOn = false; P.TOOL.shapeHold = true;
+    P.setTool('shape');
+    penRaw('pointerdown', CX, CY, 1);
+    return wait(620);
+  }).then(function(){
+    function meanR(s){
+      var u = s.pts.slice();
+      if(u.length>1 && u[0].p.distanceTo(u[u.length-1].p) < 1e-9) u.pop();
+      var c = new THREE.Vector3();
+      u.forEach(function(q){ c.add(q.p); });
+      c.multiplyScalar(1/u.length);
+      var r = 0;
+      u.forEach(function(q){ r += q.p.distanceTo(c); });
+      return r/u.length;
+    }
+    ck('a press that never moves snaps to a circle on its own',
+       P.Tools.isAdjustingShape() === true);
+    var stp = liveStroke();
+    penRaw('pointermove', CX+60, CY, 1);
+    var r60 = meanR(stp);
+    penRaw('pointermove', CX+180, CY, 1);
+    var r180 = meanR(stp);
+    ck('dragging out of that press sizes it', r180 > r60*2.5,
+       r60.toFixed(3) + ' -> ' + r180.toFixed(3));
+    /* the radius IS the drag distance, so tripling the drag triples it */
+    ck('and the radius tracks the drag one-for-one',
+       Math.abs((r180/r60)/3 - 1) < 0.02,
+       'x' + ((r180/r60)/3).toFixed(4));
+    penRaw('pointerup', CX+180, CY, 0);
+    ck('the pressed circle commits once', P.Strokes.list.length === 1);
+    P.History.undo();
+    ck('and the whole press-drag is one undo step', P.Strokes.list.length === 0);
+
+    /* A pen resting on glass wanders a pixel or two and MIN_PX lets anything
+       past 2px through as travel. Those samples must not keep resetting the
+       hold clock, or "hold still" never fires for an unsteady hand. */
+    reset(); P.TOOL.stableOn = false; P.TOOL.shapeHold = true;
+    P.setTool('shape');
+    penRaw('pointerdown', CX, CY, 1);
+    var jitter = 0;
+    function tremor(){
+      if(jitter >= 6) return wait(140);
+      penRaw('pointermove', CX + (jitter%2 ? 3 : -3), CY + (jitter%3 ? 2 : -2), 1);
+      jitter++;
+      return wait(90).then(tremor);
+    }
+    return tremor();
+  }).then(function(){
+    ck('a few pixels of hand tremor still counts as holding still',
+       P.Tools.isAdjustingShape() === true);
+    penRaw('pointerup', CX, CY, 0);
+
+    /* Pausing to steady your hand before a normal stroke is ordinary, and
+       turning that into a circle would wreck it. The bare press is the Shape
+       tool's gesture only. */
+    reset(); P.TOOL.stableOn = false; P.TOOL.shapeHold = true;
+    P.TOOL.autoGuide = false; P.setTool('draw');
+    penRaw('pointerdown', CX-100, CY-60, 1);
+    return wait(620);
+  }).then(function(){
+    ck('a steadying pause in the DRAW tool is not turned into a circle',
+       P.Tools.isAdjustingShape() === false);
+    penRaw('pointermove', CX-40, CY-40, 1);
+    penRaw('pointermove', CX+20, CY-20, 1);
+    penRaw('pointerup',   CX+20, CY-20, 0);
+    ck('and that stroke draws normally', P.Strokes.list.length === 1);
+
     /* ---- hold-to-shape while drawing normally, and on guides (C.9) ---- */
     group('C.9  Hold to shape — brushes, guides and bends');
 

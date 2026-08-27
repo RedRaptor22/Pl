@@ -648,6 +648,17 @@ function shapePoints(shape){
 var SHAPE_HOLD_MS = 420;                    // GUESS: the docs give no figure
 var shapeHoldTimer = null;
 
+/* A pen resting on glass wanders a pixel or two, and MIN_PX admits anything
+   past 2px as travel. Every such sample used to restart the hold clock, so
+   "hold the pen still" only ever fired for a perfectly steady hand. The clock
+   now survives jitter inside this radius of wherever it started. */
+var STILL_PX = 6;
+
+/* The circle a bare press starts at, before the drag sizes it. Small enough
+   that it reads as a seed rather than a shape you have to shrink. */
+var SEED_R_PX = 8;
+var holdAnchor = null;
+
 /* Hold-to-shape is armed for anything drawn as a stroke — a curve, a guide
    profile, or a bend path. FACT (C.9): Draw Shape "also works to create/bend
    guides", and holding is how you reach it without switching tools. It is a
@@ -658,19 +669,46 @@ var HOLD_ROLES = { curve:1, guide:1, bend:1, flat:1 };
 function armShapeHold(){
   if(!TOOL.shapeHold) return;
   if(!live || !HOLD_ROLES[live.role]) return;
+  var now = live.screen[live.screen.length-1];
+  /* still inside the slop circle: the pen has not really moved, so let the
+     clock that is already running keep running */
+  if(shapeHoldTimer && holdAnchor &&
+     Math.hypot(now.x - holdAnchor.x, now.y - holdAnchor.y) <= STILL_PX) return;
+  holdAnchor = {x:now.x, y:now.y};
   clearTimeout(shapeHoldTimer);
   shapeHoldTimer = setTimeout(enterShapeAdjust, SHAPE_HOLD_MS);
 }
 function disarmShapeHold(){
   clearTimeout(shapeHoldTimer);
   shapeHoldTimer = null;
+  holdAnchor = null;
+}
+
+/* how far the pen has actually travelled this stroke, in screen pixels */
+function liveTravel(){
+  var t = 0, sc = live.screen;
+  for(var i=1;i<sc.length;i++) t += Math.hypot(sc[i].x-sc[i-1].x, sc[i].y-sc[i-1].y);
+  return t;
 }
 
 function enterShapeAdjust(){
   shapeHoldTimer = null;
   if(!live || live.adjusting || !HOLD_ROLES[live.role]) return;
-  if(live.screen.length < 3) return;
-  var fitted = fitShapeScreen(live.screen);
+
+  var fitted = null;
+
+  /* FACT (C.9): "press-hold-drag to size a circle". A press that never went
+     anywhere has no shape to fit — there is nothing to auto-correct — so it
+     seeds a circle on the spot and hands the drag straight to its radius.
+     Only under the Shape tool: pausing to steady your hand before a normal
+     stroke is ordinary, and turning that into a circle would ruin it. */
+  if(TOOL.mode === 'shape' && liveTravel() <= STILL_PX){
+    var a = live.screen[0];
+    fitted = shapePoints({kind:'circle', cx:a.x, cy:a.y, r:SEED_R_PX});
+  } else {
+    if(live.screen.length < 3) return;
+    fitted = fitShapeScreen(live.screen);
+  }
   if(!fitted) return;
   live.adjusting = true;
   live.shape = fitted;
