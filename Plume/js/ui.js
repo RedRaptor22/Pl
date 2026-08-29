@@ -433,15 +433,10 @@ UI.init = function(){
     if(!f) return;
     P.toast('Loading ' + f.name + '…');
     P.Import.load(f).then(function(guide){
-      var prev = G.active;
-      P.History.run({
-        label: 'import reference',
-        redo: function(){ G.setActive(guide); },
-        undo: function(){ G.setActive(prev); }
-      });
+      var grp = Tools.addReference(guide);
       P.autoPivot(true);
-      P.toast(guide.kind === 'image' ? 'Image guide — draw straight onto it'
-                                     : 'Model guide — orbit and draw on the surface');
+      P.toast((guide.kind === 'image' ? 'Image reference' : 'Model reference') +
+              ' — drawing into "' + (grp ? grp.name : guide.name) + '"');
       P.onSceneChange();
     }).catch(function(err){
       P.toast(err.message || 'Could not import that file');
@@ -1762,6 +1757,9 @@ function beginRename(row, g){
   input.onblur = function(){ finish(true); };
 }
 
+/* the names newGuide hands out when there is nothing better to call it */
+var GENERIC = /^(Surface|Loft|Shape|Image|Model)$/;
+
 function refreshLists(){
   var sp = $('stagePanel');
   var visible = UI.compact ? sp.classList.contains('open') : !sp.classList.contains('hidden');
@@ -1772,7 +1770,7 @@ function refreshLists(){
   var rl = $('resList');
   rl.innerHTML = '';
   if(!G.resources.length){
-    rl.innerHTML = '<div class="empty">No saved guides.</div>';
+    rl.innerHTML = '<div class="empty">No references or saved guides yet.</div>';
   } else {
     for(var r=0;r<G.resources.length;r++){
       (function(g, idx){
@@ -1792,13 +1790,33 @@ function refreshLists(){
         d.appendChild(eye);
 
         var label = document.createElement('span');
-        label.textContent = g.name + ' ' + (idx+1);
+        label.className = 'grow';
+        /* a reference carries the file's own name, so numbering it reads as
+           nonsense — only the generic ones need telling apart */
+        label.textContent = GENERIC.test(g.name) ? (g.name + ' ' + (idx+1)) : g.name;
+        label.title = g.name;
         d.appendChild(label);
 
         var tag = document.createElement('span');
         tag.className = 'tag';
         tag.textContent = (g === G.active) ? 'active' : g.kind;
         d.appendChild(tag);
+
+        /* Throwing a reference away is undoable, which is why it is one tap and
+           not a dialog. It takes the picture only — anything traced onto it
+           keeps its own group. */
+        var del = document.createElement('button');
+        del.className = 'ico sm danger';
+        del.style.cssText = 'min-height:0;flex:0 0 auto';
+        del.innerHTML = '<svg><use href="#i-trash"/></svg>';
+        del.title = 'Delete this reference — the curves you drew on it stay';
+        del.setAttribute('data-tip', del.title);
+        del.onclick = function(ev){
+          ev.stopPropagation();          // the row itself activates
+          var name = g.name;
+          if(Tools.deleteResource(g)) P.toast('Deleted ' + name);
+        };
+        d.appendChild(del);
 
         d.onclick = function(){ Tools.activateResource(g); P.toast('Guide activated'); };
         rl.appendChild(d);

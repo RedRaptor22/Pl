@@ -923,6 +923,38 @@ G.save = function(guide){
   return g;
 };
 
+/* ---- taking a reference out, and putting it back -------------------------
+   G.dispose destroys a guide for good, which is right when the document goes
+   away and wrong for anything a person did on purpose: deleting a reference
+   has to be undoable, so the object stays alive and only leaves the scene and
+   the resource list. */
+G.remove = function(guide){
+  if(!guide) return false;
+  var i = G.resources.indexOf(guide);
+  if(i >= 0) G.resources.splice(i, 1);
+  if(G.active === guide) G.active = null;
+  if(guide.obj.parent) guide.obj.parent.remove(guide.obj);
+  G.invalidateMask();
+  refreshDisplay();
+  if(P.onGuideChange) P.onGuideChange();
+  return true;
+};
+
+/* `at` below zero means it was never a saved resource — it was only ever the
+   active guide — so putting it back must not quietly add it to the list. */
+G.restore = function(guide, at, makeActive){
+  if(!guide) return false;
+  if(at >= 0 && G.resources.indexOf(guide) < 0){
+    G.resources.splice(P.clamp(at, 0, G.resources.length), 0, guide);
+  }
+  if(makeActive) G.active = guide;
+  if(guide.obj.parent !== root) root.add(guide.obj);
+  G.invalidateMask();
+  refreshDisplay();
+  if(P.onGuideChange) P.onGuideChange();
+  return true;
+};
+
 G.dispose = function(g){
   if(!g) return;
   if(g.obj.parent) g.obj.parent.remove(g.obj);

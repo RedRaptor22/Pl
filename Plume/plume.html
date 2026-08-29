@@ -356,6 +356,9 @@
   .listItem .tag{color:var(--dim2);font-size:10px;margin-left:auto;}
   .listItem.sel{background:var(--active);color:var(--onActive);}
   .listItem.sel .tag{color:var(--onActive);opacity:.7;}
+  /* the row inverts when it is the active one, and its buttons have to come
+     with it — a ghost button keeps its own colour and vanishes otherwise */
+  .listItem.sel .ghost{color:var(--onActive);}
   .empty{color:var(--dim2);font-size:11px;padding:3px 1px;line-height:1.55;}
 
   #diag{top:62px;right:12px;padding:10px 12px;width:184px;

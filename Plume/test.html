@@ -4202,6 +4202,104 @@ function run(W){
        mx <= isz.x/2 + 1e-4, 'max |x| ' + mx.toFixed(3) + ' of ' + (isz.x/2).toFixed(3));
   }
 
+  /* ---- a reference brings its own layer, and can be thrown away ----
+     Importing used to make the picture active but list it nowhere, so there
+     was nothing to name it by, hide it by or delete it by; and everything you
+     traced piled into whatever group happened to be open. */
+  (function referenceLayers(){
+    function addRef(name){
+      var g = P.Guides.fromImage(iurl, 64, 32, name);
+      P.Tools.addReference(g);
+      return g;
+    }
+    reset();
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.VIEW.radius = 14; P.applyCamera();
+    P.TOOL.stableOn = false;
+
+    var r1 = addRef('cat-photo');
+    ck('an imported reference joins the resource list',
+       P.Guides.resources.length === 1 && P.Guides.resources[0] === r1);
+    ck('...and is the guide you are drawing on', P.Guides.active === r1);
+    ck('...and its row reads as showing, not hidden', r1.visible === true);
+    var lay = P.Strokes.findGroup(P.Strokes.activeGroup);
+    ck('a reference opens a layer named after it', !!lay && lay.name === 'cat-photo',
+       lay ? lay.name : 'none');
+
+    var rbox = new THREE.Box3().setFromObject(r1.mesh);
+    var rc = P.worldToScreen(rbox.getCenter(new THREE.Vector3()), {});
+    pen([{x:rc.x-30,y:rc.y},{x:rc.x,y:rc.y},{x:rc.x+30,y:rc.y}]);
+    ck('what you trace lands in that layer',
+       P.Strokes.list.length === 1 && P.Strokes.list[0].group === lay.id);
+
+    /* one undo takes the picture and its empty layer together */
+    reset();
+    addRef('sketch-ref');
+    P.History.undo();
+    ck('undoing the import takes the reference and its layer together',
+       P.Guides.resources.length === 0 && !P.Guides.active &&
+       !P.Strokes.groups.some(function(g){ return g.name === 'sketch-ref'; }));
+    P.History.redo();
+    ck('redo brings both back',
+       P.Guides.resources.length === 1 &&
+       P.Strokes.groups.some(function(g){ return g.name === 'sketch-ref'; }));
+
+    /* deleting takes the picture, never the drawing */
+    reset();
+    var r3 = addRef('to-delete');
+    var g3 = P.Strokes.findGroup(P.Strokes.activeGroup);
+    var b3 = new THREE.Box3().setFromObject(r3.mesh);
+    var c3 = P.worldToScreen(b3.getCenter(new THREE.Vector3()), {});
+    pen([{x:c3.x-30,y:c3.y},{x:c3.x,y:c3.y},{x:c3.x+30,y:c3.y}]);
+    pen([{x:c3.x-30,y:c3.y+14},{x:c3.x,y:c3.y+14},{x:c3.x+30,y:c3.y+14}]);
+    var drawn = P.Strokes.list.length;
+    ck('a reference can be deleted', P.Tools.deleteResource(r3) === true);
+    ck('...and it really goes', P.Guides.resources.length === 0 &&
+       P.Guides.active !== r3 && !r3.obj.parent);
+    ck('...but the drawing traced onto it stays, layer and all',
+       P.Strokes.list.length === drawn && !!P.Strokes.findGroup(g3.id),
+       drawn + ' curves kept');
+    P.History.undo();
+    ck('and deleting a reference is undoable',
+       P.Guides.resources.length === 1 && P.Guides.active === r3);
+
+    /* two references keep their work apart */
+    reset();
+    var ra = addRef('ref-a'), ga = P.Strokes.activeGroup;
+    var ba = new THREE.Box3().setFromObject(ra.mesh);
+    var ca = P.worldToScreen(ba.getCenter(new THREE.Vector3()), {});
+    pen([{x:ca.x-30,y:ca.y},{x:ca.x,y:ca.y},{x:ca.x+30,y:ca.y}]);
+    var rb = addRef('ref-b'), gb = P.Strokes.activeGroup;
+    pen([{x:ca.x-30,y:ca.y+14},{x:ca.x,y:ca.y+14},{x:ca.x+30,y:ca.y+14}]);
+    ck('a second reference opens its own layer', ga !== gb);
+    ck('and each one keeps its own curves',
+       P.Strokes.list.filter(function(q){ return q.group === ga; }).length === 1 &&
+       P.Strokes.list.filter(function(q){ return q.group === gb; }).length === 1);
+    P.Tools.deleteResource(ra);
+    ck('deleting one reference leaves the other alone',
+       P.Guides.resources.length === 1 && P.Guides.resources[0] === rb);
+
+    /* the list really shows a row with a delete on it */
+    reset();
+    addRef('panel-check');
+    LD.getElementById('stagePanel').classList.remove('hidden');
+    LD.querySelector('#stageTabs [data-tab="res"]').click();
+    P.UI.refresh();
+    var rows = LD.querySelectorAll('#resList .listItem');
+    ck('the reference appears as a row in the Import tab', rows.length === 1,
+       rows.length + ' row(s)');
+    if(rows.length){
+      ck('the row is labelled with the file name, not a generic one',
+         rows[0].textContent.indexOf('panel-check') >= 0,
+         rows[0].textContent.trim());
+      var btns = rows[0].querySelectorAll('button');
+      ck('the row carries a delete button', btns.length >= 2, btns.length + ' buttons');
+      btns[btns.length-1].click();
+      ck('and tapping it deletes the reference', P.Guides.resources.length === 0);
+    }
+    LD.getElementById('stagePanel').classList.add('hidden');
+    reset();
+  })();
+
   /* the mid-air fallback must survive only where it belongs */
   P.Guides.setActive(null);
   P.Strokes.clear();

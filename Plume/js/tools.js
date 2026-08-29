@@ -1849,6 +1849,68 @@ Tools.saveGuide = function(){
   P.toast('Saved to resources');
   P.onSceneChange();
 };
+/* ==========================================================================
+   References
+   --------------------------------------------------------------------------
+   Bringing a picture in makes a place to draw ON it and a place to put what
+   you draw: the reference becomes the active guide, and a curve group named
+   after the file becomes the active group, so tracing lands in its own layer
+   instead of piling into whatever happened to be open.
+
+   It also joins the resource list, which it did not before — an imported
+   reference was active but unlisted, so there was nothing to hide it by, name
+   it by, or throw it away by.
+
+   All of it is one history step: one undo takes the picture and its empty
+   layer back out together.
+   ========================================================================== */
+Tools.addReference = function(guide){
+  if(!guide) return null;
+  var prevGuide = G.active, prevGroup = S.activeGroup;
+  var prevAt = G.resources.indexOf(prevGuide);
+  var grp = S.addGroup(guide.name);
+  var at = -1;
+  P.History.run({
+    label: 'import reference',
+    redo: function(){
+      if(!S.findGroup(grp.id)) S.insertGroup(grp, 0);
+      S.activeGroup = grp.id;
+      at = G.resources.length;
+      /* it is on screen and you are looking at it, so the row's eye has to say
+         so — `visible` is what that eye reads, and only the save path used to
+         set it */
+      guide.visible = true;
+      G.restore(guide, at, true);
+    },
+    undo: function(){
+      G.remove(guide);
+      if(prevGuide) G.restore(prevGuide, prevAt, true);
+      S.removeGroup(grp.id);
+      S.activeGroup = prevGroup;
+      S.ensureGroup();
+    }
+  });
+  P.onSceneChange();
+  return grp;
+};
+
+/* Deleting a reference takes the picture, not the drawing. Whatever you traced
+   onto it keeps its own group and stays exactly where it is — losing the work
+   along with the scaffold is never what the tap meant. */
+Tools.deleteResource = function(guide){
+  if(!guide) return false;
+  var at = G.resources.indexOf(guide);
+  var wasActive = (G.active === guide);
+  if(at < 0 && !wasActive) return false;
+  P.History.run({
+    label: 'delete reference',
+    redo: function(){ G.remove(guide); },
+    undo: function(){ G.restore(guide, at, wasActive); }
+  });
+  P.onSceneChange();
+  return true;
+};
+
 Tools.activateResource = function(guide){
   var prev = G.active;
   P.History.run({
