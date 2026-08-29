@@ -268,6 +268,10 @@ UI.init = function(){
     TOOL.stable = parseFloat(this.value)/100;
     $('stableVal').textContent = this.value;
   });
+  on($('radialAmt'), 'input', function(){
+    TOOL.radial = Math.max(1, Math.round(parseFloat(this.value)));
+    UI.refresh();
+  });
 
   on($('focal'), 'input', function(){
     P.VIEW.focal = parseFloat(this.value);
@@ -1498,12 +1502,23 @@ UI.refresh = function(){
     ? 'Eraser size — drag up or down, or tap the value to type one'
     : 'Brush size — drag up or down, or tap the value to type one');
 
-  /* the icons carry no text label now, so the mirror axis goes in the tooltip */
+  /* the icons carry no text label now, so the mirror axis goes in the tooltip.
+     Radial lives in Settings but reads out here too, because the two compose
+     and the button is the only place the combined state is visible. */
   var mir = $('btnMirror');
-  mir.classList.toggle('on', !!TOOL.mirror);
-  mir.setAttribute('data-tip', TOOL.mirror
-    ? ('Mirror ' + TOOL.mirror.toUpperCase() + ' — tap to cycle')
-    : 'Mirror — X, then Z');
+  var nRad = Math.max(1, Math.round(TOOL.radial || 1));
+  mir.classList.toggle('on', !!TOOL.mirror || nRad > 1);
+  mir.setAttribute('data-tip',
+    (TOOL.mirror ? ('Mirror ' + TOOL.mirror.toUpperCase()) : 'Mirror off') +
+    (nRad > 1 ? (' + radial \u00d7' + nRad) : '') +
+    ' — tap to cycle X, Z, off' +
+    (nRad > 1 ? ('<br><i>' + (TOOL.mirror ? nRad*2 : nRad) + ' marks per stroke</i>')
+              : '<br><i>Radial is in Settings</i>'));
+  var ra = $('radialAmt'), rv = $('radialVal');
+  if(ra && rv){
+    if(document.activeElement !== ra) ra.value = nRad;
+    rv.textContent = nRad > 1 ? ('\u00d7' + nRad) : 'Off';
+  }
 
   /* a panel is "showing" via .open when compact, via !.hidden otherwise */
   function showing(id){

@@ -1583,9 +1583,43 @@ S.mirrorMatrix = function(axis){
   return m;
 };
 S.mirroredCopy = function(stroke, axis){
+  return S.transformedCopy(stroke, S.mirrorMatrix(axis));
+};
+
+S.transformedCopy = function(stroke, m){
   var copy = cloneWithPoints(stroke, stroke.pts);
-  S.transform([copy], S.mirrorMatrix(axis));
+  S.transform([copy], m);
   return copy;
+};
+
+/* ---- symmetry ------------------------------------------------------------
+   Every copy the current symmetry owes a stroke, as a list of transforms of
+   the original. Mirror reflects across a world plane; radial turns about the
+   vertical axis through the origin — the same axis the grid is drawn around,
+   so the centre is somewhere you can see rather than somewhere you have to
+   remember.
+
+   They compose. With both on, each of the n sectors carries the stroke AND its
+   reflection, which is what makes a rosette rather than a pinwheel: the copy is
+   mirrored first, then turned into its sector.
+
+   The identity is never in the list — that is the stroke you actually drew. So
+   mirror alone returns 1, radial n alone returns n-1, and the two together
+   return 2n-1, for 2n marks on the page. */
+S.symmetryMatrices = function(mirror, radial){
+  var n = Math.max(1, Math.round(radial || 1)), out = [], i;
+  var mm = mirror ? S.mirrorMatrix(mirror) : null;
+  for(i=0;i<n;i++){
+    var rot = new THREE.Matrix4().makeRotationY(i * Math.PI * 2 / n);
+    if(i > 0) out.push(rot);
+    if(mm) out.push(new THREE.Matrix4().multiplyMatrices(rot, mm));
+  }
+  return out;
+};
+
+/* what the live preview and the commit both ask for */
+S.symmetryOf = function(TOOLREF){
+  return S.symmetryMatrices(TOOLREF.mirror, TOOLREF.radial);
 };
 
 S.setShaded = function(on){

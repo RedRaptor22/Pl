@@ -186,7 +186,7 @@ function run(W){
   function reset(){
     P.Strokes.clear(); P.Guides.setActive(null); P.Guides.resources.length = 0;
     P.Strokes.groups.length = 0; P.Strokes.activeGroup = 0; P.Strokes.ensureGroup();
-    P.History.clear(); P.TOOL.mirror = null; P.Guides.isolate = true;
+    P.History.clear(); P.TOOL.mirror = null; P.TOOL.radial = 1; P.Guides.isolate = true;
     P.TOOL.sizeMM = 14; P.TOOL.eraserMM = 20;
     P.TOOL.autoGuide = false; P.TOOL.brush = 'pen';
     /* back to the defaults, so one group cannot quietly change the ground
@@ -509,6 +509,98 @@ function run(W){
      Math.abs(m1.y-m2.y) < 1e-6 && Math.abs(m1.z-m2.z) < 1e-6);
   P.History.undo();
   ck('undo removes both halves', P.Strokes.list.length === 0);
+
+  /* ---- radial symmetry, about the upright axis ----
+     Mirror reflects across a world plane; radial turns about the vertical axis
+     through the origin. They compose: with both on, each of the n sectors
+     carries the stroke AND its reflection, which is a rosette rather than a
+     pinwheel. The identity is never a copy, so mirror alone makes 2 marks,
+     radial n alone makes n, and the two together make 2n. */
+  (function radialSymmetry(){
+    function drawOne(){
+      pen([{x:CX+70,y:CY-40},{x:CX+105,y:CY-15},{x:CX+140,y:CY+10}]);
+    }
+    var combos = [[null,1,1], ['x',1,2], [null,2,2], [null,3,3], [null,6,6],
+                  [null,12,12], ['x',3,6], ['x',6,12], ['z',4,8]], wrong = [];
+    for(var q=0;q<combos.length;q++){
+      reset();
+      P.TOOL.mirror = combos[q][0]; P.TOOL.radial = combos[q][1];
+      drawOne();
+      if(P.Strokes.list.length !== combos[q][2])
+        wrong.push((combos[q][0]||'-') + '/' + combos[q][1] + ' gave ' +
+                   P.Strokes.list.length + ' not ' + combos[q][2]);
+    }
+    ck('every mirror and radial combination emits the right number of marks',
+       wrong.length === 0, wrong.join('; ') || combos.length + ' combinations');
+
+    /* the copies are a true rotation: evenly spaced, same radius, same height */
+    reset(); P.TOOL.radial = 6; drawOne();
+    var L = P.Strokes.list, q2;
+    function angOf(st){ var p = st.pts[0].p; return Math.atan2(p.x, p.z); }
+    var basA = angOf(L[0]), degs = [];
+    for(q2=0;q2<L.length;q2++){
+      var d = (angOf(L[q2]) - basA) * 180/Math.PI;
+      while(d < -1e-9) d += 360;
+      while(d >= 360 - 1e-9) d -= 360;
+      degs.push(d);
+    }
+    degs.sort(function(a,b){ return a-b; });
+    var worstAng = 0;
+    for(q2=0;q2<6;q2++) worstAng = Math.max(worstAng, Math.abs(degs[q2] - q2*60));
+    ck('six copies stand exactly 60 degrees apart', worstAng < 1e-6,
+       degs.map(function(v){ return v.toFixed(2); }).join(', '));
+
+    var rlo = Infinity, rhi = -Infinity, ylo = Infinity, yhi = -Infinity;
+    for(q2=0;q2<L.length;q2++){
+      var pp = L[q2].pts[0].p, rr = Math.sqrt(pp.x*pp.x + pp.z*pp.z);
+      rlo = Math.min(rlo, rr); rhi = Math.max(rhi, rr);
+      ylo = Math.min(ylo, pp.y); yhi = Math.max(yhi, pp.y);
+    }
+    ck('and all sit the same distance from the axis', (rhi-rlo) < 1e-9,
+       'spread ' + (rhi-rlo).toExponential(1));
+    ck('turning about the upright axis leaves height alone', (yhi-ylo) < 1e-9);
+
+    /* the whole rosette is one mark on the history */
+    reset(); P.TOOL.mirror = 'x'; P.TOOL.radial = 6; drawOne();
+    var made = P.Strokes.list.length;
+    P.History.undo();
+    ck('one undo takes the whole rosette', made === 12 && P.Strokes.list.length === 0,
+       made + ' marks');
+    P.History.redo();
+    ck('and one redo brings it all back', P.Strokes.list.length === made);
+
+    /* every copy has to be real geometry, not just a point list */
+    reset(); P.TOOL.radial = 8; P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 60;
+    drawOne();
+    var unbuilt = 0, nonFinite = 0;
+    for(q2=0;q2<P.Strokes.list.length;q2++){
+      var mesh = P.Strokes.list[q2].mesh;
+      if(!mesh){ unbuilt++; continue; }
+      var arr = mesh.geometry.attributes.position.array;
+      for(var q3=0;q3<arr.length;q3++){
+        if(!isFinite(arr[q3])){ nonFinite++; break; }
+      }
+    }
+    ck('every copy is built geometry, all of it finite',
+       unbuilt === 0 && nonFinite === 0,
+       P.Strokes.list.length + ' meshes');
+
+    /* the count rides with the sketch */
+    reset(); P.TOOL.mirror = 'z'; P.TOOL.radial = 7; drawOne();
+    var nBefore = P.Strokes.list.length;
+    var docR = JSON.stringify(P.Doc.serialize());
+    P.Doc.clear(); P.TOOL.radial = 1;
+    P.Doc.restore(JSON.parse(docR));
+    ck('the radial count is saved with the sketch',
+       P.TOOL.radial === 7 && P.Strokes.list.length === nBefore,
+       'x' + P.TOOL.radial + ', ' + P.Strokes.list.length + ' curves');
+    /* and a sketch saved before radial existed reads as off, not as zero copies */
+    var older = JSON.parse(docR); delete older.tool.radial;
+    P.TOOL.radial = 5; P.Doc.restore(older);
+    ck('a sketch saved before radial existed reads as off', P.TOOL.radial === 1,
+       'x' + P.TOOL.radial);
+    reset();
+  })();
 
   /* ================= A.7 loft ================= */
   group('A.7  Loft');

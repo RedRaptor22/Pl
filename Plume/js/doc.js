@@ -273,6 +273,7 @@ D.serialize = function(){
     tool: {
       brush:T.brush, color:'#'+T.color.getHexString(), sizeMM:q(T.sizeMM),
       opacity:q(T.opacity), pressureOn:!!T.pressureOn, pressureTarget:T.pressureTarget,
+      radial:Math.max(1, Math.round(T.radial || 1)),
       stableOn:!!T.stableOn, stable:q(T.stable), mirror:T.mirror,
       autoGuide:!!T.autoGuide
     },
@@ -408,6 +409,7 @@ D.restore = function(doc){
     T.pressureTarget = doc.tool.pressureTarget || 'size';
     T.stableOn = !!doc.tool.stableOn; T.stable = doc.tool.stable;
     T.mirror = doc.tool.mirror || null;
+    T.radial = Math.max(1, Math.round(doc.tool.radial || 1));
     T.autoGuide = !!doc.tool.autoGuide;
   }
 

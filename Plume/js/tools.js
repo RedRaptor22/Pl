@@ -27,6 +27,8 @@ var TOOL = P.TOOL = {
   mirror      : null,        // FACT (C.10): null | 'x' | 'z'
   autoGuide   : true,        // C.1 INFERENCE: with no guide, the first stroke makes one
   shapeHold   : true,
+  /* n-fold symmetry about the vertical axis; 1 is off. Composes with mirror. */
+  radial      : 1,
   /* FACT: the Liquify panel carries size, range and strength, each adjusted by
      sliding up or down, and a mode you tap or drag to change. */
   liquify     : { mode:'push', size:120, range:60, strength:55 }
@@ -333,50 +335,59 @@ function syncLive(){
   if(live.role !== 'curve') P.previewPath(live.world, live.role);
 }
 
-/* FACT (C.10): live symmetry, so the mirrored half is visible while drawing.
-   The preview is its own incrementally built stroke rather than a fresh clone
-   per sample — cloning re-allocated and rebuilt the whole mirrored tube on
-   every pointermove. */
-var liveMirror = null;
-var _mirrorPt = new THREE.Vector3();
+/* FACT (C.10): live symmetry, so the other halves are visible while drawing.
+   Each copy is its own incrementally built stroke rather than a fresh clone per
+   sample — cloning re-allocated and rebuilt the whole mirrored tube on every
+   pointermove. With radial symmetry there are now up to 2n-1 of them, so that
+   difference matters a great deal more than it used to. */
+var liveSym = [];
+var _symPt = new THREE.Vector3();
+var _symMat3 = new THREE.Matrix3();
 
 function beginLiveMirror(){
   clearLiveMirror();
-  if(!TOOL.mirror || !live || !live.stroke) return;
-  var m = S.mirrorMatrix(TOOL.mirror);
-  liveMirror = newStroke();
-  liveMirror.brush = live.stroke.brush;
-  liveMirror.color = live.stroke.color.clone();
-  liveMirror.baseRadius = live.stroke.baseRadius;
-  liveMirror.opacity = live.stroke.opacity;
-  liveMirror.pressureTarget = live.stroke.pressureTarget;
-  liveMirror.seedRef = live.stroke.seedRef.clone()
-    .applyMatrix3(new THREE.Matrix3().setFromMatrix4(m));
-  S.Live.begin(liveMirror);
+  if(!live || !live.stroke) return;
+  var mats = S.symmetryOf(TOOL);
+  if(!mats.length) return;
   var p0 = live.stroke.pts[0];
-  pushMirrorPoint(p0, m);
-  S.Live.append(liveMirror);
+  for(var i=0;i<mats.length;i++){
+    var m = mats[i];
+    var ghost = newStroke();
+    ghost.brush = live.stroke.brush;
+    ghost.color = live.stroke.color.clone();
+    ghost.baseRadius = live.stroke.baseRadius;
+    ghost.opacity = live.stroke.opacity;
+    ghost.pressureTarget = live.stroke.pressureTarget;
+    ghost.seedRef = live.stroke.seedRef.clone()
+      .applyMatrix3(_symMat3.setFromMatrix4(m).clone());
+    liveSym.push({ stroke:ghost, m:m });
+    S.Live.begin(ghost);
+    pushSymPoint(liveSym[i], p0);
+    S.Live.append(ghost);
+  }
 }
 
 function extendLiveMirror(world, sample, normal){
-  if(!liveMirror) return;
-  var m = S.mirrorMatrix(TOOL.mirror);
-  pushMirrorPoint({p:world, pressure:sample.pressure,
-                   tiltAz:sample.tilt.az, tiltAlt:sample.tilt.alt, nrm:normal}, m);
-  S.Live.append(liveMirror);
+  if(!liveSym.length) return;
+  var src = { p:world, pressure:sample.pressure,
+              tiltAz:sample.tilt.az, tiltAlt:sample.tilt.alt, nrm:normal };
+  for(var i=0;i<liveSym.length;i++){
+    pushSymPoint(liveSym[i], src);
+    S.Live.append(liveSym[i].stroke);
+  }
 }
 
-function pushMirrorPoint(src, m){
-  _mirrorPt.copy(src.p).applyMatrix4(m);
-  liveMirror.pts.push({
-    p:_mirrorPt.clone(), tan:null, ref:null, roll:0,
+function pushSymPoint(entry, src){
+  _symPt.copy(src.p).applyMatrix4(entry.m);
+  entry.stroke.pts.push({
+    p:_symPt.clone(), tan:null, ref:null, roll:0,
     pressure: src.pressure, tiltAz: src.tiltAz, tiltAlt: src.tiltAlt, nrm:null
   });
 }
 
 function clearLiveMirror(){
-  if(liveMirror) S.Live.discard(liveMirror);
-  liveMirror = null;
+  for(var i=0;i<liveSym.length;i++) S.Live.discard(liveSym[i].stroke);
+  liveSym.length = 0;
 }
 
 /* ==========================================================================
@@ -423,7 +434,8 @@ function finishCurve(l){
     S.freezeFrames(l.stroke);
     S.rebuild(l.stroke);
     var made0 = [l.stroke];
-    if(TOOL.mirror) made0.push(S.mirroredCopy(l.stroke, TOOL.mirror));
+    var sym0 = S.symmetryOf(TOOL);
+    for(var s0=0;s0<sym0.length;s0++) made0.push(S.transformedCopy(l.stroke, sym0[s0]));
     P.History.run({
       label: 'draw shape', cost: P.History.costOf(made0),
       redo: function(){ for(var i=0;i<made0.length;i++) S.add(made0[i]); },
@@ -467,7 +479,8 @@ function finishCurve(l){
   S.Live.finish(l.stroke);
 
   var made = [l.stroke];
-  if(TOOL.mirror) made.push(S.mirroredCopy(l.stroke, TOOL.mirror));
+  var sym = S.symmetryOf(TOOL);
+  for(var sy=0;sy<sym.length;sy++) made.push(S.transformedCopy(l.stroke, sym[sy]));
 
   P.History.run({
     label: 'draw', cost: P.History.costOf(made),
