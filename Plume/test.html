@@ -208,6 +208,9 @@ function run(W){
     P.FX.dofOn = false; P.FX.fstop = 5.6;
     P.FX.grainOn = false; P.FX.grain = 35;
     P.FX.pixelOn = false; P.FX.pixel = 4;
+    /* the symmetry fold is drawn into the scene, so a stale one tints every
+       pixel reading after it — it has to come down with everything else */
+    P.updateSymmetryPlane();
     P.VIEW.theta = 0.6; P.VIEW.phi = 1.1; P.VIEW.radius = 4; P.VIEW.roll = 0;
     P.VIEW.ortho = false; P.VIEW.focal = 50;
     P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true; P.applyCamera();
@@ -599,6 +602,67 @@ function run(W){
     P.TOOL.radial = 5; P.Doc.restore(older);
     ck('a sketch saved before radial existed reads as off', P.TOOL.radial === 1,
        'x' + P.TOOL.radial);
+    reset();
+  })();
+
+  /* ---- where the symmetry folds ----
+     A stroke and its mirror meet in the middle, and that middle is a plane:
+     the midpoint of any point and its reflection lies on it. Drawn edge-on it
+     is the faint line down the middle; orbited it stays truthful. Radial folds
+     about a line instead, so that one is drawn as a line. */
+  (function foldIndicator(){
+    function drawOne(){ pen([{x:CX+70,y:CY-40},{x:CX+105,y:CY-15},{x:CX+140,y:CY+10}]); }
+    var H = P.symmetryHelper;
+
+    reset(); drawOne(); P.updateSymmetryPlane();
+    ck('no fold is drawn while symmetry is off', H.visible === false);
+
+    reset(); P.TOOL.mirror = 'x'; drawOne(); P.updateSymmetryPlane();
+    ck('mirror shows the fold', H.visible === true);
+
+    /* every corner of the quad has to sit ON the plane it claims to be */
+    function offPlane(axis){
+      reset(); P.TOOL.mirror = axis; drawOne(); P.updateSymmetryPlane();
+      var a = H.children[0].geometry.attributes.position.array, worst = 0, i;
+      for(i=0;i<a.length;i+=3){
+        worst = Math.max(worst, Math.abs(axis === 'x' ? a[i] : a[i+2]));
+      }
+      return worst;
+    }
+    ck('the fold lies exactly on the X mirror plane', offPlane('x') < 1e-9,
+       offPlane('x').toExponential(1));
+    ck('and exactly on the Z mirror plane', offPlane('z') < 1e-9,
+       offPlane('z').toExponential(1));
+
+    /* it follows the work rather than the origin: a sketch drawn high up gets
+       its fold up there too, not hanging below pointing at nothing */
+    reset(); P.TOOL.mirror = 'x';
+    pen([{x:CX+60,y:CY-150},{x:CX+100,y:CY-170},{x:CX+140,y:CY-150}]);
+    P.updateSymmetryPlane();
+    var qa = H.children[0].geometry.attributes.position.array;
+    var ylo = Infinity, yhi = -Infinity, q4;
+    for(q4=1;q4<qa.length;q4+=3){ ylo = Math.min(ylo,qa[q4]); yhi = Math.max(yhi,qa[q4]); }
+    var wb = P.Strokes.bounds();
+    ck('the fold centres on the drawing, not on the origin',
+       Math.abs((ylo+yhi)/2 - (wb.min.y+wb.max.y)/2) < 1e-6,
+       'fold ' + ((ylo+yhi)/2).toFixed(3) + ' vs work ' + ((wb.min.y+wb.max.y)/2).toFixed(3));
+
+    /* radial folds about a line, and that line is the axis it turns on */
+    reset(); P.TOOL.radial = 8; drawOne(); P.updateSymmetryPlane();
+    var shown = 0, q5;
+    for(q5=0;q5<H.children.length;q5++) if(H.children[q5].visible) shown++;
+    ck('radial alone draws only the turning axis', shown === 1, shown + ' parts');
+    var la = H.children[2].geometry.attributes.position.array, off = 0;
+    for(q5=0;q5<la.length;q5+=3) off = Math.max(off, Math.abs(la[q5]), Math.abs(la[q5+2]));
+    ck('and that line sits exactly on the upright axis', off < 1e-9, off.toExponential(1));
+
+    /* it is chrome: it must not reach the exporters or the curve list */
+    reset(); P.TOOL.mirror = 'x'; drawOne(); P.updateSymmetryPlane();
+    var exParts = P.Export.collect({});
+    ck('the fold never reaches the export',
+       exParts.length === P.Strokes.list.length &&
+       P.Strokes.list.indexOf(H) < 0,
+       exParts.length + ' parts for ' + P.Strokes.list.length + ' curves');
     reset();
   })();
 

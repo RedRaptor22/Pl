@@ -252,7 +252,12 @@ P.setTool = function(mode){
    ========================================================================== */
 P.onSceneChange = function(){
   P.invalidateGroundShadow(); if(P.UI) P.UI.refresh(); };
-P.onToolChange  = function(){ if(P.UI) P.UI.refresh(); };
+P.onToolChange  = function(){
+  /* the fold follows the tool immediately rather than at the next frame, so
+     toggling mirror off really does take it off the screen there and then */
+  if(P.updateSymmetryPlane) P.updateSymmetryPlane();
+  if(P.UI) P.UI.refresh();
+};
 P.onViewChange  = function(){ if(P.UI) P.UI.refreshView(); };
 P.onGuideChange = function(){ if(P.UI) P.UI.refresh(); };
 
@@ -281,6 +286,7 @@ function tick(now){
   if(!P.viewAnimating()) P.tickSpin();
   P.tickView(now);
   P.updatePivotMarker();
+  P.updateSymmetryPlane();     // cached; only rebuilt when the fold or the work moves
   P.updateGroundShadow();         // cached; only redrawn when the light or the sketch moves
   /* the post pass renders the scene itself when it is on, and says so */
   if(!P.renderWithFX(P.scene, P.cam())) P.renderer.render(P.scene, P.cam());

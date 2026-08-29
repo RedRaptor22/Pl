@@ -419,6 +419,155 @@ var axisGroup = new THREE.Group();
 axisGroup.visible = ENV.axis;
 scene.add(axisGroup);
 
+/* ==========================================================================
+   Where the symmetry folds
+   --------------------------------------------------------------------------
+   A stroke and its mirror meet in the middle, and that middle is a PLANE, not
+   a line: the midpoint of any point and its reflection lies on it, wherever on
+   the stroke you take it. Drawn edge-on — which is how you are looking at it
+   most of the time you are drawing — it collapses to exactly the faint line
+   down the middle it is meant to be, and when you orbit off-axis it stays
+   truthful instead of pretending the fold is somewhere it is not.
+
+   Radial symmetry folds about a line rather than a plane, so that one is drawn
+   as a line: the upright axis every copy turns around.
+
+   Both are bounded to what is actually on the page rather than running to the
+   horizon, so they read as part of this drawing and never compete with the
+   grid or the RGB axis.
+   ========================================================================== */
+var symGroup = new THREE.Group();
+symGroup.visible = false;
+symGroup.renderOrder = -1;          // behind the sketch, never over it
+
+/* Faint means faint. The fold is a thing you glance at to place a stroke, not
+   a thing you look at, so the fill is barely a tint and the rim only just
+   holds its edge. Seen face-on the two stack into the one legible line. */
+var symFillMat = new THREE.MeshBasicMaterial({
+  transparent:true, opacity:0.035, depthWrite:false, side:THREE.DoubleSide
+});
+var symLineMat = new THREE.LineBasicMaterial({
+  transparent:true, opacity:0.20, depthWrite:false
+});
+var symAxisMat = new THREE.LineBasicMaterial({
+  transparent:true, opacity:0.38, depthWrite:false
+});
+
+var symFill = new THREE.Mesh(new THREE.BufferGeometry(), symFillMat);
+var symEdge = new THREE.LineSegments(new THREE.BufferGeometry(), symLineMat);
+var symAxis = new THREE.LineSegments(new THREE.BufferGeometry(), symAxisMat);
+symFill.frustumCulled = false; symEdge.frustumCulled = false;
+symAxis.frustumCulled = false;
+symGroup.add(symFill); symGroup.add(symEdge); symGroup.add(symAxis);
+scene.add(symGroup);
+
+var SYM_MIN_HALF = 0.16;            // 160mm, so it is still there on an empty page
+var SYM_PAD_MIN  = 0.05;            // and always a little air around the work
+var symSig = '';
+
+/* the drawing's extent, so the fold is sized to the work and not to the world */
+function symBounds(){
+  var box = new THREE.Box3();
+  if(P.Strokes && P.Strokes.list.length) box.union(P.Strokes.bounds());
+  if(P.Guides && P.Guides.active && P.Guides.active.mesh){
+    var g = P.Guides.active.mesh;
+    g.updateMatrixWorld(true);
+    var gb = new THREE.Box3().setFromObject(g);
+    if(!gb.isEmpty()) box.union(gb);
+  }
+  if(box.isEmpty()) box.set(new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,0));
+  return box;
+}
+
+function symColors(){
+  var bg = ENV.bg, lum = bg.r*0.299 + bg.g*0.587 + bg.b*0.114;
+  return lum > 0.5 ? new THREE.Color(0x2a3550) : new THREE.Color(0xc9d6f2);
+}
+
+P.updateSymmetryPlane = function(){
+  var T = P.TOOL || {};
+  var axis  = T.mirror || null;
+  var nRad  = Math.max(1, Math.round(T.radial || 1));
+  if(!axis && nRad < 2){
+    if(symGroup.visible){ symGroup.visible = false; symSig = ''; }
+    return;
+  }
+
+  var box = symBounds();
+  var lum = (ENV.bg.r*0.299 + ENV.bg.g*0.587 + ENV.bg.b*0.114) > 0.5 ? 1 : 0;
+  var sig = axis + '|' + nRad + '|' + lum + '|' +
+            box.min.toArray().concat(box.max.toArray())
+               .map(function(v){ return v.toFixed(3); }).join(',');
+  symGroup.visible = true;
+  if(sig === symSig) return;
+  symSig = sig;
+
+  var col = symColors();
+  symFillMat.color.copy(col); symLineMat.color.copy(col); symAxisMat.color.copy(col);
+
+  /* The margin is a fraction of the work, not a fixed distance: a fixed one
+     swallows a small sketch and vanishes on a large one. */
+  var sz = box.getSize(new THREE.Vector3());
+  var mid = box.getCenter(new THREE.Vector3());
+  var pad = Math.max(SYM_PAD_MIN, Math.max(sz.x, sz.y, sz.z) * 0.10);
+
+  /* A minimum SIZE, centred on the work — not a minimum reach from the origin.
+     Forcing it to straddle the origin left the fold hanging below a sketch
+     that happened to sit above it, pointing at nothing. */
+  function span(centre, extent){
+    var half = Math.max(SYM_MIN_HALF, extent/2 + pad);
+    return [centre - half, centre + half];
+  }
+
+  /* vertical extent is shared by both: the fold plane and the turning axis
+     both want to span the height of the work */
+  var yy = span(mid.y, sz.y), y0 = yy[0], y1 = yy[1];
+
+  /* ---- the mirror plane, as a bounded quad ---- */
+  if(axis){
+    /* the plane's in-plane horizontal direction: mirroring across X leaves the
+       Z axis lying in the plane, and the other way round */
+    var uu, corner;
+    if(axis === 'x'){
+      uu = span(mid.z, sz.z);
+      corner = function(u, v){ return [0, v, u]; };
+    } else {
+      uu = span(mid.x, sz.x);
+      corner = function(u, v){ return [u, v, 0]; };
+    }
+    var lo = uu[0], hi = uu[1];
+    var a = corner(lo,y0), b = corner(hi,y0), c = corner(hi,y1), d = corner(lo,y1);
+    var quad = new Float32Array(a.concat(b, c, a, c, d));
+    symFill.geometry.dispose();
+    symFill.geometry = new THREE.BufferGeometry();
+    symFill.geometry.setAttribute('position', new THREE.BufferAttribute(quad,3));
+
+    var edge = new Float32Array(
+      a.concat(b).concat(b, c).concat(c, d).concat(d, a));
+    symEdge.geometry.dispose();
+    symEdge.geometry = new THREE.BufferGeometry();
+    symEdge.geometry.setAttribute('position', new THREE.BufferAttribute(edge,3));
+    symFill.visible = symEdge.visible = true;
+  } else {
+    symFill.visible = symEdge.visible = false;
+  }
+
+  /* ---- the radial axis, as a line ---- */
+  if(nRad > 1){
+    var ax = new Float32Array([0, y0, 0, 0, y1, 0]);
+    symAxis.geometry.dispose();
+    symAxis.geometry = new THREE.BufferGeometry();
+    symAxis.geometry.setAttribute('position', new THREE.BufferAttribute(ax,3));
+    symAxis.visible = true;
+  } else {
+    symAxis.visible = false;
+  }
+};
+
+/* the fold is chrome, not sketch: it must never reach the exporters, the
+   ground-shadow pass (which whitelists the stroke group) or the pickers */
+P.symmetryHelper = symGroup;
+
 P.applyEnv = function(){
   renderer.setClearColor(ENV.bg, 1);
   /* the chrome follows the canvas, the way Feather's does — a light scene gets
