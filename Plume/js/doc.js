@@ -262,7 +262,13 @@ D.serialize = function(){
       light: { az:q(P.LIGHT.az), alt:q(P.LIGHT.alt),
                color:'#'+P.LIGHT.color.getHexString(),
                intensity:q(P.LIGHT.intensity), ambient:q(P.LIGHT.ambient),
-               toon:!!P.LIGHT.toon, toonSteps:P.LIGHT.toonSteps }
+               toon:!!P.LIGHT.toon, toonSteps:P.LIGHT.toonSteps },
+      /* and so do the post effects, for the same reason: a sketch shot at
+         f/2.8 through heavy grain is a different picture from the same curves
+         rendered clean, and reopening it sharp is a change nobody asked for */
+      fx: { dof:!!P.FX.dofOn, fstop:q(P.FX.fstop),
+            grain:!!P.FX.grainOn, grainLevel:q(P.FX.grain),
+            pixel:!!P.FX.pixelOn, pixelSize:q(P.FX.pixel) }
     },
     tool: {
       brush:T.brush, color:'#'+T.color.getHexString(), sizeMM:q(T.sizeMM),
@@ -381,6 +387,15 @@ D.restore = function(doc){
       P.LIGHT.intensity = L.intensity; P.LIGHT.ambient = L.ambient;
       P.LIGHT.toon = !!L.toon;
       if(L.toonSteps) P.LIGHT.toonSteps = L.toonSteps;
+    }
+    var X = doc.env.fx;
+    if(X){
+      P.FX.dofOn   = !!X.dof;
+      P.FX.grainOn = !!X.grain;
+      P.FX.pixelOn = !!X.pixel;
+      if(X.fstop      !== undefined) P.FX.fstop = X.fstop;
+      if(X.grainLevel !== undefined) P.FX.grain = X.grainLevel;
+      if(X.pixelSize  !== undefined) P.FX.pixel = X.pixelSize;
     }
     P.applyLight();
   }

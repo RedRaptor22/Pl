@@ -196,7 +196,18 @@ function run(W){
        supposed to be measuring. */
     P.TOOL.shapeHold = true; P.TOOL.opacity = 1;
     P.ENV.bg.set('#eceaf3'); P.ENV.render = false; P.ENV.groundShadow = true;
-    P.applyEnv();
+    P.ENV.grid = true; P.ENV.axis = false; P.ENV.fog = false; P.ENV.shaded = true;
+    P.applyEnv(); P.Strokes.setShaded(true);
+    /* the light and the post effects belong here for the same reason the
+       background does: they are global, every pixel reading depends on them,
+       and a group that leaves the sun somewhere else silently darkens every
+       group that follows it */
+    P.LIGHT.az = 0.4185; P.LIGHT.alt = 0.6664; P.LIGHT.color.set('#ffffff');
+    P.LIGHT.intensity = 1; P.LIGHT.ambient = 0.66;
+    P.LIGHT.toon = false; P.LIGHT.toonSteps = 4; P.applyLight();
+    P.FX.dofOn = false; P.FX.fstop = 5.6;
+    P.FX.grainOn = false; P.FX.grain = 35;
+    P.FX.pixelOn = false; P.FX.pixel = 4;
     P.VIEW.theta = 0.6; P.VIEW.phi = 1.1; P.VIEW.radius = 4; P.VIEW.roll = 0;
     P.VIEW.ortho = false; P.VIEW.focal = 50;
     P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true; P.applyCamera();
@@ -828,6 +839,54 @@ function run(W){
      after.tool[0] === before.tool[0] && after.tool[1] === before.tool[1] &&
      after.tool[2] === before.tool[2]);
   ck('a restored guide is still bendable', !!(P.Guides.active && P.Guides.active.sweep));
+
+  /* The light is saved because a sketch lit from the left is a different
+     sketch. The post effects are the same argument — one shot at f/2.8 through
+     heavy grain is a different picture — and they were being dropped. Every
+     field is scrambled before the restore, so nothing can pass by never having
+     been touched. */
+  (function fxRoundTrip(){
+    P.LIGHT.az = 1.23; P.LIGHT.alt = 0.77; P.LIGHT.intensity = 0.62;
+    P.LIGHT.ambient = 0.41; P.LIGHT.color.set('#ffd0a0'); P.LIGHT.toon = true;
+    P.applyLight();
+    P.FX.dofOn = true; P.FX.fstop = 2.8; P.FX.grainOn = true; P.FX.grain = 51;
+    P.FX.pixelOn = true; P.FX.pixel = 7;
+    P.ENV.render = true; P.ENV.groundShadow = false; P.applyEnv();
+
+    var doc2 = JSON.stringify(P.Doc.serialize());
+    P.Doc.clear();
+    P.LIGHT.toon = false; P.LIGHT.intensity = 1; P.LIGHT.ambient = 1;
+    P.LIGHT.color.set('#00ff00'); P.applyLight();
+    P.FX.dofOn = false; P.FX.fstop = 11; P.FX.grainOn = false; P.FX.grain = 5;
+    P.FX.pixelOn = false; P.FX.pixel = 2;
+    P.ENV.render = false; P.ENV.groundShadow = true; P.applyEnv();
+    P.Doc.restore(JSON.parse(doc2));
+
+    ck('the light survives a round trip',
+       Math.abs(P.LIGHT.az - 1.23) < 1e-5 && Math.abs(P.LIGHT.alt - 0.77) < 1e-5 &&
+       Math.abs(P.LIGHT.intensity - 0.62) < 1e-5 &&
+       Math.abs(P.LIGHT.ambient - 0.41) < 1e-5 &&
+       P.LIGHT.color.getHexString() === 'ffd0a0' && P.LIGHT.toon === true,
+       P.LIGHT.color.getHexString() + ' toon=' + P.LIGHT.toon);
+    ck('render mode and ground shadow survive',
+       P.ENV.render === true && P.ENV.groundShadow === false);
+    ck('depth of field survives, on and at its f-stop',
+       P.FX.dofOn === true && Math.abs(P.FX.fstop - 2.8) < 1e-5,
+       'dof=' + P.FX.dofOn + ' f/' + P.FX.fstop);
+    ck('grain survives, on and at its level',
+       P.FX.grainOn === true && Math.abs(P.FX.grain - 51) < 1e-5,
+       'grain=' + P.FX.grainOn + ' ' + P.FX.grain + '%');
+    ck('pixelation survives, on and at its block size',
+       P.FX.pixelOn === true && Math.abs(P.FX.pixel - 7) < 1e-5,
+       'pixel=' + P.FX.pixelOn + ' ' + P.FX.pixel + 'px');
+
+    /* and a document saved before any of this existed must still open */
+    var older = JSON.parse(doc2);
+    delete older.env.fx; delete older.env.light;
+    var okOld = false;
+    try { okOld = P.Doc.restore(older); } catch(e){ okOld = 'threw: ' + e.message; }
+    ck('a document with no fx or light block still opens', okOld === true, String(okOld));
+  })();
   ck('history is cleared by a restore, not left dangling', !P.History.canUndo());
 
   var tv2 = P.ORTHO_VIEWS[4];
