@@ -120,9 +120,25 @@ function penMove(e){
       penTapPending.moved = true;
       cancelHold();
     }
+    /* once a select press has moved it is a SWEEP, picking up every curve it
+       crosses. The tap is still the tap while it holds still. */
+    if(penTapPending.moved && TOOL.mode === 'select'){
+      Tools.sweepSelect(e.clientX, e.clientY, penTapPending);
+    }
     return;
   }
   if(holdOrigin && Math.hypot(e.clientX-holdOrigin.x, e.clientY-holdOrigin.y) > HOLD_SLOP) cancelHold();
+
+  /* COALESCED SAMPLES. A pen reports far faster than the display refreshes —
+     an S Pen at ~240Hz against a 60Hz frame — and the browser hands over one
+     pointermove per frame with the rest folded into it. Asking for them back
+     is the difference between a stroke sampled every 30px on a fast flick and
+     one sampled every 8px, and it costs nothing where it is unsupported. */
+  var co = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+  if(co && co.length > 1){
+    for(var i=0;i<co.length;i++) Tools.extend(co[i].clientX, co[i].clientY, co[i]);
+    return;
+  }
   Tools.extend(e.clientX, e.clientY, e);
 }
 
@@ -133,8 +149,11 @@ function penEnd(e){
   try{ el.releasePointerCapture(e.pointerId); }catch(err){}
   if(penTapPending){
     var tp = penTapPending; penTapPending = null;
+    if(tp.moved && TOOL.mode === 'select'){ Tools.endSweepSelect(); return; }
     if(!tp.moved){
-      if(TOOL.mode === 'select') Tools.tapSelect(tp.x, tp.y, e.shiftKey);
+      /* a tap ADDS rather than replacing; there is no modifier key on a
+         tablet, and picking two curves has to be possible without one */
+      if(TOOL.mode === 'select') Tools.tapSelect(tp.x, tp.y, true);
       else if(TOOL.mode === 'loft'){
         Tools.loftPick(tp.x, tp.y);
         P.onSceneChange();
@@ -478,6 +497,7 @@ window.addEventListener('keydown', function(e){
     case 's': P.setTool('select'); break;
     case 'l': P.setTool('lasso');  break;
     case 'm': P.setTool('smooth'); break;
+    case 'k': P.setTool('fill');   break;   // f is View reset
     case 'r': P.setTool('shape');  break;
     case 'o': P.toast(P.toggleProjection()); P.onViewChange(); break;
     case 'f': P.resetView(); P.toast('View reset'); break;

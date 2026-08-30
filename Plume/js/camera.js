@@ -71,6 +71,22 @@ P.viewHeight = viewHeight;
 P.pxToWorld = function(px){ return px * (viewHeight() / viewport().h); };
 P.worldToPx = function(w){  return w  * (viewport().h / viewHeight()); };
 
+/* Pixels -> world units AT A GIVEN POINT, rather than at the pivot. Under
+   perspective a pixel covers more world the further away it is, so a drag that
+   must follow the pen — Liquify — needs the scale where the point actually is.
+   Orthographic has no such falloff and returns the pivot scale. */
+var _pxFwd = new THREE.Vector3(), _pxOff = new THREE.Vector3();
+P.pxToWorldAt = function(p){
+  var h = viewport().h;
+  if(VIEW.ortho) return viewHeight() / h;
+  var cam = P.cam();
+  cam.getWorldDirection(_pxFwd);
+  _pxOff.set(p.x - cam.position.x, p.y - cam.position.y, p.z - cam.position.z);
+  var d = Math.abs(_pxFwd.dot(_pxOff));          // depth along the view axis
+  if(!(d > 1e-6)) d = VIEW.radius;
+  return 2 * Math.tan(fovFromFocal(VIEW.focal)*Math.PI/360) * d / h;
+};
+
 /* world point -> client coordinates, directly comparable to clientX/clientY */
 var _sp = new THREE.Vector3();
 P.worldToScreen = function(p, out){
@@ -86,6 +102,8 @@ P.worldToScreen = function(p, out){
 var _e = new THREE.Vector3();
 
 function applyCamera(){
+  /* the guide occlusion cache is keyed to this viewpoint */
+  if(P.invalidateMask) P.invalidateMask();
   VIEW.phi    = P.clamp(VIEW.phi, 0.0025, Math.PI-0.0025);
   VIEW.radius = P.clamp(VIEW.radius, T.radiusMin, T.radiusMax);
   VIEW.focal  = P.clamp(VIEW.focal, T.focalMin, T.focalMax);
@@ -148,9 +166,228 @@ var ENV = {
   grid    : true,
   axis    : false,             // FACT: Global Axis is off by default
   fog     : false,
-  shaded  : true
+  shaded  : true,
+  /* FACT: Feather shows lighting, shadows and effects accurately only in
+     rendering mode. Drawing stays cheap; you ask for the picture. */
+  render  : false,
+  groundShadow : true
 };
 P.ENV = ENV;
+
+/* ==========================================================================
+   Lighting — one key light and a soft ambient floor
+   --------------------------------------------------------------------------
+   Feather's Lighting panel gives a direction you slide (up and down for
+   altitude, sideways for azimuth), a colour, and an intensity. This is that,
+   kept to a single key plus ambient because a sketchbook wants a predictable
+   read rather than a studio rig.
+
+   THE UNIFORMS ARE SHARED OBJECTS. Every stroke owns its own material, so
+   pointing them all at the same uniform objects makes changing the light one
+   assignment rather than a walk over every stroke in the sketch - which
+   matters when the light is being dragged.
+
+   The defaults reproduce the light that was hardcoded in the stroke shader
+   before there was anything to adjust: direction (0.32, 0.62, 0.72) is
+   altitude 38.2 degrees at azimuth 24, and an ambient of 0.66 with a
+   half-lambert term is exactly the 0.66 + 0.34*(d*0.5+0.5) it used to be. So
+   nothing already drawn changes until you move something. */
+var LIGHT = P.LIGHT = {
+  az       : 0.4185,          // radians, 0 = +Z, turning towards +X
+  alt      : 0.6664,          // radians above the horizon
+  color    : new THREE.Color(0xffffff),
+  intensity: 1,
+  ambient  : 0.66,            // how bright the unlit side stays
+  toon     : false,
+  toonSteps: 4
+};
+
+var LU = P.LIGHT_UNIFORMS = {
+  uLightDir: { value: new THREE.Vector3(0.319, 0.618, 0.718) },
+  uLightCol: { value: new THREE.Color(1,1,1) },
+  uLightInt: { value: 1 },
+  uAmbient : { value: 0.66 },
+  uToon    : { value: 0 },
+  uToonStep: { value: 4 }
+};
+
+P.lightDirection = function(out){
+  var ca = Math.cos(LIGHT.alt);
+  return (out || new THREE.Vector3()).set(
+    ca * Math.sin(LIGHT.az), Math.sin(LIGHT.alt), ca * Math.cos(LIGHT.az)
+  ).normalize();
+};
+
+P.applyLight = function(){
+  P.lightDirection(LU.uLightDir.value);
+  LU.uLightCol.value.copy(LIGHT.color);
+  LU.uLightInt.value = LIGHT.intensity;
+  LU.uAmbient.value  = P.clamp(LIGHT.ambient, 0, 1);
+  LU.uToon.value     = LIGHT.toon ? 1 : 0;
+  LU.uToonStep.value = Math.max(2, Math.round(LIGHT.toonSteps));
+  if(P.onLightChange) P.onLightChange();
+};
+
+/* ==========================================================================
+   Ground shadow — the sketch's silhouette, thrown down the light
+   --------------------------------------------------------------------------
+   Feather's Ground Shadow casts onto the ground, and that is all this does.
+
+   NOT A SHADOW MAP. The usual depth-map comparison wants surfaces thick and
+   flat enough to bias against, and almost everything Plume draws is a thin
+   tube: the bias that stops the acne is the bias that lifts the shadow off
+   the object it belongs to. What the ground actually needs is a simpler
+   question - is anything between this patch of ground and the light - and the
+   answer is the sketch's SILHOUETTE seen from the light. So the strokes are
+   drawn flat into a small target from the light's direction, and the ground
+   samples it. No depth compare, no bias, nothing to tune.
+
+   It is redrawn only when something it depends on moves. Orbiting the camera
+   does not change a shadow cast by a fixed light onto a fixed ground, so
+   spinning the view costs nothing.
+   ========================================================================== */
+var SHADOW_SIZE = 1024;
+var shadowTarget = null, shadowCam = null, shadowPlane = null;
+var shadowFlat = new THREE.MeshBasicMaterial({ color:0x000000 });
+var shadowDirty = true, shadowKey = '';
+
+P.invalidateGroundShadow = function(){ shadowDirty = true; };
+P.onLightChange = function(){ shadowDirty = true; };
+
+var GROUND_VERT = [
+  'varying vec4 vLightPos;',
+  'uniform mat4 uLightVP;',
+  'void main(){',
+  '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+  '  vLightPos = uLightVP * wp;',
+  '  gl_Position = projectionMatrix * viewMatrix * wp;',
+  '}'
+].join('\n');
+
+var GROUND_FRAG = [
+  'precision highp float;',
+  'varying vec4 vLightPos;',
+  'uniform sampler2D uMask;',
+  'uniform vec3  uColor;',
+  'uniform float uStrength;',
+  'uniform float uSoft;',
+  'void main(){',
+  '  vec3 lp = vLightPos.xyz / vLightPos.w;',
+  '  vec2 uv = lp.xy * 0.5 + 0.5;',
+  '  if(uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;',
+  /* a few taps, so the edge is soft rather than a stencil cut */
+  '  float o = uSoft;',
+  '  float a = texture2D(uMask, uv).a * 0.4;',
+  '  a += texture2D(uMask, uv + vec2( o, 0.0)).a * 0.15;',
+  '  a += texture2D(uMask, uv + vec2(-o, 0.0)).a * 0.15;',
+  '  a += texture2D(uMask, uv + vec2(0.0,  o)).a * 0.15;',
+  '  a += texture2D(uMask, uv + vec2(0.0, -o)).a * 0.15;',
+  '  if(a < 0.004) discard;',
+  '  gl_FragColor = vec4(uColor, a * uStrength);',
+  '}'
+].join('\n');
+
+function ensureShadow(){
+  if(shadowTarget) return;
+  shadowTarget = new THREE.WebGLRenderTarget(SHADOW_SIZE, SHADOW_SIZE, {
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat, depthBuffer: true
+  });
+  shadowCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 100);
+  shadowPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.ShaderMaterial({
+      uniforms: {
+        uLightVP  : { value: new THREE.Matrix4() },
+        uMask     : { value: shadowTarget.texture },
+        uColor    : { value: new THREE.Color(0x000000) },
+        uStrength : { value: 0.30 },
+        uSoft     : { value: 1.5 / SHADOW_SIZE }
+      },
+      vertexShader: GROUND_VERT, fragmentShader: GROUND_FRAG,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide
+    })
+  );
+  shadowPlane.rotation.x = -Math.PI/2;             // lie it on y = 0
+  shadowPlane.renderOrder = 1;                     // over the grid, under the ink
+  shadowPlane.visible = false;
+  scene.add(shadowPlane);
+}
+
+/* what the shadow depends on: the light, and where the sketch is */
+function shadowSignature(box){
+  return [LIGHT.az.toFixed(4), LIGHT.alt.toFixed(4),
+          box.min.x.toFixed(3), box.min.y.toFixed(3), box.min.z.toFixed(3),
+          box.max.x.toFixed(3), box.max.y.toFixed(3), box.max.z.toFixed(3)].join(',');
+}
+
+P.updateGroundShadow = function(){
+  var on = ENV.render && ENV.groundShadow && P.Strokes && P.Strokes.list.length;
+  ensureShadow();
+  /* below the horizon there is nothing sensible to cast */
+  if(on && LIGHT.alt < 0.05) on = false;
+  if(!on){ shadowPlane.visible = false; return; }
+
+  var box = P.Strokes.bounds();
+  if(box.isEmpty()){ shadowPlane.visible = false; return; }
+  box.expandByScalar(0.02);
+
+  var key = shadowSignature(box);
+  if(!shadowDirty && key === shadowKey){ shadowPlane.visible = true; return; }
+  shadowDirty = false; shadowKey = key;
+
+  var centre = box.getCenter(new THREE.Vector3());
+  var radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.05);
+  var dir = P.lightDirection(new THREE.Vector3());
+
+  /* the ground the shadow can land on reaches out by however far the light
+     leans: a low sun throws a long one */
+  var reach = radius + Math.abs(centre.y) / Math.max(Math.tan(LIGHT.alt), 0.05);
+  var half = Math.min(radius + reach, radius * 40 + 1);
+
+  shadowCam.left = -half; shadowCam.right = half;
+  shadowCam.top  =  half; shadowCam.bottom = -half;
+  shadowCam.near = 0.01;  shadowCam.far = half*4 + radius*4 + 2;
+  shadowCam.position.copy(centre).addScaledVector(dir, half*2 + radius);
+  shadowCam.lookAt(centre);
+  shadowCam.updateMatrixWorld();
+  shadowCam.updateProjectionMatrix();
+
+  /* STROKES ONLY, and said as a whitelist rather than a list of things to
+     hide. Naming the exceptions is how the first attempt turned the ground
+     into one grey slab: an override material makes EVERYTHING opaque, so the
+     pivot marker - a one-metre sphere kept at zero opacity - became a solid
+     black ball filling the light's whole view. Anything added to the scene
+     later would have found the same trap. Guides are scaffolding and should
+     not throw shade either. */
+  var prevOverride = scene.overrideMaterial;
+  var strokeRoot = P.Strokes.group;
+  var kids = scene.children, wasVisible = new Array(kids.length), ki;
+  for(ki=0; ki<kids.length; ki++){
+    wasVisible[ki] = kids[ki].visible;
+    kids[ki].visible = (kids[ki] === strokeRoot);
+  }
+  scene.overrideMaterial = shadowFlat;
+
+  var prevTarget = renderer.getRenderTarget();
+  renderer.setRenderTarget(shadowTarget);
+  renderer.setClearColor(0x000000, 0);
+  renderer.clear(true, true, false);
+  renderer.render(scene, shadowCam);
+  renderer.setRenderTarget(prevTarget);
+  renderer.setClearColor(ENV.bg, 1);
+
+  scene.overrideMaterial = prevOverride;
+  for(ki=0; ki<kids.length; ki++) kids[ki].visible = wasVisible[ki];
+
+  var u = shadowPlane.material.uniforms;
+  u.uLightVP.value.multiplyMatrices(
+    shadowCam.projectionMatrix, shadowCam.matrixWorldInverse);
+  u.uColor.value.copy(ENV.bg).lerp(new THREE.Color(0x000000), 0.85);
+  shadowPlane.position.set(centre.x, 0, centre.z);
+  shadowPlane.scale.set(half*2, half*2, 1);
+  shadowPlane.visible = true;
+};
 
 var gridHelper = null;
 function buildGrid(){
@@ -181,6 +418,155 @@ var axisGroup = new THREE.Group();
 })();
 axisGroup.visible = ENV.axis;
 scene.add(axisGroup);
+
+/* ==========================================================================
+   Where the symmetry folds
+   --------------------------------------------------------------------------
+   A stroke and its mirror meet in the middle, and that middle is a PLANE, not
+   a line: the midpoint of any point and its reflection lies on it, wherever on
+   the stroke you take it. Drawn edge-on — which is how you are looking at it
+   most of the time you are drawing — it collapses to exactly the faint line
+   down the middle it is meant to be, and when you orbit off-axis it stays
+   truthful instead of pretending the fold is somewhere it is not.
+
+   Radial symmetry folds about a line rather than a plane, so that one is drawn
+   as a line: the upright axis every copy turns around.
+
+   Both are bounded to what is actually on the page rather than running to the
+   horizon, so they read as part of this drawing and never compete with the
+   grid or the RGB axis.
+   ========================================================================== */
+var symGroup = new THREE.Group();
+symGroup.visible = false;
+symGroup.renderOrder = -1;          // behind the sketch, never over it
+
+/* Faint means faint. The fold is a thing you glance at to place a stroke, not
+   a thing you look at, so the fill is barely a tint and the rim only just
+   holds its edge. Seen face-on the two stack into the one legible line. */
+var symFillMat = new THREE.MeshBasicMaterial({
+  transparent:true, opacity:0.035, depthWrite:false, side:THREE.DoubleSide
+});
+var symLineMat = new THREE.LineBasicMaterial({
+  transparent:true, opacity:0.20, depthWrite:false
+});
+var symAxisMat = new THREE.LineBasicMaterial({
+  transparent:true, opacity:0.38, depthWrite:false
+});
+
+var symFill = new THREE.Mesh(new THREE.BufferGeometry(), symFillMat);
+var symEdge = new THREE.LineSegments(new THREE.BufferGeometry(), symLineMat);
+var symAxis = new THREE.LineSegments(new THREE.BufferGeometry(), symAxisMat);
+symFill.frustumCulled = false; symEdge.frustumCulled = false;
+symAxis.frustumCulled = false;
+symGroup.add(symFill); symGroup.add(symEdge); symGroup.add(symAxis);
+scene.add(symGroup);
+
+var SYM_MIN_HALF = 0.16;            // 160mm, so it is still there on an empty page
+var SYM_PAD_MIN  = 0.05;            // and always a little air around the work
+var symSig = '';
+
+/* the drawing's extent, so the fold is sized to the work and not to the world */
+function symBounds(){
+  var box = new THREE.Box3();
+  if(P.Strokes && P.Strokes.list.length) box.union(P.Strokes.bounds());
+  if(P.Guides && P.Guides.active && P.Guides.active.mesh){
+    var g = P.Guides.active.mesh;
+    g.updateMatrixWorld(true);
+    var gb = new THREE.Box3().setFromObject(g);
+    if(!gb.isEmpty()) box.union(gb);
+  }
+  if(box.isEmpty()) box.set(new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,0));
+  return box;
+}
+
+function symColors(){
+  var bg = ENV.bg, lum = bg.r*0.299 + bg.g*0.587 + bg.b*0.114;
+  return lum > 0.5 ? new THREE.Color(0x2a3550) : new THREE.Color(0xc9d6f2);
+}
+
+P.updateSymmetryPlane = function(){
+  var T = P.TOOL || {};
+  var axis  = T.mirror || null;
+  var nRad  = Math.max(1, Math.round(T.radial || 1));
+  if(!axis && nRad < 2){
+    if(symGroup.visible){ symGroup.visible = false; symSig = ''; }
+    return;
+  }
+
+  var box = symBounds();
+  var lum = (ENV.bg.r*0.299 + ENV.bg.g*0.587 + ENV.bg.b*0.114) > 0.5 ? 1 : 0;
+  var sig = axis + '|' + nRad + '|' + lum + '|' +
+            box.min.toArray().concat(box.max.toArray())
+               .map(function(v){ return v.toFixed(3); }).join(',');
+  symGroup.visible = true;
+  if(sig === symSig) return;
+  symSig = sig;
+
+  var col = symColors();
+  symFillMat.color.copy(col); symLineMat.color.copy(col); symAxisMat.color.copy(col);
+
+  /* The margin is a fraction of the work, not a fixed distance: a fixed one
+     swallows a small sketch and vanishes on a large one. */
+  var sz = box.getSize(new THREE.Vector3());
+  var mid = box.getCenter(new THREE.Vector3());
+  var pad = Math.max(SYM_PAD_MIN, Math.max(sz.x, sz.y, sz.z) * 0.10);
+
+  /* A minimum SIZE, centred on the work — not a minimum reach from the origin.
+     Forcing it to straddle the origin left the fold hanging below a sketch
+     that happened to sit above it, pointing at nothing. */
+  function span(centre, extent){
+    var half = Math.max(SYM_MIN_HALF, extent/2 + pad);
+    return [centre - half, centre + half];
+  }
+
+  /* vertical extent is shared by both: the fold plane and the turning axis
+     both want to span the height of the work */
+  var yy = span(mid.y, sz.y), y0 = yy[0], y1 = yy[1];
+
+  /* ---- the mirror plane, as a bounded quad ---- */
+  if(axis){
+    /* the plane's in-plane horizontal direction: mirroring across X leaves the
+       Z axis lying in the plane, and the other way round */
+    var uu, corner;
+    if(axis === 'x'){
+      uu = span(mid.z, sz.z);
+      corner = function(u, v){ return [0, v, u]; };
+    } else {
+      uu = span(mid.x, sz.x);
+      corner = function(u, v){ return [u, v, 0]; };
+    }
+    var lo = uu[0], hi = uu[1];
+    var a = corner(lo,y0), b = corner(hi,y0), c = corner(hi,y1), d = corner(lo,y1);
+    var quad = new Float32Array(a.concat(b, c, a, c, d));
+    symFill.geometry.dispose();
+    symFill.geometry = new THREE.BufferGeometry();
+    symFill.geometry.setAttribute('position', new THREE.BufferAttribute(quad,3));
+
+    var edge = new Float32Array(
+      a.concat(b).concat(b, c).concat(c, d).concat(d, a));
+    symEdge.geometry.dispose();
+    symEdge.geometry = new THREE.BufferGeometry();
+    symEdge.geometry.setAttribute('position', new THREE.BufferAttribute(edge,3));
+    symFill.visible = symEdge.visible = true;
+  } else {
+    symFill.visible = symEdge.visible = false;
+  }
+
+  /* ---- the radial axis, as a line ---- */
+  if(nRad > 1){
+    var ax = new Float32Array([0, y0, 0, 0, y1, 0]);
+    symAxis.geometry.dispose();
+    symAxis.geometry = new THREE.BufferGeometry();
+    symAxis.geometry.setAttribute('position', new THREE.BufferAttribute(ax,3));
+    symAxis.visible = true;
+  } else {
+    symAxis.visible = false;
+  }
+};
+
+/* the fold is chrome, not sketch: it must never reach the exporters, the
+   ground-shadow pass (which whitelists the stroke group) or the pickers */
+P.symmetryHelper = symGroup;
 
 P.applyEnv = function(){
   renderer.setClearColor(ENV.bg, 1);

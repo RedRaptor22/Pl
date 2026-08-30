@@ -22,7 +22,10 @@ var S = P.Strokes, G = P.Guides;
 
 var D = P.Doc = {
   FORMAT  : 'plume',
-  VERSION : 1,
+  /* v2 adds named groups with their own visibility. v1 stored `group` as a
+     bare number with no name and no list, so a v1 file is read by inventing
+     one group per distinct id — see restoreGroups(). */
+  VERSION : 2,
   dirty   : false,
   lastSaved : 0
 };
@@ -40,7 +43,8 @@ function packPoints(pts){
   var p = new Array(n*3), tan = new Array(n*3), ref = new Array(n*3),
       nrm = new Array(n*3), roll = new Array(n), pr = new Array(n),
       az = new Array(n), alt = new Array(n);
-  var hasNrm = false;
+  var fitL = new Array(n), fitR = new Array(n);
+  var hasNrm = false, hasFit = false;
   for(var i=0;i<n;i++){
     var t = pts[i];
     p[i*3]=q(t.p.x); p[i*3+1]=q(t.p.y); p[i*3+2]=q(t.p.z);
@@ -49,12 +53,17 @@ function packPoints(pts){
     if(t.nrm){ hasNrm = true;
       nrm[i*3]=q(t.nrm.x); nrm[i*3+1]=q(t.nrm.y); nrm[i*3+2]=q(t.nrm.z); }
     roll[i] = q(t.roll || 0);
+    fitL[i] = t.fitL === undefined ? 1 : q(t.fitL);
+    fitR[i] = t.fitR === undefined ? 1 : q(t.fitR);
+    if(fitL[i] < 1 || fitR[i] < 1) hasFit = true;
     pr[i]   = q(t.pressure);
     az[i]   = (t.tiltAz === null || t.tiltAz === undefined) ? null : q(t.tiltAz);
     alt[i]  = (t.tiltAlt === undefined) ? 1 : q(t.tiltAlt);
   }
   var out = {n:n, p:p, tan:tan, ref:ref, roll:roll, pressure:pr, tiltAz:az, tiltAlt:alt};
   if(hasNrm) out.nrm = nrm;
+  /* only carried when a nib was actually trimmed to a guide's edge */
+  if(hasFit){ out.fitL = fitL; out.fitR = fitR; }
   return out;
 }
 
@@ -69,6 +78,8 @@ function unpackPoints(d){
              ? new THREE.Vector3(d.ref[i*3], d.ref[i*3+1], d.ref[i*3+2]) : null,
       nrm: d.nrm ? new THREE.Vector3(d.nrm[i*3], d.nrm[i*3+1], d.nrm[i*3+2]) : null,
       roll: d.roll[i],
+      fitL: d.fitL ? d.fitL[i] : 1,
+      fitR: d.fitR ? d.fitR[i] : 1,
       pressure: d.pressure[i],
       tiltAz: d.tiltAz[i],
       tiltAlt: d.tiltAlt[i]
@@ -92,7 +103,7 @@ function packStroke(st){
 function unpackStroke(d){
   return {
     id: P.uid(),
-    brush: P.BRUSH[d.brush] ? d.brush : 'round',
+    brush: P.brushName(d.brush),
     color: new THREE.Color(d.color),
     baseRadius: d.radius,
     opacity: d.opacity === undefined ? 1 : d.opacity,
@@ -126,6 +137,17 @@ function packGuide(g){
       anchor: packVec(sw.anchor), basisR: packVec(sw.basisR),
       basisT: packVec(sw.basisT), depth: q(sw.depth)
     };
+  }
+  if(g.plane){
+    /* a flat guide is its plane and the outline drawn on it - the mesh is
+       triangulated back from those on load */
+    var pl = g.plane, out = new Array(pl.outline.length*2);
+    for(var k=0;k<pl.outline.length;k++){
+      out[k*2] = q(pl.outline[k].u); out[k*2+1] = q(pl.outline[k].v);
+    }
+    o.plane = { origin: packVec(pl.origin), right: packVec(pl.right),
+                up: packVec(pl.up), normal: packVec(pl.normal),
+                Lu: q(pl.Lu), Lv: q(pl.Lv), outline: out };
   }
   if(g.kind === 'primitive'){
     o.prim = { kind:g.primKind, seg:g.primSeg, taper:q(g.primTaper) };
@@ -172,6 +194,8 @@ function unpackGuide(d){
       new Float32Array(mg.attributes.position.count*2), 2));
     mg.computeBoundingSphere(); mg.computeBoundingBox();
     g = G.fromModel(mg, d.name);
+  } else if(d.plane){
+    g = G.fromPlaneData(d.plane);
   } else if(d.kind === 'primitive' && d.prim){
     g = G.primitive(d.prim.kind, d.prim.seg, d.prim.taper);
   } else if(d.kind === 'loft' && d.loft){
@@ -230,13 +254,34 @@ D.serialize = function(){
     },
     env: {
       bg:'#'+E.bg.getHexString(), grid:!!E.grid, axis:!!E.axis,
-      fog:!!E.fog, shaded:!!E.shaded
+      fog:!!E.fog, shaded:!!E.shaded,
+      render:!!E.render, groundShadow:!!E.groundShadow,
+      /* the light belongs to the sketch: a drawing lit from the left is a
+         different drawing, and reopening it under the default sun would be a
+         change nobody asked for */
+      light: { az:q(P.LIGHT.az), alt:q(P.LIGHT.alt),
+               color:'#'+P.LIGHT.color.getHexString(),
+               intensity:q(P.LIGHT.intensity), ambient:q(P.LIGHT.ambient),
+               toon:!!P.LIGHT.toon, toonSteps:P.LIGHT.toonSteps },
+      /* and so do the post effects, for the same reason: a sketch shot at
+         f/2.8 through heavy grain is a different picture from the same curves
+         rendered clean, and reopening it sharp is a change nobody asked for */
+      fx: { dof:!!P.FX.dofOn, fstop:q(P.FX.fstop),
+            grain:!!P.FX.grainOn, grainLevel:q(P.FX.grain),
+            pixel:!!P.FX.pixelOn, pixelSize:q(P.FX.pixel) }
     },
     tool: {
       brush:T.brush, color:'#'+T.color.getHexString(), sizeMM:q(T.sizeMM),
       opacity:q(T.opacity), pressureOn:!!T.pressureOn, pressureTarget:T.pressureTarget,
+      radial:Math.max(1, Math.round(T.radial || 1)),
       stableOn:!!T.stableOn, stable:q(T.stable), mirror:T.mirror,
       autoGuide:!!T.autoGuide
+    },
+    groups: {
+      active: S.activeGroup,
+      list: S.groups.map(function(g){
+        return { id:g.id, name:g.name, visible:g.visible !== false };
+      })
     },
     strokes: S.list.map(packStroke),
     guides: {
@@ -245,6 +290,44 @@ D.serialize = function(){
     }
   };
 };
+
+/* Groups, or an honest reconstruction of them.
+
+   A v2 file carries the list. A v1 file carries only a number per stroke, so
+   every distinct number becomes a group — named, because a nameless group is
+   not something the panel can show — and strokes that were never grouped land
+   in the first one. Either way the document ends up with at least one group
+   and a valid active id, because a sketch always has somewhere to draw. */
+function restoreGroups(doc, strokes, maxGroup){
+  S.groups.length = 0;
+  S.nextGroup = Math.max(1, maxGroup + 1);
+
+  if(doc.groups && doc.groups.list && doc.groups.list.length){
+    for(var i=0;i<doc.groups.list.length;i++){
+      var g = doc.groups.list[i];
+      S.groups.push({ id:g.id, name:g.name || ('Group ' + (i+1)),
+                      visible: g.visible !== false });
+      if(g.id >= S.nextGroup) S.nextGroup = g.id + 1;
+    }
+    S.activeGroup = doc.groups.active;
+  } else {
+    /* v1: invent one group per id that was actually used */
+    var seen = [], k;
+    for(k=0;k<strokes.length;k++){
+      if(strokes[k].group && seen.indexOf(strokes[k].group) < 0) seen.push(strokes[k].group);
+    }
+    seen.sort(function(a,b){ return a-b; });
+    S.groups.push({ id: S.nextGroup++, name:'Group 1', visible:true });
+    for(k=0;k<seen.length;k++){
+      S.groups.push({ id: seen[k], name:'Group ' + (k+2), visible:true });
+    }
+    for(k=0;k<strokes.length;k++){
+      if(!strokes[k].group) strokes[k].group = S.groups[0].id;
+    }
+    S.activeGroup = S.groups[0].id;
+  }
+  S.ensureGroup();
+}
 
 /* Replaces the scene wholesale. History is cleared rather than preserved:
    undoing from a freshly opened document back into the previous one would be
@@ -257,14 +340,18 @@ D.restore = function(doc){
 
   var i;
   if(doc.strokes){
-    var maxGroup = 0;
+    var maxGroup = 0, restored = [];
     for(i=0;i<doc.strokes.length;i++){
       var st = unpackStroke(doc.strokes[i]);
       if(st.group && st.group > maxGroup) maxGroup = st.group;
-      if(st.pts.length) S.add(st);
+      if(st.pts.length) restored.push(st);
     }
-    /* keep new group ids from colliding with restored ones */
-    S.nextGroup = maxGroup + 1;
+    restoreGroups(doc, restored, maxGroup);
+    /* added AFTER the groups exist, so each mesh is built with the right
+       visibility rather than flashing on and being hidden a frame later */
+    for(i=0;i<restored.length;i++) S.add(restored[i]);
+  } else {
+    restoreGroups(doc, [], 0);
   }
   if(doc.guides){
     if(doc.guides.resources){
@@ -290,18 +377,39 @@ D.restore = function(doc){
     P.ENV.bg.set(doc.env.bg);
     P.ENV.grid = !!doc.env.grid; P.ENV.axis = !!doc.env.axis;
     P.ENV.fog = !!doc.env.fog; P.ENV.shaded = !!doc.env.shaded;
+    P.ENV.render = !!doc.env.render;
+    if(doc.env.groundShadow !== undefined) P.ENV.groundShadow = !!doc.env.groundShadow;
     P.applyEnv();
     S.setShaded(P.ENV.shaded);
+    var L = doc.env.light;
+    if(L){
+      P.LIGHT.az = L.az; P.LIGHT.alt = L.alt;
+      P.LIGHT.color.set(L.color);
+      P.LIGHT.intensity = L.intensity; P.LIGHT.ambient = L.ambient;
+      P.LIGHT.toon = !!L.toon;
+      if(L.toonSteps) P.LIGHT.toonSteps = L.toonSteps;
+    }
+    var X = doc.env.fx;
+    if(X){
+      P.FX.dofOn   = !!X.dof;
+      P.FX.grainOn = !!X.grain;
+      P.FX.pixelOn = !!X.pixel;
+      if(X.fstop      !== undefined) P.FX.fstop = X.fstop;
+      if(X.grainLevel !== undefined) P.FX.grain = X.grainLevel;
+      if(X.pixelSize  !== undefined) P.FX.pixel = X.pixelSize;
+    }
+    P.applyLight();
   }
   if(doc.tool){
     var T = P.TOOL;
-    if(P.BRUSH[doc.tool.brush]) T.brush = doc.tool.brush;
+    T.brush = P.brushName(doc.tool.brush);
     T.color.set(doc.tool.color);
     T.sizeMM = doc.tool.sizeMM; T.opacity = doc.tool.opacity;
     T.pressureOn = !!doc.tool.pressureOn;
     T.pressureTarget = doc.tool.pressureTarget || 'size';
     T.stableOn = !!doc.tool.stableOn; T.stable = doc.tool.stable;
     T.mirror = doc.tool.mirror || null;
+    T.radial = Math.max(1, Math.round(doc.tool.radial || 1));
     T.autoGuide = !!doc.tool.autoGuide;
   }
 
@@ -316,6 +424,9 @@ D.restore = function(doc){
 D.clear = function(quiet){
   S.clear();
   S.clearSelection();
+  S.groups.length = 0;
+  S.activeGroup = 0;
+  S.ensureGroup();
   G.setActive(null);
   for(var i=0;i<G.resources.length;i++) G.dispose(G.resources[i]);
   G.resources.length = 0;
@@ -439,14 +550,7 @@ D.exportBlob = function(){
 };
 
 D.download = function(name){
-  var url = URL.createObjectURL(D.exportBlob());
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = (name || 'sketch-' + Date.now()) + '.plume.json';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+  P.Export.saveBlob(D.exportBlob(), (name || 'sketch-' + Date.now()) + '.plume.json');
 };
 
 D.importFile = function(file){

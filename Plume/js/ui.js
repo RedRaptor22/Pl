@@ -246,8 +246,12 @@ UI.init = function(){
 
   /* ---- group actions ---- */
   on($('btnDuplicate'), 'click', function(){ Tools.duplicateSelection(); });
-  on($('btnGroup'),     'click', function(){ Tools.groupSelection(); });
-  on($('btnUngroup'),   'click', function(){ Tools.ungroupSelection(); });
+  on($('btnGroupNew'), 'click', function(){
+    var g = Tools.newGroup();
+    P.toast('New group: ' + g.name);
+  });
+  on($('btnGroupDup'), 'click', function(){ Tools.duplicateGroup(S.activeGroup); });
+  on($('btnGroupDel'), 'click', function(){ Tools.deleteGroup(S.activeGroup); });
   on($('btnHome'), 'click', function(){ P.resetView(); P.toast('View reset'); });
 
   on($('optFinger'),   'click', function(){ P.Input.fingerPen = !P.Input.fingerPen; UI.refresh(); });
@@ -263,6 +267,10 @@ UI.init = function(){
   on($('stableAmt'), 'input', function(){
     TOOL.stable = parseFloat(this.value)/100;
     $('stableVal').textContent = this.value;
+  });
+  on($('radialAmt'), 'input', function(){
+    TOOL.radial = Math.max(1, Math.round(parseFloat(this.value)));
+    UI.refresh();
   });
 
   on($('focal'), 'input', function(){
@@ -280,10 +288,8 @@ UI.init = function(){
 
   on($('btnPNG'), 'click', function(){
     P.renderer.render(P.scene, P.cam());
-    var a = document.createElement('a');
-    a.download = 'plume-' + Date.now() + '.png';
-    a.href = P.renderer.domElement.toDataURL('image/png');
-    a.click();
+    P.Export.saveURL(P.renderer.domElement.toDataURL('image/png'),
+                     'plume-' + Date.now() + '.png');
   });
   on($('btnClear'), 'click', function(){
     var removed = S.list.slice(), guide = G.active;
@@ -313,19 +319,34 @@ UI.init = function(){
   });
 
   /* ---- brush panel ---- */
-  seg($('brushGrid'), 'brush', function(v){ TOOL.brush = v; });
+  seg($('brushGrid'), 'brush', function(v){
+    TOOL.brush = v;
+    styleOnce('restyle brush', { brush: v });
+  });
   seg($('pressSeg'), 'p',     function(v){ TOOL.pressureTarget = v; });
 
   on($('size'), 'input', function(){
-    TOOL.sizeMM = parseFloat(this.value);
+    var v = parseFloat(this.value);
+    if(beginStyleEdit('resize')) applyStyle({ scale: v / sizeAtEditStart() });
+    UI.setSize(v);
     UI.refresh();
   });
+  on($('size'), 'change', endStyleEdit);
   on($('opacity'), 'input', function(){
-    TOOL.opacity = parseFloat(this.value)/100;
+    var v = parseFloat(this.value)/100;
+    if(beginStyleEdit('restyle opacity')) applyStyle({ opacity: v });
+    TOOL.opacity = v;
     UI.refresh();
   });
+  on($('opacity'), 'change', endStyleEdit);
+  dragValue($('sizeVal'),    'size');
+  dragValue($('opacityVal'), 'opacity');
   on($('btnPressure'), 'click', function(){ TOOL.pressureOn = !TOOL.pressureOn; UI.refresh(); });
-  on($('colorPick'), 'input', function(){ TOOL.color.set(this.value); markSwatch(this.value); });
+  on($('colorPick'), 'input', function(){
+    TOOL.color.set(this.value); markSwatch(this.value);
+    if(beginStyleEdit('recolour')) applyStyle({ color: TOOL.color });
+  });
+  on($('colorPick'), 'change', endStyleEdit);
   on($('btnEyedrop'), 'click', function(){ P.setTool('eyedrop'); P.toast('Tap a curve to sample its colour'); });
   on($('btnInject'),  'click', function(){ P.setTool('inject');  P.toast('Tap a curve to sample its brush'); });
   on($('btnUndo'), 'click', function(){ P.History.undo(); P.onSceneChange(); });
@@ -382,7 +403,7 @@ UI.init = function(){
     $('bodyEnv').classList.toggle('hidden',   v !== 'env');
   });
   on($('btnSelAll'), 'click', function(){
-    var all = S.list.slice(), before = S.selection.slice();
+    var all = S.list.filter(S.visible), before = S.selection.slice();
     P.History.run({
       label:'select all',
       redo: function(){ for(var i=0;i<all.length;i++) S.setSelected(all[i], true); },
@@ -412,15 +433,10 @@ UI.init = function(){
     if(!f) return;
     P.toast('Loading ' + f.name + '…');
     P.Import.load(f).then(function(guide){
-      var prev = G.active;
-      P.History.run({
-        label: 'import reference',
-        redo: function(){ G.setActive(guide); },
-        undo: function(){ G.setActive(prev); }
-      });
+      var grp = Tools.addReference(guide);
       P.autoPivot(true);
-      P.toast(guide.kind === 'image' ? 'Image guide — draw straight onto it'
-                                     : 'Model guide — orbit and draw on the surface');
+      P.toast((guide.kind === 'image' ? 'Image reference' : 'Model reference') +
+              ' — drawing into "' + (grp ? grp.name : guide.name) + '"');
       P.onSceneChange();
     }).catch(function(err){
       P.toast(err.message || 'Could not import that file');
@@ -431,6 +447,29 @@ UI.init = function(){
   on($('optGrid'),   'click', function(){ P.ENV.grid = !P.ENV.grid; P.applyEnv(); UI.refresh(); });
   on($('optAxis'),   'click', function(){ P.ENV.axis = !P.ENV.axis; P.applyEnv(); UI.refresh(); });
   on($('optFog'),    'click', function(){ P.ENV.fog  = !P.ENV.fog;  P.applyEnv(); UI.refresh(); });
+  on($('optRender'), 'click', function(){
+    P.ENV.render = !P.ENV.render; P.invalidateGroundShadow(); UI.refresh();
+    P.toast(P.ENV.render ? 'Render mode — shadows and effects are live'
+                         : 'Draw mode — fast shading');
+  });
+  on($('optShadow'), 'click', function(){
+    P.ENV.groundShadow = !P.ENV.groundShadow; P.invalidateGroundShadow(); UI.refresh();
+  });
+  on($('optToon'),   'click', function(){
+    P.LIGHT.toon = !P.LIGHT.toon; P.applyLight(); UI.refresh();
+  });
+  on($('lightPick'), 'input', function(){
+    P.LIGHT.color.set(this.value); P.applyLight(); UI.refresh();
+  });
+  on($('optDof'),   'click', function(){ P.FX.dofOn   = !P.FX.dofOn;   UI.refresh(); });
+  on($('optGrain'), 'click', function(){ P.FX.grainOn = !P.FX.grainOn; UI.refresh(); });
+  on($('optPixel'), 'click', function(){ P.FX.pixelOn = !P.FX.pixelOn; UI.refresh(); });
+  dragValue($('fstopVal'),  'fstop');
+  dragValue($('grainVal'),  'grainLevel');
+  dragValue($('pixelVal'),  'pixelSize');
+  dragValue($('lightIntVal'), 'lightInt');
+  dragValue($('lightAmbVal'), 'lightAmb');
+  bindLightPad($('lightPad'));
   on($('optShaded'), 'click', function(){
     P.ENV.shaded = !P.ENV.shaded; S.setShaded(P.ENV.shaded); UI.refresh();
   });
@@ -466,6 +505,24 @@ UI.init = function(){
     P.Doc.download();
     P.toast('Exported .plume.json');
   });
+
+  /* Geometry out. With something selected this exports just that, which is
+     the same rule the rest of the app follows for a live selection. */
+  function exportGeometry(format, label){
+    var selOnly = P.Strokes.selection.length > 0;
+    var st;
+    try { st = P.Export.download(format, {selectionOnly:selOnly}); }
+    catch(err){ P.toast('Could not write that file'); return; }
+    if(!st){
+      P.toast(selOnly ? 'Nothing in the selection to export' : 'Nothing to export yet');
+      return;
+    }
+    P.toast('Exported ' + st.parts + (st.parts === 1 ? ' curve' : ' curves') +
+            ' as ' + label + ' — ' + st.triangles.toLocaleString() + ' triangles');
+  }
+  on($('btnOBJ'), 'click', function(){ exportGeometry('obj', '.obj + .mtl'); });
+  on($('btnSTL'), 'click', function(){ exportGeometry('stl', '.stl'); });
+  on($('btnGLTF'), 'click', function(){ exportGeometry('gltf', '.gltf'); });
   on($('btnImport'), 'click', function(){ $('fileInput').click(); });
   on($('fileInput'), 'change', function(){
     var f = this.files && this.files[0];
@@ -480,6 +537,19 @@ UI.init = function(){
   on($('btnSelDup'),    'click', function(){ Tools.duplicateSelection(); });
   on($('btnSelDupMir'), 'click', function(){ Tools.duplicateMirrored(); });
   on($('btnSelDelete'), 'click', function(){ $('btnDelSel').click(); });
+  on($('btnSelLiquify'), 'click', function(){
+    if(!Tools.liquifyTargets().length){ P.toast('Select the curves to liquify first'); return; }
+    P.setTool('liquify');
+    P.toast('Liquify — press and drag over the selection');
+  });
+
+  /* ---- liquify panel ---- */
+  seg($('lqModes'), 'lq', function(v){ TOOL.liquify.mode = v; UI.refresh(); });
+  dragValue($('lqSizeVal'),     'lqSize');
+  dragValue($('lqRangeVal'),    'lqRange');
+  dragValue($('lqStrengthVal'), 'lqStrength');
+  on($('btnLqApply'), 'click', function(){ Tools.liquifyApply(); });
+  on($('btnLqClose'), 'click', function(){ P.setTool('select'); UI.refresh(); });
 
   /* ---- rail collapse tab ---- */
   on($('railTab'), 'click', function(){
@@ -511,9 +581,8 @@ UI.init = function(){
     $('slidePop').classList.toggle('hidden');
     UI.refresh();
   });
-  /* long-press or double-tap the size value to type an exact one */
-  on($('sizeVal'), 'click', function(){ openKeypad('size'); });
-  on($('opacityVal'), 'click', function(){ openKeypad('opacity'); });
+  /* tapping a readout types an exact value; dragging it is the slider —
+     both are wired in dragValue() above */
 
   initKeypad();
   initColorWheel();
@@ -606,8 +675,252 @@ function openKeypad(which){
   UI.refresh();
 }
 
+/* ==========================================================================
+   Size and opacity — drag the readout
+   --------------------------------------------------------------------------
+   FACT (brush panel docs): brush size "can be adjusted by sliding up or down",
+   and so can opacity; size runs 1mm-300mm and opacity 0-100%. So the readouts
+   are the slider — drag up for more, down for less — and a tap still opens the
+   keypad for an exact number. The popover sliders stay for mouse users.
+
+   Size moves geometrically rather than linearly: a millimetre matters at 2mm
+   and is invisible at 200mm, and a 300:1 range on a linear drag would make the
+   bottom of it unusable. Opacity is linear because 0-100% is already uniform.
+   ========================================================================== */
+var SIZE_PER_PX = 0.011, OPACITY_PER_PX = 0.004, DRAG_SLOP = 3;
+
+/* Liquify's three numbers are dragged the same way — FACT: size, range and
+   strength are each "adjusted by sliding up or down". Size is a screen radius
+   so it moves geometrically like the brush; the other two are percentages and
+   move linearly. */
+var LQ = {
+  lqSize:     { get:function(){ return TOOL.liquify.size; },
+                set:function(v){ TOOL.liquify.size = Math.round(P.clamp(v, 8, 600)); },
+                log:true },
+  lqRange:    { get:function(){ return TOOL.liquify.range; },
+                set:function(v){ TOOL.liquify.range = Math.round(P.clamp(v, 0, 100)); } },
+  lqStrength: { get:function(){ return TOOL.liquify.strength; },
+                set:function(v){ TOOL.liquify.strength = Math.round(P.clamp(v, 1, 100)); } },
+  /* the light's two numbers ride the same drag-a-readout mechanism the
+     liquify ones do, so there is one way to nudge a number in this app */
+  lightInt:   { get:function(){ return P.LIGHT.intensity*100; },
+                set:function(v){ P.LIGHT.intensity = P.clamp(v/100, 0, 3); P.applyLight(); } },
+  lightAmb:   { get:function(){ return P.LIGHT.ambient*100; },
+                set:function(v){ P.LIGHT.ambient = P.clamp(v/100, 0, 1); P.applyLight(); } },
+  fstop:      { get:function(){ return P.FX.fstop; },
+                set:function(v){ P.FX.fstop = P.clamp(v, 1.4, 22); }, log:true },
+  grainLevel: { get:function(){ return P.FX.grain; },
+                set:function(v){ P.FX.grain = Math.round(P.clamp(v, 0, 100)); } },
+  pixelSize:  { get:function(){ return P.FX.pixel; },
+                set:function(v){ P.FX.pixel = Math.round(P.clamp(v, 1, 40)); }, log:true }
+};
+
+/* THE LIGHT PAD. Sideways turns the key light around the sketch, up and down
+   raises it from the horizon to overhead - the two things Feather's lighting
+   icon slides between, given a surface big enough to aim with a thumb. The dot
+   is where the light IS, so dragging it left moves the light left. */
+function bindLightPad(el){
+  if(!el) return;
+  var drag = null;
+  function place(e){
+    var r = el.getBoundingClientRect();
+    var fx = P.clamp((e.clientX - r.left) / r.width,  0, 1);
+    var fy = P.clamp((e.clientY - r.top)  / r.height, 0, 1);
+    P.LIGHT.az  = (fx - 0.5) * Math.PI * 2;
+    P.LIGHT.alt = (1 - fy) * (Math.PI/2);        // horizon at the bottom
+    P.applyLight();
+    UI.refresh();
+  }
+  on(el, 'pointerdown', function(e){
+    drag = true; place(e);
+    try{ el.setPointerCapture(e.pointerId); }catch(err){}
+    e.preventDefault();
+  });
+  on(el, 'pointermove', function(e){ if(drag) place(e); });
+  function stop(e){
+    if(!drag) return;
+    drag = null;
+    try{ el.releasePointerCapture(e.pointerId); }catch(err){}
+  }
+  on(el, 'pointerup', stop);
+  on(el, 'pointercancel', stop);
+}
+
+function placeLightDot(){
+  var dot = $('lightDot'), pad = $('lightPad');
+  if(!dot || !pad) return;
+  var fx = P.LIGHT.az / (Math.PI*2) + 0.5;
+  var fy = 1 - P.LIGHT.alt / (Math.PI/2);
+  dot.style.left = (P.clamp(fx,0,1)*100) + '%';
+  dot.style.top  = (P.clamp(fy,0,1)*100) + '%';
+}
+
+/* ==========================================================================
+   The brush panel, pointed at a selection
+   --------------------------------------------------------------------------
+   With curves selected the panel edits them as well as the tool: the tool
+   still takes the new value, so the next stroke matches what you just set, and
+   the selection takes it too.
+
+   A slider drag is ONE history entry, not one per frame. The snapshot is taken
+   when the gesture starts and the entry pushed when it ends; every frame in
+   between scales from that same snapshot, so dragging back and forth cannot
+   compound. A discrete change - a swatch, a brush, a typed number - opens and
+   closes the gesture in one go.
+   ========================================================================== */
+var styleEdit = null;
+
+function styleTargets(){
+  return P.Strokes.selection.length ? P.Strokes.selection.slice() : null;
+}
+
+function beginStyleEdit(label){
+  if(styleEdit) return styleEdit;
+  var st = styleTargets();
+  if(!st) return null;
+  /* the slider's reading BEFORE this gesture moved it, which is what a
+     proportional resize is measured against */
+  styleEdit = { strokes: st, before: P.Strokes.styleSnapshot(st),
+                label: label, sizeFrom: UI.getSize() };
+  return styleEdit;
+}
+function sizeAtEditStart(){
+  return (styleEdit && styleEdit.sizeFrom > 0) ? styleEdit.sizeFrom : UI.getSize();
+}
+
+function applyStyle(changes){
+  if(!styleEdit) return false;
+  P.Strokes.restyle(styleEdit.strokes, changes, styleEdit.before);
+  return true;
+}
+
+function endStyleEdit(){
+  var e = styleEdit;
+  styleEdit = null;
+  if(!e) return;
+  var after = P.Strokes.styleSnapshot(e.strokes);
+  var moved = false;
+  for(var i=0;i<after.length;i++){
+    var a = after[i], b = e.before[i];
+    if(a.brush !== b.brush || a.opacity !== b.opacity ||
+       a.baseRadius !== b.baseRadius || a.color.getHex() !== b.color.getHex()){
+      moved = true; break;
+    }
+  }
+  if(!moved) return;
+  P.History.push({
+    label: e.label,
+    redo: function(){ P.Strokes.styleRestore(e.strokes, after); },
+    undo: function(){ P.Strokes.styleRestore(e.strokes, e.before); }
+  });
+  P.onSceneChange();
+}
+UI.endStyleEdit = endStyleEdit;
+
+/* Every one of these edits is a GESTURE, and a gesture ends when the finger
+   comes up - on the wheel, on a swatch, on a slider, anywhere. Listening once
+   here beats threading an end through every control, and it is a no-op when no
+   edit is open. */
+document.addEventListener('pointerup', endStyleEdit, true);
+document.addEventListener('pointercancel', endStyleEdit, true);
+
+/* one-shot: for controls that change by a tap rather than a drag */
+/* SELECTING LOADS THE PANEL. Otherwise the panel would have two truths at
+   once - the tool's number and the selection's - and dragging the size to 80mm
+   while the readout showed the selection's average of 63mm would be nonsense.
+   Adopting on selection means the panel always shows the tool, the tool always
+   shows what you last picked, and a proportional resize starts from where the
+   selection actually is. Properties the selection does not agree on are left
+   alone rather than flattened to the first stroke's. */
+var lastSelSig = null;
+function adoptSelectionStyle(){
+  var sel = P.Strokes.selection;
+  var sig = sel.length ? sel.map(function(x){ return x.id; }).join(',') : '';
+  if(sig === lastSelSig) return;
+  lastSelSig = sig;
+  if(!sel.length) return;
+  var st = P.Strokes.styleOf(sel);
+  if(!st) return;
+  if(st.brush)            TOOL.brush = st.brush;
+  if(st.hex !== null)     TOOL.color.setHex(st.hex);
+  if(st.opacity !== null) TOOL.opacity = st.opacity;
+  if(st.sizeMM > 0)       UI.setSize(st.sizeMM);
+}
+UI.adoptSelectionStyle = adoptSelectionStyle;
+
+function styleOnce(label, changes){
+  if(!beginStyleEdit(label)) return;
+  applyStyle(changes);
+  endStyleEdit();
+}
+UI.styleOnce = styleOnce;
+
+/* The size control edits whichever tool is in hand — the eraser carries its
+   own size, so switching to it re-points the readout rather than resizing the
+   brush underneath you. */
+UI.sizeKey  = function(){ return P.Tools.sizeTarget(); };
+UI.getSize  = function(){ return TOOL[UI.sizeKey()]; };
+UI.setSize  = function(v){
+  TOOL[UI.sizeKey()] = P.clamp(v, P.TUNE.brushMinMM, P.TUNE.brushMaxMM);
+};
+
+function dragValue(el, which){
+  if(!el) return;
+  var drag = null, ate = false, ateAt = 0;
+  el.classList.add('dragv');
+
+  /* No preventDefault on pointerdown: the tap has to survive as a click so a
+     still finger still opens the keypad. touch-action:none on .dragv is what
+     stops a touch drag from scrolling the panel instead. */
+  on(el, 'pointerdown', function(e){
+    drag = { y:e.clientY, moved:false,
+             from: LQ[which] ? LQ[which].get()
+                 : which === 'size' ? UI.getSize() : TOOL.opacity };
+    try { el.setPointerCapture(e.pointerId); } catch(err){}
+  });
+  on(el, 'pointermove', function(e){
+    if(!drag) return;
+    var dy = drag.y - e.clientY;                       // up is more
+    if(!drag.moved && Math.abs(dy) < DRAG_SLOP) return;
+    drag.moved = true;
+    if(LQ[which]){
+      var spec = LQ[which];
+      spec.set(spec.log ? drag.from * Math.exp(dy * SIZE_PER_PX)
+                        : drag.from + dy * 0.4);
+    }
+    else if(which === 'size'){
+      var nv = drag.from * Math.exp(dy * SIZE_PER_PX);
+      if(beginStyleEdit('resize')) applyStyle({ scale: nv / sizeAtEditStart() });
+      UI.setSize(nv);
+    }
+    else {
+      var no = P.clamp(drag.from + dy * OPACITY_PER_PX, 0.05, 1);
+      if(beginStyleEdit('restyle opacity')) applyStyle({ opacity: no });
+      TOOL.opacity = no;
+    }
+    UI.refresh();
+  });
+  function end(e){
+    if(!drag) return;
+    /* A drag is not a tap. Swallow exactly the ONE click this gesture is about
+       to generate rather than everything for the next few hundred ms — a time
+       window also eats the deliberate tap that follows a quick adjustment. */
+    if(drag.moved){ ate = true; ateAt = performance.now(); }
+    drag = null;
+    try { el.releasePointerCapture(e.pointerId); } catch(err){}
+  }
+  on(el, 'pointerup', end);
+  on(el, 'pointercancel', end);
+  on(el, 'click', function(){
+    var swallow = ate && (performance.now() - ateAt) < 700;
+    ate = false;                       // and never hold it against a later tap
+    if(swallow || LQ[which]) return;   // liquify's numbers are drag-only
+    openKeypad(which);
+  });
+}
+
 function keypadCurrent(){
-  return keypadFor === 'size' ? Math.round(TOOL.sizeMM)
+  return keypadFor === 'size' ? Math.round(UI.getSize())
                               : Math.round(TOOL.opacity*100);
 }
 function drawKeypad(){
@@ -618,9 +931,12 @@ function commitKeypad(){
   var v = parseFloat(keypadBuf);
   if(!isNaN(v)){
     if(keypadFor === 'size'){
-      TOOL.sizeMM = P.clamp(v, P.TUNE.brushMinMM, P.TUNE.brushMaxMM);
+      var was = UI.getSize();
+      UI.setSize(v);
+      if(was > 0) styleOnce('resize', { scale: UI.getSize() / was });
     } else {
       TOOL.opacity = P.clamp(v/100, 0.05, 1);
+      styleOnce('restyle opacity', { opacity: TOOL.opacity });
     }
   }
   $('keypad').classList.add('hidden');
@@ -748,6 +1064,7 @@ function placeKnobs(){
 function pushColor(){
   var rgb = hsvToRgb(hsv.h, hsv.s, hsv.v);
   TOOL.color.setRGB(rgb[0]/255, rgb[1]/255, rgb[2]/255);
+  if(beginStyleEdit('recolour')) applyStyle({ color: TOOL.color });
   paintSV(); placeKnobs();
   UI.refresh();
 }
@@ -796,6 +1113,7 @@ function buildSwatches(){
     TOOL.color.set(b.dataset.col);
     $('colorPick').value = b.dataset.col;
     markSwatch(b.dataset.col);
+    styleOnce('recolour', { color: TOOL.color });
   });
 }
 function markSwatch(hex){
@@ -812,10 +1130,18 @@ function markSwatch(hex){
    widget always means what the screen shows regardless of the orbit.
    ========================================================================== */
 /* ==========================================================================
-   The three coloured arcs are the world axes, drawn where each axis actually
-   points on screen — so they swing round as you orbit. Grab an arc and the
-   drag is constrained to that axis; grab the middle and it moves freely in the
-   view plane, as before.
+   The three coloured arcs are the world axes. They sit at FIXED, equally
+   spaced positions on the ring - Y up, X to the lower right, Z to the lower
+   left - and stay there however the camera orbits. Earlier they were drawn
+   where each axis happened to project to on screen, which meant the handle you
+   were reaching for slid out from under your thumb every time you moved the
+   view, and two axes could crowd into the same place while the third had a
+   third of the ring to itself.
+
+   Only the PLACEMENT is fixed. Dragging still uses each axis's real screen
+   direction and its real pixels-per-unit, so pulling the X arc moves along
+   world X by the distance the drag actually covers, and an axis pointing at
+   the camera still dims, because there is no sensible direction to drag it in.
    ========================================================================== */
 var AXES = [
   {key:'x', vec:new THREE.Vector3(1,0,0), arc:'arcX', lab:'labX'},
@@ -823,6 +1149,10 @@ var AXES = [
   {key:'z', vec:new THREE.Vector3(0,0,1), arc:'arcZ', lab:'labZ'}
 ];
 var PAD_C = 54, PAD_R = 43, PAD_INNER = 19;   // in the pad's 108-unit viewBox
+
+/* where each arc lives, a third of the ring apart. SVG angles run clockwise
+   from east, so -90 degrees is straight up. */
+var AXIS_ANG = [Math.PI/6, -Math.PI/2, Math.PI*5/6];   // x, y, z
 
 /* Where does this world axis point on screen, and how many pixels is one world
    unit along it? Returns null when the axis is nearly end-on, where the
@@ -861,11 +1191,12 @@ UI.layoutJoystick = function(){
       lab.setAttribute('opacity', '0');
       continue;
     }
+    var at = AXIS_ANG[i];
     arc.classList.remove('dim');
-    arc.setAttribute('d', arcPath(PAD_C, PAD_C, PAD_R, info.ang - SPAN, info.ang + SPAN));
+    arc.setAttribute('d', arcPath(PAD_C, PAD_C, PAD_R, at - SPAN, at + SPAN));
     lab.setAttribute('opacity', '0.9');
-    lab.setAttribute('x', (PAD_C + Math.cos(info.ang)*(PAD_R - 13)).toFixed(1));
-    lab.setAttribute('y', (PAD_C + Math.sin(info.ang)*(PAD_R - 13)).toFixed(1));
+    lab.setAttribute('x', (PAD_C + Math.cos(at)*(PAD_R - 13)).toFixed(1));
+    lab.setAttribute('y', (PAD_C + Math.sin(at)*(PAD_R - 13)).toFixed(1));
   }
 };
 
@@ -874,10 +1205,10 @@ function pickAxis(localX, localY){
   var dx = localX - PAD_C, dy = localY - PAD_C;
   var r = Math.hypot(dx, dy);
   if(r < PAD_INNER) return null;
-  var ang = Math.atan2(dy, dx), best = null, bestD = 0.75;   // ~43 degrees
+  var ang = Math.atan2(dy, dx), best = null, bestD = 1.0;   // ~57 degrees
   for(var i=0;i<AXES.length;i++){
-    if(!axisInfo[i]) continue;
-    var d = Math.abs(((ang - axisInfo[i].ang + Math.PI*3) % (Math.PI*2)) - Math.PI);
+    if(!axisInfo[i]) continue;                 // end-on: nothing to drag along
+    var d = Math.abs(((ang - AXIS_ANG[i] + Math.PI*3) % (Math.PI*2)) - Math.PI);
     if(d < bestD){ bestD = d; best = i; }
   }
   return best;
@@ -1089,6 +1420,9 @@ function about(c, m){
    Refresh
    ========================================================================== */
 UI.refresh = function(){
+  /* before anything reads the tool: a fresh selection loads its own style into
+     it, so every readout below shows the curves you just picked */
+  adoptSelectionStyle();
   /* tool buttons, in both the pill and the bottom context menu */
   var tools = document.querySelectorAll('button[data-tool]');
   for(var i=0;i<tools.length;i++){
@@ -1118,24 +1452,69 @@ UI.refresh = function(){
   var hx = $('hexIn');
   if(hx && document.activeElement !== hx) hx.value = TOOL.color.getHexString().toUpperCase();
 
-  /* selection action bar rides along with the selection */
+  /* The selection action bar rides along with the selection — except while
+     liquifying, when the strip takes its place at the foot of the screen and
+     duplicating or deleting mid-deformation is not what the hand is there for. */
+  var liquifying = TOOL.mode === 'liquify';
   var selCount = S.selection.length;
-  $('selBar').classList.toggle('hidden', selCount === 0);
+  $('selBar').classList.toggle('hidden', selCount === 0 || liquifying);
+
+  /* the liquify panel is the tool: it is up whenever the tool is */
+  $('liquifyPanel').classList.toggle('hidden', !liquifying);
+  if(liquifying){
+    $('lqSizeVal').textContent     = TOOL.liquify.size;
+    $('lqRangeVal').textContent    = TOOL.liquify.range;
+    $('lqStrengthVal').textContent = TOOL.liquify.strength;
+    var lqb = $('lqModes').querySelectorAll('button');
+    for(var lq=0; lq<lqb.length; lq++){
+      lqb[lq].classList.toggle('on', lqb[lq].dataset.lq === TOOL.liquify.mode);
+    }
+  }
+
+  /* lighting readouts */
+  if($('lightIntVal')) $('lightIntVal').textContent = Math.round(P.LIGHT.intensity*100) + '%';
+  if($('lightAmbVal')) $('lightAmbVal').textContent = Math.round(P.LIGHT.ambient*100) + '%';
+  if($('lightPick'))   $('lightPick').value = '#' + P.LIGHT.color.getHexString();
+  setOn($('optToon'), P.LIGHT.toon);
+  setOn($('optRender'), P.ENV.render);
+  setOn($('optDof'),   P.FX.dofOn);
+  setOn($('optGrain'), P.FX.grainOn);
+  setOn($('optPixel'), P.FX.pixelOn);
+  if($('fstopVal')) $('fstopVal').textContent = 'f/' + P.FX.fstop.toFixed(1);
+  if($('grainVal')) $('grainVal').textContent = Math.round(P.FX.grain) + '%';
+  if($('pixelVal')) $('pixelVal').textContent = Math.round(P.FX.pixel) + 'px';
+  setOn($('optShadow'), P.ENV.groundShadow);
+  placeLightDot();
 
   /* the rail's size/opacity readouts, and their popover twins */
-  var sv = Math.round(TOOL.sizeMM) + 'mm';
+  var erasing = UI.sizeKey() === 'eraserMM';
+  var sv = Math.round(UI.getSize()) + 'mm';
   var ov = Math.round(TOOL.opacity*100) + '%';
   $('sizeVal').textContent = sv;
   $('opacityVal').textContent = ov;
   if($('sizeValPop'))    $('sizeValPop').textContent = sv;
   if($('opacityValPop')) $('opacityValPop').textContent = ov;
+  $('btnSize').setAttribute('data-tip', erasing
+    ? 'Eraser size — drag up or down, or tap the value to type one'
+    : 'Brush size — drag up or down, or tap the value to type one');
 
-  /* the icons carry no text label now, so the mirror axis goes in the tooltip */
+  /* the icons carry no text label now, so the mirror axis goes in the tooltip.
+     Radial lives in Settings but reads out here too, because the two compose
+     and the button is the only place the combined state is visible. */
   var mir = $('btnMirror');
-  mir.classList.toggle('on', !!TOOL.mirror);
-  mir.setAttribute('data-tip', TOOL.mirror
-    ? ('Mirror ' + TOOL.mirror.toUpperCase() + ' — tap to cycle')
-    : 'Mirror — X, then Z');
+  var nRad = Math.max(1, Math.round(TOOL.radial || 1));
+  mir.classList.toggle('on', !!TOOL.mirror || nRad > 1);
+  mir.setAttribute('data-tip',
+    (TOOL.mirror ? ('Mirror ' + TOOL.mirror.toUpperCase()) : 'Mirror off') +
+    (nRad > 1 ? (' + radial \u00d7' + nRad) : '') +
+    ' — tap to cycle X, Z, off' +
+    (nRad > 1 ? ('<br><i>' + (TOOL.mirror ? nRad*2 : nRad) + ' marks per stroke</i>')
+              : '<br><i>Radial is in Settings</i>'));
+  var ra = $('radialAmt'), rv = $('radialVal');
+  if(ra && rv){
+    if(document.activeElement !== ra) ra.value = nRad;
+    rv.textContent = nRad > 1 ? ('\u00d7' + nRad) : 'Off';
+  }
 
   /* a panel is "showing" via .open when compact, via !.hidden otherwise */
   function showing(id){
@@ -1166,12 +1545,29 @@ UI.refresh = function(){
   setOn($('btnEyedrop'),   TOOL.mode === 'eyedrop');
   setOn($('btnInject'),    TOOL.mode === 'inject');
 
-  /* brush readouts (they change when the injector samples) */
-  $('size').value = TOOL.sizeMM;
+  /* brush readouts (they change when the injector samples, and when a
+     selection is made) */
+  $('size').value = UI.getSize();
   $('opacity').value = Math.round(TOOL.opacity*100);
   $('colorPick').value = '#' + TOOL.color.getHexString();
   var bs = $('brushGrid').querySelectorAll('button');
-  for(i=0;i<bs.length;i++) bs[i].classList.toggle('on', bs[i].dataset.brush === TOOL.brush);
+  var picked = null;
+  for(i=0;i<bs.length;i++){
+    var isOn = bs[i].dataset.brush === TOOL.brush;
+    bs[i].classList.toggle('on', isOn);
+    if(isOn) picked = bs[i];
+  }
+  /* THE RAIL SHOWS THE BRUSH YOU ARE HOLDING. The button that opens the brush
+     grid used to carry one generic mark whatever was selected, so the rail
+     could not tell you a pencil from a ribbon without opening it. It now wears
+     the chosen brush's own icon, copied from the grid button rather than kept
+     as a second drawing of the same thing - two copies would eventually
+     disagree, and the tapered nib and the pencil are only a curve apart. */
+  var railIcon = $('brushType');
+  if(railIcon && picked && railIcon.dataset.shows !== TOOL.brush){
+    railIcon.dataset.shows = TOOL.brush;
+    railIcon.innerHTML = picked.innerHTML;
+  }
 
   /* ---- bottom bar: one row that shows staging, else the guide, else a hint */
   var staging = (TOOL.mode === 'loft' || TOOL.mode === 'prim');
@@ -1229,34 +1625,153 @@ UI.refresh = function(){
   refreshLists();
 };
 
+/* ==========================================================================
+   The grouping panel
+   --------------------------------------------------------------------------
+   Built to match Feather's: a row per group, name on the left, then the arrow
+   that moves the current canvas selection into that group and the eye that
+   hides it. Tap the name to rename, tap the row to make it the one you are
+   drawing into, hold it to select everything inside.
+
+   Rows are rebuilt wholesale on every refresh, so the two pieces of transient
+   state that must survive a rebuild — an open rename box and an in-flight long
+   press — are held out here rather than on the elements.
+   ========================================================================== */
+var renamingId = null, pressTimer = null, pressId = null, pressMoved = false;
+var GROUP_HOLD_MS = 480;
+
+/* Cancels the pending hold ONLY. It used to clear pressId as well, which made
+   it impossible to call safely from the handlers that need to read pressId
+   afterwards — the tap-to-activate path compared an id this had already
+   nulled, so tapping a row silently did nothing. */
+function cancelGroupPress(){
+  if(pressTimer){ clearTimeout(pressTimer); pressTimer = null; }
+}
+function endGroupPress(){ cancelGroupPress(); pressId = null; pressMoved = false; }
+
+function renderGroups(){
+  var gl = $('groupList');
+  if(!gl) return;
+  if(renamingId !== null) return;          // never yank the box out mid-rename
+
+  gl.innerHTML = '';
+  S.ensureGroup();
+  for(var i=0;i<S.groups.length;i++){
+    (function(g){
+      var n = S.membersOf(g.id).length;
+      var row = document.createElement('div');
+      row.className = 'grpRow' + (g.id === S.activeGroup ? ' on' : '') +
+                      (g.visible === false ? ' hidden-group' : '');
+      row.dataset.id = g.id;
+
+      var name = document.createElement('button');
+      name.className = 'grpName';
+      name.type = 'button';
+      name.textContent = g.name;
+      /* Tap the name of the group you are in to rename it. On any other row a
+         tap selects that row first — the same slow double-tap every file list
+         uses, and it leaves the whole row as a target for switching groups
+         rather than a sliver of padding beside the name. */
+      var isActive = g.id === S.activeGroup;
+      name.setAttribute('data-tip', isActive ? 'Tap to rename' : 'Tap to draw into this group');
+      name.onclick = function(e){
+        e.stopPropagation();
+        if(g.id === S.activeGroup) beginRename(row, g);
+        else P.Tools.setActiveGroup(g.id);
+      };
+      row.appendChild(name);
+
+      var count = document.createElement('span');
+      count.className = 'grpCount';
+      count.textContent = n ? n : '';
+      row.appendChild(count);
+
+      var arrow = document.createElement('button');
+      arrow.className = 'ico sm';
+      arrow.innerHTML = '<svg><use href="#i-enter"/></svg>';
+      arrow.setAttribute('data-tip', 'Move the selected curves into ' + g.name);
+      arrow.onclick = function(e){
+        e.stopPropagation();
+        P.Tools.assignSelection(g.id);
+      };
+      row.appendChild(arrow);
+
+      var eye = document.createElement('button');
+      eye.className = 'ico sm' + (g.visible === false ? ' off' : '');
+      eye.innerHTML = '<svg><use href="#i-eye' + (g.visible === false ? '-off' : '') + '"/></svg>';
+      eye.setAttribute('data-tip', g.visible === false ? 'Show this group' : 'Hide this group');
+      eye.onclick = function(e){
+        e.stopPropagation();
+        P.Tools.setGroupVisible(g.id, g.visible === false);
+      };
+      row.appendChild(eye);
+
+      /* tap to make active, hold to select everything in it */
+      row.addEventListener('pointerdown', function(e){
+        if(e.target.closest('button')) return;
+        cancelGroupPress();
+        pressId = g.id; pressMoved = false;
+        pressTimer = setTimeout(function(){
+          pressTimer = null; pressMoved = true;     // the tap is spent on the hold
+          P.Tools.selectGroup(g.id);
+        }, GROUP_HOLD_MS);
+      });
+      row.addEventListener('pointerup', function(e){
+        if(e.target.closest('button')) return;
+        var tapped = !pressMoved && pressId === g.id;
+        endGroupPress();
+        if(tapped) P.Tools.setActiveGroup(g.id);
+      });
+      row.addEventListener('pointercancel', endGroupPress);
+      row.addEventListener('pointerleave', endGroupPress);
+
+      gl.appendChild(row);
+    })(S.groups[i]);
+  }
+}
+UI.renderGroups = renderGroups;
+
+function beginRename(row, g){
+  renamingId = g.id;
+  var input = document.createElement('input');
+  input.className = 'grpNameEdit';
+  input.value = g.name;
+  input.setAttribute('aria-label', 'Group name');
+  row.replaceChild(input, row.firstChild);
+  input.focus();
+  input.select();
+
+  var done = false;
+  function finish(commit){
+    if(done) return;
+    done = true;
+    renamingId = null;
+    if(commit) P.Tools.renameGroup(g.id, input.value);
+    renderGroups();
+    UI.refresh();
+  }
+  input.onkeydown = function(e){
+    if(e.key === 'Enter'){ e.preventDefault(); finish(true); }
+    else if(e.key === 'Escape'){ e.preventDefault(); finish(false); }
+    e.stopPropagation();                 // the canvas has single-key shortcuts
+  };
+  input.onblur = function(){ finish(true); };
+}
+
+/* the names newGuide hands out when there is nothing better to call it */
+var GENERIC = /^(Surface|Loft|Shape|Image|Model)$/;
+
 function refreshLists(){
   var sp = $('stagePanel');
   var visible = UI.compact ? sp.classList.contains('open') : !sp.classList.contains('hidden');
   if(!visible) return;
 
-  var gl = $('groupList');
-  gl.innerHTML = '';
-  if(!S.list.length){
-    gl.innerHTML = '<div class="empty">No curves yet.</div>';
-  } else {
-    for(var i=0;i<S.list.length;i++){
-      (function(st, idx){
-        var d = document.createElement('div');
-        d.className = 'listItem';
-        d.innerHTML = '<span style="width:10px;height:10px;border-radius:50%;background:#' +
-                      st.color.getHexString() + '"></span> Curve ' + (idx+1) +
-                      '<span class="tag">' + st.pts.length + ' pts' +
-                      (st.selected ? ' · sel' : '') + '</span>';
-        d.onclick = function(){ S.setSelected(st, !st.selected); P.onSceneChange(); };
-        gl.appendChild(d);
-      })(S.list[i], i);
-    }
-  }
+  renderGroups();
 
   var rl = $('resList');
   rl.innerHTML = '';
   if(!G.resources.length){
-    rl.innerHTML = '<div class="empty">No saved guides.</div>';
+    rl.innerHTML = '<div class="empty">No references or saved guides yet.</div>';
   } else {
     for(var r=0;r<G.resources.length;r++){
       (function(g, idx){
@@ -1276,13 +1791,33 @@ function refreshLists(){
         d.appendChild(eye);
 
         var label = document.createElement('span');
-        label.textContent = g.name + ' ' + (idx+1);
+        label.className = 'grow';
+        /* a reference carries the file's own name, so numbering it reads as
+           nonsense — only the generic ones need telling apart */
+        label.textContent = GENERIC.test(g.name) ? (g.name + ' ' + (idx+1)) : g.name;
+        label.title = g.name;
         d.appendChild(label);
 
         var tag = document.createElement('span');
         tag.className = 'tag';
         tag.textContent = (g === G.active) ? 'active' : g.kind;
         d.appendChild(tag);
+
+        /* Throwing a reference away is undoable, which is why it is one tap and
+           not a dialog. It takes the picture only — anything traced onto it
+           keeps its own group. */
+        var del = document.createElement('button');
+        del.className = 'ico sm danger';
+        del.style.cssText = 'min-height:0;flex:0 0 auto';
+        del.innerHTML = '<svg><use href="#i-trash"/></svg>';
+        del.title = 'Delete this reference — the curves you drew on it stay';
+        del.setAttribute('data-tip', del.title);
+        del.onclick = function(ev){
+          ev.stopPropagation();          // the row itself activates
+          var name = g.name;
+          if(Tools.deleteResource(g)) P.toast('Deleted ' + name);
+        };
+        d.appendChild(del);
 
         d.onclick = function(){ Tools.activateResource(g); P.toast('Guide activated'); };
         rl.appendChild(d);

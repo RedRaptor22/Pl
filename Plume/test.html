@@ -167,6 +167,17 @@ function run(W){
     for(var i=0;i<=n;i++){ var a=i/n*Math.PI*2; o.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r}); }
     return o;
   }
+  function penTilt(pts, tiltX, tiltY){
+    var el = P.elStage;
+    function ev(t,x,y,b){
+      el.dispatchEvent(new W.PointerEvent(t,{pointerId:98, pointerType:'pen',
+        clientX:x, clientY:y, buttons:b, pressure:b?0.6:0,
+        tiltX:tiltX||0, tiltY:tiltY||0, bubbles:true, cancelable:true}));
+    }
+    ev('pointerdown', pts[0].x, pts[0].y, 1);
+    for(var i=1;i<pts.length;i++) ev('pointermove', pts[i].x, pts[i].y, 1);
+    ev('pointerup', pts[pts.length-1].x, pts[pts.length-1].y, 0);
+  }
   var ts = function(p){ return P.worldToScreen(p, {}); };
   function plen(st){
     var L=0; for(var i=1;i<st.pts.length;i++) L += st.pts[i].p.distanceTo(st.pts[i-1].p);
@@ -174,8 +185,32 @@ function run(W){
   }
   function reset(){
     P.Strokes.clear(); P.Guides.setActive(null); P.Guides.resources.length = 0;
-    P.History.clear(); P.TOOL.mirror = null; P.Guides.isolate = true;
-    P.TOOL.sizeMM = 14; P.TOOL.autoGuide = false; P.TOOL.brush = 'round';
+    P.Strokes.groups.length = 0; P.Strokes.activeGroup = 0; P.Strokes.ensureGroup();
+    P.History.clear(); P.TOOL.mirror = null; P.TOOL.radial = 1; P.Guides.isolate = true;
+    P.TOOL.sizeMM = 14; P.TOOL.eraserMM = 20;
+    P.TOOL.autoGuide = false; P.TOOL.brush = 'pen';
+    /* back to the defaults, so one group cannot quietly change the ground
+       every group after it stands on. The background is the one that bit:
+       a document round-trip set it to a dark navy and left it there, which
+       made every later pixel reading in the suite darker than the app it was
+       supposed to be measuring. */
+    P.TOOL.shapeHold = true; P.TOOL.opacity = 1;
+    P.ENV.bg.set('#eceaf3'); P.ENV.render = false; P.ENV.groundShadow = true;
+    P.ENV.grid = true; P.ENV.axis = false; P.ENV.fog = false; P.ENV.shaded = true;
+    P.applyEnv(); P.Strokes.setShaded(true);
+    /* the light and the post effects belong here for the same reason the
+       background does: they are global, every pixel reading depends on them,
+       and a group that leaves the sun somewhere else silently darkens every
+       group that follows it */
+    P.LIGHT.az = 0.4185; P.LIGHT.alt = 0.6664; P.LIGHT.color.set('#ffffff');
+    P.LIGHT.intensity = 1; P.LIGHT.ambient = 0.66;
+    P.LIGHT.toon = false; P.LIGHT.toonSteps = 4; P.applyLight();
+    P.FX.dofOn = false; P.FX.fstop = 5.6;
+    P.FX.grainOn = false; P.FX.grain = 35;
+    P.FX.pixelOn = false; P.FX.pixel = 4;
+    /* the symmetry fold is drawn into the scene, so a stale one tints every
+       pixel reading after it — it has to come down with everything else */
+    P.updateSymmetryPlane();
     P.VIEW.theta = 0.6; P.VIEW.phi = 1.1; P.VIEW.radius = 4; P.VIEW.roll = 0;
     P.VIEW.ortho = false; P.VIEW.focal = 50;
     P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true; P.applyCamera();
@@ -299,12 +334,20 @@ function run(W){
   /* ================= C.6 erase / vacuum ================= */
   group('C.6  Eraser and Vacuum');
   reset();
-  var erasePx = Math.max(4, P.worldToPx(0.06));
+  /* A curve is stored with two samples only if it is BUILT that way — a
+     two-point drag is densified on commit now — and the point of this case is
+     that the eraser cuts between samples, not only at them. */
+  P.TOOL.eraserMM = 60;
   pen([{x:CX-200,y:CY},{x:CX+200,y:CY}]);
+  var drawn2 = P.Strokes.list[0];
+  var sparse = P.Strokes.cloneWithPoints(drawn2,
+                 [drawn2.pts[0], drawn2.pts[drawn2.pts.length-1]]);
+  P.Strokes.clear(); P.Strokes.add(sparse);
   var s2 = P.Strokes.list[0], full = plen(s2);
   ck('sparse two-point curve', s2.pts.length === 2);
   var a2 = ts(s2.pts[0].p), b2 = ts(s2.pts[1].p);
-  P.setTool('erase'); P.TOOL.sizeMM = 120;
+  var erasePx = Math.max(4, P.worldToPx(P.Tools.eraserRadius()));
+  P.setTool('erase');
   pen([{x:(a2.x+b2.x)/2,y:(a2.y+b2.y)/2},{x:(a2.x+b2.x)/2+1,y:(a2.y+b2.y)/2}]);
   ck('a thin eraser splits even a two-point curve', P.Strokes.list.length === 2,
      'n=' + P.Strokes.list.length);
@@ -322,7 +365,7 @@ function run(W){
   var tiny = Math.max(2, erasePx*0.25);
   pen([{x:CX-tiny,y:CY},{x:CX,y:CY},{x:CX+tiny,y:CY}]);
   var c3 = ts(P.Strokes.list[0].pts[1].p);
-  P.setTool('erase'); P.TOOL.sizeMM = 120;
+  P.setTool('erase'); P.TOOL.eraserMM = 60;
   pen([{x:c3.x,y:c3.y},{x:c3.x+1,y:c3.y}]);
   ck('a fully covered curve is removed outright', P.Strokes.list.length === 0);
 
@@ -364,6 +407,291 @@ function run(W){
      'radius ' + rlo.toFixed(4) + '–' + rhi.toFixed(4) + ', ' + uniq.length + ' pts');
   ck('the fitted circle is closed', ci.pts.length === uniq.length + 1);
 
+  /* ---- and closed means WELDED, not two ends parked on the same spot ----
+     A ring built as a tube gets one cap disc at each end, stacked on the one
+     point and tilted apart by a whole angular step, because the endpoint
+     tangents are one-sided chords. That wedge is the slit that shows at the
+     top of every snapped circle: 360/64 = 5.625 degrees of it, gaping at the
+     outer edge and pinched shut on the inside. */
+  ck('the ring is recognised as a closed loop', P.Strokes.loopsClosed(ci.pts));
+  var t0 = ci.pts[0].tan, tN = ci.pts[ci.pts.length-1].tan;
+  var r0 = ci.pts[0].ref, rN = ci.pts[ci.pts.length-1].ref;
+  /* Measured as the CHORD between the two unit vectors, not acos of their dot.
+     Near zero angle acos amplifies float error — identical vectors come back as
+     1e-6 degrees apart — and a threshold under that noise floor fails on
+     nothing. The chord is 2*sin(a/2), so it degrades gracefully instead. */
+  var chordDeg = function(a,b){
+    return 2 * Math.asin(Math.min(1, a.distanceTo(b)/2)) * 180/Math.PI;
+  };
+  ck('its two ends share one tangent', chordDeg(t0,tN) < 1e-4,
+     chordDeg(t0,tN).toExponential(1) + ' deg, was 5.625 when it slit');
+  ck('and one cross-section, so the tube cannot step at the joint',
+     chordDeg(r0,rN) < 1e-4, chordDeg(r0,rN).toExponential(1) + ' deg');
+
+  /* the real proof: every edge shared by exactly two triangles */
+  function shellOf(stroke){
+    var g = stroke.mesh.geometry, ix = g.index.array, ps = g.attributes.position.array;
+    var map = {}, w = [], q, k;
+    for(q=0;q<ps.length/3;q++){
+      var kk = Math.round(ps[q*3]*1e7)+','+Math.round(ps[q*3+1]*1e7)+','+
+               Math.round(ps[q*3+2]*1e7);
+      if(map[kk] === undefined) map[kk] = Object.keys(map).length;
+      w[q] = map[kk];
+    }
+    var edges = {}, boundary = 0, nonMan = 0, degen = 0;
+    for(q=0;q<ix.length;q+=3){
+      var a = w[ix[q]], b = w[ix[q+1]], c = w[ix[q+2]];
+      if(a===b || b===c || a===c){ degen++; continue; }
+      var pairs = [[a,b],[b,c],[c,a]];
+      for(k=0;k<3;k++){
+        var u = pairs[k][0], v = pairs[k][1];
+        var e = u<v ? u+'_'+v : v+'_'+u;
+        edges[e] = (edges[e]||0)+1;
+      }
+    }
+    Object.keys(edges).forEach(function(e){
+      if(edges[e] === 1) boundary++; else if(edges[e] > 2) nonMan++;
+    });
+    return { boundary:boundary, nonManifold:nonMan, degenerate:degen };
+  }
+  var shell = shellOf(ci);
+  ck('the closed tube is watertight — no open rim at the seam',
+     shell.boundary === 0, shell.boundary + ' boundary edges');
+  ck('and still a clean manifold', shell.nonManifold === 0 && shell.degenerate === 0,
+     shell.nonManifold + ' non-manifold, ' + shell.degenerate + ' degenerate');
+
+  /* every brush, since each one builds its own section */
+  (function everyBrushCloses(){
+    var bad = [], names = Object.keys(P.BRUSHES || {});
+    if(!names.length) names = ['pen','sketch','taper','rectangle','cube','flat','wide','glow'];
+    for(var q=0;q<names.length;q++){
+      reset(); P.setTool('shape'); P.TOOL.brush = names[q]; P.TOOL.sizeMM = 60;
+      pen(circle(CX, CY, 90, 40));
+      var st = P.Strokes.list[0];
+      if(!st || !P.Strokes.loopsClosed(st.pts)){ bad.push(names[q]+':not-closed'); continue; }
+      var sh2 = shellOf(st);
+      if(sh2.boundary !== 0) bad.push(names[q]+':'+sh2.boundary+'-open');
+    }
+    ck('a snapped circle closes for every brush', bad.length === 0,
+       bad.join(', ') || names.length + ' brushes, all sealed');
+  })();
+
+  /* An open stroke must be untouched by any of that — it still needs its caps. */
+  reset(); P.setTool('draw'); P.TOOL.brush = 'pen'; P.TOOL.autoGuide = false;
+  pen([{x:CX-120,y:CY},{x:CX,y:CY-30},{x:CX+120,y:CY}]);
+  var openSt = P.Strokes.list[0];
+  ck('an open stroke is not treated as a loop', !P.Strokes.loopsClosed(openSt.pts));
+  ck('and keeps the sealed ends it always had', shellOf(openSt).boundary === 0);
+
+  /* ---- rebuilding geometry must not rebuild the SHADER ----
+     Disposing a ShaderMaterial drops the last reference to its GL program, so
+     the next frame compiles and links it again. Doing that per pointermove is
+     free on a desktop driver and a multi-second freeze on a phone. */
+  reset(); P.setTool('draw'); P.TOOL.autoGuide = false;
+  pen([{x:CX-100,y:CY},{x:CX,y:CY+20},{x:CX+100,y:CY}]);
+  var reb = P.Strokes.list[0];
+  var mat0 = reb.mesh.material, geo0 = reb.mesh.geometry;
+  P.Strokes.rebuild(reb);
+  ck('a rebuild swaps the geometry', reb.mesh.geometry !== geo0);
+  ck('but keeps the compiled material', reb.mesh.material === mat0);
+  var same = true;
+  for(i=0;i<30;i++){ P.Strokes.rebuild(reb); if(reb.mesh.material !== mat0) same = false; }
+  ck('and still keeps it after 30 more rebuilds', same);
+  /* changing what the material must actually BE still replaces it */
+  P.Strokes.restyle([reb], { brush:'glow' });
+  ck('switching to a glow brush does replace the material',
+     reb.mesh.material !== mat0);
+
+  function penRaw2(type, x, y, buttons){
+    P.elStage.dispatchEvent(new W.PointerEvent(type, {pointerId:99, pointerType:'pen',
+      clientX:x, clientY:y, buttons:buttons, pressure:buttons?0.7:0,
+      tiltX:0, tiltY:0, bubbles:true, cancelable:true}));
+  }
+
+  /* ---- a curve painted on a guide stays ON that guide ----
+     Smooth averages a point with its two neighbours, which cuts the corner off
+     a curved surface, and Liquify shoves points bodily; both work in free
+     space. Paint that started exactly on a guide came away from it — measured
+     at 6.4mm under Smooth and 47.7mm under Liquify. Clamp already promises
+     this while drawing; it now covers the tools that move points afterwards.
+
+     Distance to the surface is measured with the app's own snapToSurface: how
+     far a point has to travel to land back on the guide IS how far off it is. */
+  (function paintStaysOnItsGuide(){
+    function offBy(st, g){
+      var worst = 0, snapped = new THREE.Vector3();
+      for(var q=0;q<st.pts.length;q++){
+        P.Guides.snapToSurface(st.pts[q].p, g, snapped);
+        worst = Math.max(worst, snapped.distanceTo(st.pts[q].p));
+      }
+      return worst / P.MM;                 // millimetres
+    }
+    function build(){
+      reset();
+      P.TOOL.stableOn = false;
+      P.TOOL.autoGuide = true; P.setTool('draw'); P.TOOL.sizeMM = 30;
+      pen([{x:CX-220,y:CY+60},{x:CX-70,y:CY-40},{x:CX+130,y:CY-20},{x:CX+300,y:CY+80}]);
+      P.TOOL.autoGuide = false;
+      P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 90;
+      pen([{x:CX-180,y:CY+30},{x:CX,y:CY-10},{x:CX+180,y:CY+30}]);
+      return { g: P.Guides.active, st: P.Strokes.list[0] };
+    }
+    var w = build();
+    ck('paint lands exactly on its guide to begin with',
+       !!w.g && !!w.st && offBy(w.st, w.g) < 0.01,
+       (w.st ? offBy(w.st, w.g).toFixed(3) : '?') + 'mm off');
+
+    P.setTool('smooth');
+    penRaw2('pointerdown', CX-140, CY, 1);
+    for(var sq=1; sq<=30; sq++) penRaw2('pointermove', CX-140+sq*10, CY+(sq%5), 1);
+    penRaw2('pointerup', CX+160, CY, 0);
+    P.flushDirtyStrokes();
+    ck('and it is still on the guide after Smooth', offBy(w.st, w.g) < 0.5,
+       offBy(w.st, w.g).toFixed(3) + 'mm off, was 6.4mm before this was fixed');
+
+    w = build();
+    P.Strokes.setSelected(w.st, true); P.onSceneChange();
+    P.setTool('liquify');
+    penRaw2('pointerdown', CX-60, CY, 1);
+    for(sq=1; sq<=22; sq++) penRaw2('pointermove', CX-60+sq*8, CY+sq*3, 1);
+    penRaw2('pointerup', CX+120, CY+66, 0);
+    P.flushDirtyStrokes();
+    ck('and still on it after Liquify', offBy(w.st, w.g) < 0.5,
+       offBy(w.st, w.g).toFixed(3) + 'mm off, was 47.7mm before this was fixed');
+    P.Strokes.clearSelection();
+
+    /* A FLAT guide is the case that broke the first search. A plane has no
+       extent in one axis, so that cell size collapses to the 1e-6 floor, a
+       point 50mm off it lands at cell index 50000, and clamping that back into
+       the grid left an empty range — the query scanned nothing, called the
+       point already-on-surface, and reprojection quietly did nothing. */
+    reset(); P.TOOL.stableOn = false;
+    P.setTool('flatguide');
+    pen([{x:CX-170,y:CY-110},{x:CX+170,y:CY-110},
+         {x:CX+170,y:CY+110},{x:CX-170,y:CY+110},{x:CX-170,y:CY-110}]);
+    var flatG = P.Guides.active;
+    ck('a flat shape guide is made for the test', !!flatG && !!flatG.mesh);
+    if(flatG && flatG.mesh){
+      flatG.mesh.updateMatrixWorld(true);
+      var fbox = new THREE.Box3().setFromObject(flatG.mesh);
+      var fmid = fbox.getCenter(new THREE.Vector3());
+      /* the plane's own normal, taken from the mesh rather than assumed */
+      var nAttr = flatG.mesh.geometry.attributes.normal;
+      var fnrm = new THREE.Vector3(nAttr.getX(0), nAttr.getY(0), nAttr.getZ(0))
+        .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(flatG.mesh.matrixWorld))
+        .normalize();
+      var fmidOn = P.Guides.snapToSurface(fmid, flatG, new THREE.Vector3());
+      var away = fmidOn.clone().addScaledVector(fnrm, 0.05);       // 50mm off
+
+      var back = P.Guides.snapToSurface(away, flatG, new THREE.Vector3());
+      ck('a point off a FLAT guide is pulled back onto it',
+         back.distanceTo(away) > 0.045,
+         'moved ' + (back.distanceTo(away)/P.MM).toFixed(1) + 'mm of the 50mm');
+
+      /* Assumption-free proof that it landed ON the surface: snapping a point
+         that is already on it must be a no-op, so a second pass moving nothing
+         means the first pass finished the job. */
+      var again = P.Guides.snapToSurface(back, flatG, new THREE.Vector3());
+      ck('...and the result really is on the surface', again.distanceTo(back) < 1e-9,
+         'a second snap moved it ' + (again.distanceTo(back)/P.MM).toExponential(1) + 'mm');
+
+      ck('a point already on a flat guide is not moved',
+         fmidOn.distanceTo(P.Guides.snapToSurface(fmidOn, flatG, new THREE.Vector3())) < 1e-9);
+    }
+
+    /* a curve drawn in free space has no guide to be held to */
+    reset(); P.TOOL.autoGuide = false; P.setTool('draw');
+    pen([{x:CX-100,y:CY},{x:CX,y:CY-30},{x:CX+100,y:CY}]);
+    ck('a curve drawn with no guide is bound to none',
+       P.Strokes.list[0].guide === null);
+
+    /* and switching Clamp off gives the free-space behaviour back */
+    w = build();
+    P.Guides.clampOffSurface = false;
+    P.setTool('smooth');
+    penRaw2('pointerdown', CX-140, CY, 1);
+    for(sq=1; sq<=30; sq++) penRaw2('pointermove', CX-140+sq*10, CY+(sq%5), 1);
+    penRaw2('pointerup', CX+160, CY, 0);
+    P.flushDirtyStrokes();
+    ck('with Clamp off the tools move paint freely again', offBy(w.st, w.g) > 0.5,
+       offBy(w.st, w.g).toFixed(2) + 'mm off');
+    P.Guides.clampOffSurface = true;
+    reset();
+  })();
+
+  /* ---- glTF, the format Feather names first ---- */
+  (function gltfExport(){
+    reset(); P.TOOL.autoGuide = false; P.setTool('draw');
+    P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 40;
+    P.TOOL.color.set('#c0392b'); P.TOOL.opacity = 1;
+    pen([{x:CX-160,y:CY-40},{x:CX,y:CY-80},{x:CX+160,y:CY-40}]);
+    P.TOOL.color.set('#2980b9'); P.TOOL.opacity = 0.5;
+    pen([{x:CX-160,y:CY+60},{x:CX,y:CY+100},{x:CX+160,y:CY+60}]);
+
+    var gparts = P.Export.collect({scale:1, zUp:false});
+    var out = P.Export.gltfSource(gparts, {name:'suite'});
+    ck('glTF exports something', !!out && typeof out.gltf === 'string');
+    var doc = null;
+    try { doc = JSON.parse(out.gltf); } catch(e){ doc = null; }
+    ck('and it is valid JSON at version 2.0',
+       !!doc && doc.asset && doc.asset.version === '2.0');
+    if(!doc) return;
+
+    ck('one mesh per curve', doc.meshes.length === gparts.length,
+       doc.meshes.length + ' for ' + gparts.length);
+    ck('one material per colour', doc.materials.length === 2,
+       doc.materials.length + '');
+
+    var raw = W.atob(doc.buffers[0].uri.split(',')[1]);
+    ck('the buffer is embedded and the declared length is honest',
+       /^data:application\/octet-stream;base64,/.test(doc.buffers[0].uri) &&
+       raw.length === doc.buffers[0].byteLength,
+       raw.length + ' vs ' + doc.buffers[0].byteLength);
+
+    var over = 0, gq;
+    for(gq=0; gq<doc.bufferViews.length; gq++){
+      var bv = doc.bufferViews[gq];
+      if(bv.byteOffset + bv.byteLength > doc.buffers[0].byteLength) over++;
+    }
+    var SZ = {5126:4, 5125:4, 5123:2}, NC = {VEC3:3, VEC4:4, SCALAR:1}, accBad = 0;
+    for(gq=0; gq<doc.accessors.length; gq++){
+      var ac = doc.accessors[gq], vw = doc.bufferViews[ac.bufferView];
+      if(ac.count * NC[ac.type] * SZ[ac.componentType] > vw.byteLength) accBad++;
+    }
+    ck('every view and accessor fits inside the buffer',
+       over === 0 && accBad === 0, over + ' views, ' + accBad + ' accessors over');
+
+    /* indices must address real vertices, or an importer shows nothing */
+    var bytes = new Uint8Array(raw.length);
+    for(gq=0; gq<raw.length; gq++) bytes[gq] = raw.charCodeAt(gq);
+    var idxBad = 0;
+    for(gq=0; gq<doc.meshes.length; gq++){
+      var pr = doc.meshes[gq].primitives[0];
+      var ia = doc.accessors[pr.indices], pa = doc.accessors[pr.attributes.POSITION];
+      var vv = doc.bufferViews[ia.bufferView];
+      var dv = new W.DataView(bytes.buffer, vv.byteOffset, vv.byteLength);
+      for(var iq=0; iq<ia.count; iq++){
+        if(dv.getUint32(iq*4, true) >= pa.count) idxBad++;
+      }
+    }
+    ck('every index addresses a real vertex', idxBad === 0, idxBad + ' bad');
+
+    var pAcc = doc.accessors[doc.meshes[0].primitives[0].attributes.POSITION];
+    ck('POSITION carries the min/max the spec requires', !!pAcc.min && !!pAcc.max);
+    /* glTF is metric and a Plume unit is already a metre, so a sketch a few
+       hundred millimetres across must not come out in the hundreds */
+    var span = Math.max(pAcc.max[0]-pAcc.min[0], pAcc.max[1]-pAcc.min[1],
+                        pAcc.max[2]-pAcc.min[2]);
+    ck('it is written in metres, not millimetres', span > 0 && span < 50,
+       span.toFixed(3) + ' units across');
+    var blend = 0;
+    for(gq=0; gq<doc.materials.length; gq++){
+      if(doc.materials[gq].alphaMode === 'BLEND') blend++;
+    }
+    ck('the half-opaque curve is declared BLEND', blend === 1, blend + ' blended');
+    reset();
+  })();
+
   /* ================= C.10 mirror ================= */
   group('C.10  Mirror');
   reset(); P.TOOL.mirror = 'x';
@@ -374,6 +702,159 @@ function run(W){
      Math.abs(m1.y-m2.y) < 1e-6 && Math.abs(m1.z-m2.z) < 1e-6);
   P.History.undo();
   ck('undo removes both halves', P.Strokes.list.length === 0);
+
+  /* ---- radial symmetry, about the upright axis ----
+     Mirror reflects across a world plane; radial turns about the vertical axis
+     through the origin. They compose: with both on, each of the n sectors
+     carries the stroke AND its reflection, which is a rosette rather than a
+     pinwheel. The identity is never a copy, so mirror alone makes 2 marks,
+     radial n alone makes n, and the two together make 2n. */
+  (function radialSymmetry(){
+    function drawOne(){
+      pen([{x:CX+70,y:CY-40},{x:CX+105,y:CY-15},{x:CX+140,y:CY+10}]);
+    }
+    var combos = [[null,1,1], ['x',1,2], [null,2,2], [null,3,3], [null,6,6],
+                  [null,12,12], ['x',3,6], ['x',6,12], ['z',4,8]], wrong = [];
+    for(var q=0;q<combos.length;q++){
+      reset();
+      P.TOOL.mirror = combos[q][0]; P.TOOL.radial = combos[q][1];
+      drawOne();
+      if(P.Strokes.list.length !== combos[q][2])
+        wrong.push((combos[q][0]||'-') + '/' + combos[q][1] + ' gave ' +
+                   P.Strokes.list.length + ' not ' + combos[q][2]);
+    }
+    ck('every mirror and radial combination emits the right number of marks',
+       wrong.length === 0, wrong.join('; ') || combos.length + ' combinations');
+
+    /* the copies are a true rotation: evenly spaced, same radius, same height */
+    reset(); P.TOOL.radial = 6; drawOne();
+    var L = P.Strokes.list, q2;
+    function angOf(st){ var p = st.pts[0].p; return Math.atan2(p.x, p.z); }
+    var basA = angOf(L[0]), degs = [];
+    for(q2=0;q2<L.length;q2++){
+      var d = (angOf(L[q2]) - basA) * 180/Math.PI;
+      while(d < -1e-9) d += 360;
+      while(d >= 360 - 1e-9) d -= 360;
+      degs.push(d);
+    }
+    degs.sort(function(a,b){ return a-b; });
+    var worstAng = 0;
+    for(q2=0;q2<6;q2++) worstAng = Math.max(worstAng, Math.abs(degs[q2] - q2*60));
+    ck('six copies stand exactly 60 degrees apart', worstAng < 1e-6,
+       degs.map(function(v){ return v.toFixed(2); }).join(', '));
+
+    var rlo = Infinity, rhi = -Infinity, ylo = Infinity, yhi = -Infinity;
+    for(q2=0;q2<L.length;q2++){
+      var pp = L[q2].pts[0].p, rr = Math.sqrt(pp.x*pp.x + pp.z*pp.z);
+      rlo = Math.min(rlo, rr); rhi = Math.max(rhi, rr);
+      ylo = Math.min(ylo, pp.y); yhi = Math.max(yhi, pp.y);
+    }
+    ck('and all sit the same distance from the axis', (rhi-rlo) < 1e-9,
+       'spread ' + (rhi-rlo).toExponential(1));
+    ck('turning about the upright axis leaves height alone', (yhi-ylo) < 1e-9);
+
+    /* the whole rosette is one mark on the history */
+    reset(); P.TOOL.mirror = 'x'; P.TOOL.radial = 6; drawOne();
+    var made = P.Strokes.list.length;
+    P.History.undo();
+    ck('one undo takes the whole rosette', made === 12 && P.Strokes.list.length === 0,
+       made + ' marks');
+    P.History.redo();
+    ck('and one redo brings it all back', P.Strokes.list.length === made);
+
+    /* every copy has to be real geometry, not just a point list */
+    reset(); P.TOOL.radial = 8; P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 60;
+    drawOne();
+    var unbuilt = 0, nonFinite = 0;
+    for(q2=0;q2<P.Strokes.list.length;q2++){
+      var mesh = P.Strokes.list[q2].mesh;
+      if(!mesh){ unbuilt++; continue; }
+      var arr = mesh.geometry.attributes.position.array;
+      for(var q3=0;q3<arr.length;q3++){
+        if(!isFinite(arr[q3])){ nonFinite++; break; }
+      }
+    }
+    ck('every copy is built geometry, all of it finite',
+       unbuilt === 0 && nonFinite === 0,
+       P.Strokes.list.length + ' meshes');
+
+    /* the count rides with the sketch */
+    reset(); P.TOOL.mirror = 'z'; P.TOOL.radial = 7; drawOne();
+    var nBefore = P.Strokes.list.length;
+    var docR = JSON.stringify(P.Doc.serialize());
+    P.Doc.clear(); P.TOOL.radial = 1;
+    P.Doc.restore(JSON.parse(docR));
+    ck('the radial count is saved with the sketch',
+       P.TOOL.radial === 7 && P.Strokes.list.length === nBefore,
+       'x' + P.TOOL.radial + ', ' + P.Strokes.list.length + ' curves');
+    /* and a sketch saved before radial existed reads as off, not as zero copies */
+    var older = JSON.parse(docR); delete older.tool.radial;
+    P.TOOL.radial = 5; P.Doc.restore(older);
+    ck('a sketch saved before radial existed reads as off', P.TOOL.radial === 1,
+       'x' + P.TOOL.radial);
+    reset();
+  })();
+
+  /* ---- where the symmetry folds ----
+     A stroke and its mirror meet in the middle, and that middle is a plane:
+     the midpoint of any point and its reflection lies on it. Drawn edge-on it
+     is the faint line down the middle; orbited it stays truthful. Radial folds
+     about a line instead, so that one is drawn as a line. */
+  (function foldIndicator(){
+    function drawOne(){ pen([{x:CX+70,y:CY-40},{x:CX+105,y:CY-15},{x:CX+140,y:CY+10}]); }
+    var H = P.symmetryHelper;
+
+    reset(); drawOne(); P.updateSymmetryPlane();
+    ck('no fold is drawn while symmetry is off', H.visible === false);
+
+    reset(); P.TOOL.mirror = 'x'; drawOne(); P.updateSymmetryPlane();
+    ck('mirror shows the fold', H.visible === true);
+
+    /* every corner of the quad has to sit ON the plane it claims to be */
+    function offPlane(axis){
+      reset(); P.TOOL.mirror = axis; drawOne(); P.updateSymmetryPlane();
+      var a = H.children[0].geometry.attributes.position.array, worst = 0, i;
+      for(i=0;i<a.length;i+=3){
+        worst = Math.max(worst, Math.abs(axis === 'x' ? a[i] : a[i+2]));
+      }
+      return worst;
+    }
+    ck('the fold lies exactly on the X mirror plane', offPlane('x') < 1e-9,
+       offPlane('x').toExponential(1));
+    ck('and exactly on the Z mirror plane', offPlane('z') < 1e-9,
+       offPlane('z').toExponential(1));
+
+    /* it follows the work rather than the origin: a sketch drawn high up gets
+       its fold up there too, not hanging below pointing at nothing */
+    reset(); P.TOOL.mirror = 'x';
+    pen([{x:CX+60,y:CY-150},{x:CX+100,y:CY-170},{x:CX+140,y:CY-150}]);
+    P.updateSymmetryPlane();
+    var qa = H.children[0].geometry.attributes.position.array;
+    var ylo = Infinity, yhi = -Infinity, q4;
+    for(q4=1;q4<qa.length;q4+=3){ ylo = Math.min(ylo,qa[q4]); yhi = Math.max(yhi,qa[q4]); }
+    var wb = P.Strokes.bounds();
+    ck('the fold centres on the drawing, not on the origin',
+       Math.abs((ylo+yhi)/2 - (wb.min.y+wb.max.y)/2) < 1e-6,
+       'fold ' + ((ylo+yhi)/2).toFixed(3) + ' vs work ' + ((wb.min.y+wb.max.y)/2).toFixed(3));
+
+    /* radial folds about a line, and that line is the axis it turns on */
+    reset(); P.TOOL.radial = 8; drawOne(); P.updateSymmetryPlane();
+    var shown = 0, q5;
+    for(q5=0;q5<H.children.length;q5++) if(H.children[q5].visible) shown++;
+    ck('radial alone draws only the turning axis', shown === 1, shown + ' parts');
+    var la = H.children[2].geometry.attributes.position.array, off = 0;
+    for(q5=0;q5<la.length;q5+=3) off = Math.max(off, Math.abs(la[q5]), Math.abs(la[q5+2]));
+    ck('and that line sits exactly on the upright axis', off < 1e-9, off.toExponential(1));
+
+    /* it is chrome: it must not reach the exporters or the curve list */
+    reset(); P.TOOL.mirror = 'x'; drawOne(); P.updateSymmetryPlane();
+    var exParts = P.Export.collect({});
+    ck('the fold never reaches the export',
+       exParts.length === P.Strokes.list.length &&
+       P.Strokes.list.indexOf(H) < 0,
+       exParts.length + ' parts for ' + P.Strokes.list.length + ' curves');
+    reset();
+  })();
 
   /* ================= A.7 loft ================= */
   group('A.7  Loft');
@@ -400,9 +881,33 @@ function run(W){
   ck('primitive is staged at the origin', !!P.stagedGuide &&
      P.stagedGuide.obj.position.length() === 0);
   var kinds = P.Guides.PRIMITIVES;
-  ck('cube, pyramid, sphere and tube are all offered',
-     kinds.length === 4 && kinds.indexOf('cube') >= 0 && kinds.indexOf('pyramid') >= 0 &&
-     kinds.indexOf('sphere') >= 0 && kinds.indexOf('tube') >= 0, kinds.join(', '));
+  /* Feather's readymade guides are cube, pyramid, sphere and torus; the tube is
+     ours. The torus is the one shape here you cannot reach by bending a swept
+     guide, because its tube closes on itself in both directions. */
+  ck('cube, pyramid, sphere, torus and tube are all offered',
+     kinds.length === 5 && kinds.indexOf('cube') >= 0 && kinds.indexOf('pyramid') >= 0 &&
+     kinds.indexOf('sphere') >= 0 && kinds.indexOf('torus') >= 0 &&
+     kinds.indexOf('tube') >= 0, kinds.join(', '));
+  (function torusIsARing(){
+    P.Tools.primPreview('torus', 24, 1);
+    P.Tools.primCommit();
+    var tg = P.Guides.active;
+    ck('the torus commits as a guide', !!tg && tg.kind === 'primitive');
+    var tb = new THREE.Box3().setFromObject(tg.mesh);
+    var tsz = tb.getSize(new THREE.Vector3());
+    /* a ring lying flat: wide in x and z, shallow in y, and hollow through the
+       middle — a sphere or a cube would fail both halves of this */
+    ck('it lies flat, wider than it is tall',
+       tsz.y < tsz.x * 0.5 && Math.abs(tsz.x - tsz.z) < tsz.x * 0.05,
+       tsz.x.toFixed(2) + ' x ' + tsz.y.toFixed(2) + ' x ' + tsz.z.toFixed(2));
+    var pos = tg.mesh.geometry.attributes.position, nearAxis = 0;
+    for(var tq=0; tq<pos.count; tq++){
+      if(Math.hypot(pos.getX(tq), pos.getZ(tq)) < 0.3) nearAxis++;
+    }
+    ck('and it is hollow — no geometry on its axis', nearAxis === 0,
+       nearAxis + ' vertices near the centre');
+  })();
+  reset(); P.setTool('prim');
   P.Tools.primPreview('tube', 6, 0);
   ck('segment and taper sliders rebuild it',
      P.stagedGuide.primSeg === 6 && P.stagedGuide.primTaper === 0);
@@ -624,7 +1129,7 @@ function run(W){
     P.TOOL.autoGuide = true;
     pen(circle(CX, CY, 40));                       // and a fresh active guide
     P.ENV.bg.set('#1a2030'); P.applyEnv();
-    P.TOOL.sizeMM = 27; P.TOOL.color.set('#39c2c9'); P.TOOL.brush = 'flat';
+    P.TOOL.sizeMM = 27; P.TOOL.color.set('#39c2c9'); P.TOOL.brush = 'rectangle';
   }
 
   function snapshot(){
@@ -704,6 +1209,54 @@ function run(W){
      after.tool[0] === before.tool[0] && after.tool[1] === before.tool[1] &&
      after.tool[2] === before.tool[2]);
   ck('a restored guide is still bendable', !!(P.Guides.active && P.Guides.active.sweep));
+
+  /* The light is saved because a sketch lit from the left is a different
+     sketch. The post effects are the same argument — one shot at f/2.8 through
+     heavy grain is a different picture — and they were being dropped. Every
+     field is scrambled before the restore, so nothing can pass by never having
+     been touched. */
+  (function fxRoundTrip(){
+    P.LIGHT.az = 1.23; P.LIGHT.alt = 0.77; P.LIGHT.intensity = 0.62;
+    P.LIGHT.ambient = 0.41; P.LIGHT.color.set('#ffd0a0'); P.LIGHT.toon = true;
+    P.applyLight();
+    P.FX.dofOn = true; P.FX.fstop = 2.8; P.FX.grainOn = true; P.FX.grain = 51;
+    P.FX.pixelOn = true; P.FX.pixel = 7;
+    P.ENV.render = true; P.ENV.groundShadow = false; P.applyEnv();
+
+    var doc2 = JSON.stringify(P.Doc.serialize());
+    P.Doc.clear();
+    P.LIGHT.toon = false; P.LIGHT.intensity = 1; P.LIGHT.ambient = 1;
+    P.LIGHT.color.set('#00ff00'); P.applyLight();
+    P.FX.dofOn = false; P.FX.fstop = 11; P.FX.grainOn = false; P.FX.grain = 5;
+    P.FX.pixelOn = false; P.FX.pixel = 2;
+    P.ENV.render = false; P.ENV.groundShadow = true; P.applyEnv();
+    P.Doc.restore(JSON.parse(doc2));
+
+    ck('the light survives a round trip',
+       Math.abs(P.LIGHT.az - 1.23) < 1e-5 && Math.abs(P.LIGHT.alt - 0.77) < 1e-5 &&
+       Math.abs(P.LIGHT.intensity - 0.62) < 1e-5 &&
+       Math.abs(P.LIGHT.ambient - 0.41) < 1e-5 &&
+       P.LIGHT.color.getHexString() === 'ffd0a0' && P.LIGHT.toon === true,
+       P.LIGHT.color.getHexString() + ' toon=' + P.LIGHT.toon);
+    ck('render mode and ground shadow survive',
+       P.ENV.render === true && P.ENV.groundShadow === false);
+    ck('depth of field survives, on and at its f-stop',
+       P.FX.dofOn === true && Math.abs(P.FX.fstop - 2.8) < 1e-5,
+       'dof=' + P.FX.dofOn + ' f/' + P.FX.fstop);
+    ck('grain survives, on and at its level',
+       P.FX.grainOn === true && Math.abs(P.FX.grain - 51) < 1e-5,
+       'grain=' + P.FX.grainOn + ' ' + P.FX.grain + '%');
+    ck('pixelation survives, on and at its block size',
+       P.FX.pixelOn === true && Math.abs(P.FX.pixel - 7) < 1e-5,
+       'pixel=' + P.FX.pixelOn + ' ' + P.FX.pixel + 'px');
+
+    /* and a document saved before any of this existed must still open */
+    var older = JSON.parse(doc2);
+    delete older.env.fx; delete older.env.light;
+    var okOld = false;
+    try { okOld = P.Doc.restore(older); } catch(e){ okOld = 'threw: ' + e.message; }
+    ck('a document with no fx or light block still opens', okOld === true, String(okOld));
+  })();
   ck('history is cleared by a restore, not left dangling', !P.History.canUndo());
 
   var tv2 = P.ORTHO_VIEWS[4];
@@ -718,6 +1271,1196 @@ function run(W){
   ck('a foreign file is rejected', badDoc === false);
   var future = P.Doc.restore({format:'plume', version:999});
   ck('a newer file version is rejected', future === false);
+
+  /* ================= nib orientation ================= */
+  group('C.3  The nib follows the surface, not the camera');
+  /* A blade brush has a direction, and it used to come from the view basis —
+     so the same line drawn on the same guide from two viewpoints came out as
+     two different strokes. It comes from the surface now: the wide axis of the
+     cross-section is perpendicular to the stroke and lies IN the guide, with
+     the thin axis along the normal. */
+  function wideAxisAt(st, i){
+    var pt = st.pts[i], t = pt.tan, r = pt.ref;
+    var sv = new THREE.Vector3().crossVectors(t, r);
+    return r.clone().multiplyScalar(Math.cos(pt.roll || 0))
+            .addScaledVector(sv, Math.sin(pt.roll || 0)).normalize();
+  }
+  function drawOnTube(theta, phi){
+    reset();
+    P.TOOL.stableOn = false;
+    P.Guides.setActive(P.Guides.primitive('tube', 32, 1));
+    P.VIEW.theta = theta; P.VIEW.phi = phi; P.applyCamera();
+    P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 30;
+    pen([{x:CX-120,y:CY-30},{x:CX-40,y:CY},{x:CX+40,y:CY+10},{x:CX+120,y:CY-20}]);
+    return P.Strokes.list[0];
+  }
+  var offWorst = 0, offView = '';
+  [[0.2,1.2,'front'], [1.6,0.7,'side'], [0.9,0.25,'above'], [-1.1,1.4,'behind']]
+    .forEach(function(v){
+      var st6 = drawOnTube(v[0], v[1]);
+      if(!st6) { offWorst = 9; offView = v[2] + ' drew nothing'; return; }
+      for(var i=0;i<st6.pts.length;i++){
+        if(!st6.pts[i].nrm) continue;
+        var d = Math.abs(wideAxisAt(st6, i).dot(st6.pts[i].nrm));
+        if(d > offWorst){ offWorst = d; offView = v[2]; }
+      }
+    });
+  ck('the nib lies flat in the guide from every viewpoint', offWorst < 0.02,
+     'worst ' + offWorst.toFixed(4) + ' out of the surface, ' + offView + ' view');
+
+  /* and the thin axis is the one along the normal, i.e. the blade is a blade */
+  var stFlat = drawOnTube(0.2, 1.2);
+  var thinWorst = 1;
+  for(var fi=0; fi<stFlat.pts.length; fi++){
+    var pt6 = stFlat.pts[fi];
+    if(!pt6.nrm) continue;
+    var u6 = wideAxisAt(stFlat, fi);
+    var v6 = new THREE.Vector3().crossVectors(pt6.tan, u6).normalize();
+    thinWorst = Math.min(thinWorst, Math.abs(v6.dot(pt6.nrm)));
+  }
+  ck('...with its thin axis along the surface normal', thinWorst > 0.98,
+     'worst alignment ' + thinWorst.toFixed(4));
+
+  /* the same stroke drawn from two viewpoints must come out the same shape */
+  function sectionProfile(st){
+    var i = Math.floor(st.pts.length/2), pt = st.pts[i];
+    var u = wideAxisAt(st, i);
+    return { alongSurface: +Math.abs(u.dot(pt.nrm)).toFixed(3) };
+  }
+  var pA = sectionProfile(drawOnTube(0.2, 1.2)),
+      pB = sectionProfile(drawOnTube(1.6, 0.7));
+  ck('so the same line on the same guide is the same stroke from anywhere',
+     Math.abs(pA.alongSurface - pB.alongSurface) < 0.02,
+     pA.alongSurface + ' vs ' + pB.alongSurface);
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14;
+  reset();
+
+  /* ================= bend frame continuity ================= */
+  group('A.6  A bent guide keeps the profile facing the way it was drawn');
+  /* The frames transported along a new path need a seed. Seeding with the
+     profile's own right axis fails when the path sets off ALONG that axis —
+     the ordinary case of orbiting 90 degrees and dragging sideways — and the
+     fallback perpendicular flips as the tangent crosses it. A symmetric
+     profile hides that; a curved one turns inside out. */
+  function hookGuide(){
+    reset();
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = true; P.TOOL.stableOn = false;
+    var prof = [];
+    for(var q=0;q<=24;q++){
+      var t7 = q/24;
+      prof.push({ x: CX-150+300*t7,
+                  y: CY-40-90*Math.sin(t7*Math.PI)*(t7 < 0.5 ? 1 : 0.25) });
+    }
+    pen(prof);
+    return P.Guides.active;
+  }
+  function bendAlongR(g, tilt){
+    var sw = g.sweep;
+    var dir = sw.basisR.clone().addScaledVector(sw.basisT, tilt).normalize();
+    /* move the camera FIRST — the screen points have to be projected through
+       the same view the bend stroke will be read back in */
+    P.VIEW.theta = 0; P.VIEW.phi = 0.05; P.applyCamera();     // look from above
+    var pts7 = [];
+    for(var q=0;q<=8;q++){
+      var w = sw.anchor.clone().addScaledVector(dir, (q/8)*1.6);
+      var sc = P.worldToScreen(w, {});
+      pts7.push({x:sc.x, y:sc.y});
+    }
+    P.setTool('bend'); pen(pts7); P.setTool('draw');
+    return g;
+  }
+  function meshPoints(g){
+    var a = g.mesh.geometry.attributes.position, out = [];
+    for(var q=0;q<a.count;q++) out.push(a.getX(q), a.getY(q), a.getZ(q));
+    return out;
+  }
+  var gPlus  = bendAlongR(hookGuide(), +0.02);
+  var vPlus  = meshPoints(gPlus),  rPlus  = gPlus.sweep.frames.R[0].clone();
+  var gMinus = bendAlongR(hookGuide(), -0.02);
+  var vMinus = meshPoints(gMinus), rMinus = gMinus.sweep.frames.R[0].clone();
+
+  var frameSwing = Math.acos(P.clamp(rPlus.dot(rMinus), -1, 1)) * 57.3;
+  ck('two almost identical bends give two almost identical frames',
+     frameSwing < 15, frameSwing.toFixed(0) + ' deg apart for a 2.3 deg change of path');
+
+  var vWorst = 0;
+  for(var q7=0; q7<Math.min(vPlus.length, vMinus.length); q7+=3){
+    vWorst = Math.max(vWorst, Math.hypot(vPlus[q7]-vMinus[q7],
+                                         vPlus[q7+1]-vMinus[q7+1],
+                                         vPlus[q7+2]-vMinus[q7+2]));
+  }
+  ck('...and two almost identical surfaces, rather than a flipped one',
+     vWorst < 0.2, 'worst vertex moved ' + (vWorst*1000).toFixed(0) + 'mm');
+
+  /* bending along the original extrusion axis must not move the profile at all */
+  var gSame = hookGuide();
+  var beforeR = gSame.sweep.basisR.clone();
+  bendAlongR(gSame, 40);                       // tilt so far it IS basisT
+  ck('a bend that keeps the original direction keeps the original frame',
+     gSame.sweep.frames.R[0].dot(beforeR) > 0.99,
+     'dot ' + gSame.sweep.frames.R[0].dot(beforeR).toFixed(3));
+  P.TOOL.autoGuide = false;
+  reset();
+
+  /* ================= sampling density and nib tessellation ================= */
+  group('Curves are not polygons — sampling and cross-section');
+
+  /* A browser delivers one pointermove per frame, so a fast stroke arrives in
+     30-50px jumps and used to be stored exactly that way: a polyline with
+     visible corners. On commit the screen path is now resampled through a
+     centripetal Catmull-Rom, which passes through the samples the pen gave
+     and only fills in between them. */
+  reset(); P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+  var flick = [];
+  for(var fq=0; fq<=8; fq++) flick.push({x:CX-200+fq*50, y:CY+Math.sin(fq/8*Math.PI)*90});
+  pen(flick);
+  var fst = P.Strokes.list[0];
+  ck('a fast, sparsely-sampled stroke is filled in', fst.pts.length > flick.length*2,
+     flick.length + ' samples in, ' + fst.pts.length + ' points out');
+
+  var stepMax = 0, sPrev = ts(fst.pts[0].p);
+  for(var fi=1; fi<fst.pts.length; fi++){
+    var sNow = ts(fst.pts[fi].p);
+    stepMax = Math.max(stepMax, Math.hypot(sNow.x-sPrev.x, sNow.y-sPrev.y));
+    sPrev = sNow;
+  }
+  ck('...with no gap left longer than a few pixels', stepMax < 12,
+     'largest step ' + stepMax.toFixed(1) + 'px');
+
+  /* fidelity: the fill-in interpolates, it does not smooth. Every point the
+     pen actually reported must still lie on the stored curve. */
+  var offWorst = 0;
+  for(fq=0; fq<flick.length; fq++){
+    var want = flick[fq], bestD = Infinity;
+    for(fi=0; fi<fst.pts.length; fi++){
+      var got = ts(fst.pts[fi].p);
+      bestD = Math.min(bestD, Math.hypot(got.x-want.x, got.y-want.y));
+    }
+    offWorst = Math.max(offWorst, bestD);
+  }
+  ck('...and every sample the pen gave is still on the curve', offWorst < 1.5,
+     'worst ' + offWorst.toFixed(2) + 'px off');
+
+  /* Cross-section resolution follows the nib. A fixed 12 segments is smooth on
+     a 14mm pen and visibly faceted on a 200mm one, so the count is solved from
+     a fixed facet error instead. */
+  function ringSeg(mm){
+    P.Strokes.clear(); P.TOOL.sizeMM = mm; P.TOOL.brush = 'pen';
+    pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+    return P.Strokes.segOf(P.Strokes.list[0]);
+  }
+  var segSmall = ringSeg(4), segMid = ringSeg(40), segBig = ringSeg(200);
+  ck('a bigger nib is tessellated more finely',
+     segBig > segMid && segMid > segSmall,
+     segSmall + ' -> ' + segMid + ' -> ' + segBig + ' segments');
+  var errWorst = 0, errAt = 0;
+  [1, 4, 14, 40, 90, 200].forEach(function(mm){
+    var n = ringSeg(mm);
+    var rmm = P.Strokes.list[0].baseRadius * P.BRUSH.pen.wide / P.MM;
+    var e = (1 - Math.cos(Math.PI/n)) * rmm;      // facet depth, in mm
+    if(e > errWorst){ errWorst = e; errAt = mm; }
+  });
+  ck('so the facet error stays under a third of a millimetre up to a 200mm nib',
+     errWorst < 0.36, 'worst ' + errWorst.toFixed(3) + 'mm at ' + errAt + 'mm');
+
+  /* Above that the segment ceiling takes over and the guarantee becomes a
+     relative one — including the wide brush, whose nib is 3.4x the slider.
+
+     Measured against the OUTLINE THE BRUSH ACTUALLY HAS, not against a circle.
+     1-cos(pi/n) is the sagitta of a circular arc and describes a round section
+     only; a squared-off one is traced by the Chebyshev map, whose samples land
+     on the four corners and the four edge midpoints, so its sides are exact
+     line segments at any size and its error is zero rather than the 7.6% the
+     circle formula claims for it. This walks each span between two consecutive
+     section samples and takes the furthest the true outline strays from the
+     chord across it. */
+  function outlineError(brush, mm){
+    P.Strokes.clear(); P.TOOL.brush = brush; P.TOOL.sizeMM = mm;
+    pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
+    var n = P.Strokes.segOf(P.Strokes.list[0]);
+    var sq = P.BRUSH[P.brushName(brush)].square || 0;
+    var a = {x:0,y:0}, b = {x:0,y:0}, m = {x:0,y:0}, worst = 0;
+    for(var k=0;k<n;k++){
+      P.Strokes.sectionPoint(k/n*Math.PI*2, sq, a);
+      P.Strokes.sectionPoint((k+1)/n*Math.PI*2, sq, b);
+      var ex = b.x-a.x, ey = b.y-a.y, e2 = ex*ex+ey*ey;
+      for(var q=1;q<40;q++){
+        P.Strokes.sectionPoint((k + q/40)/n*Math.PI*2, sq, m);
+        var t2 = e2 > 1e-12 ? ((m.x-a.x)*ex + (m.y-a.y)*ey)/e2 : 0;
+        var ox = m.x - (a.x + ex*t2), oy = m.y - (a.y + ey*t2);
+        worst = Math.max(worst, Math.hypot(ox, oy));
+      }
+    }
+    return worst;                       // as a fraction of the nib radius
+  }
+  var relWorst = 0, relAt = '';
+  ['pen','wide'].forEach(function(bn2){
+    [200, 300].forEach(function(mm){
+      var rel = outlineError(bn2, mm);
+      if(rel > relWorst){ relWorst = rel; relAt = bn2 + ' at ' + mm + 'mm'; }
+    });
+  });
+  ck('...and never worse than a third of a percent of the nib radius',
+     relWorst < 0.003, (relWorst*100).toFixed(3) + '%, worst on ' + relAt);
+  P.TOOL.sizeMM = 14; P.TOOL.brush = 'pen';
+
+  /* ================= the eraser is its own tool ================= */
+  group('C.6  The eraser has its own size');
+  function eraseBite(brushMM, eraserMM){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.TOOL.sizeMM = brushMM; P.TOOL.eraserMM = eraserMM;
+    pen([{x:CX-220,y:CY},{x:CX,y:CY},{x:CX+220,y:CY}]);
+    var before4 = plen(P.Strokes.list[0]);
+    P.setTool('erase');
+    pen([{x:CX,y:CY},{x:CX+1,y:CY}]);
+    var after4 = P.Strokes.list.reduce(function(a,b){ return a + plen(b); }, 0);
+    P.setTool('draw');
+    return P.worldToPx(before4 - after4);
+  }
+  var biteThin = eraseBite(6, 20), biteFat = eraseBite(200, 20);
+  ck('the brush size no longer decides how much the eraser takes',
+     Math.abs(biteThin - biteFat) < 2,
+     biteThin.toFixed(1) + 'px with a 6mm nib vs ' + biteFat.toFixed(1) + 'px with a 200mm one');
+  var biteBig = eraseBite(20, 120);
+  ck('...the eraser size does', biteBig > biteThin * 2,
+     '20mm eraser takes ' + biteThin.toFixed(1) + 'px, 120mm takes ' + biteBig.toFixed(1) + 'px');
+  reset();
+
+  /* ================= painting an area ================= */
+  group('Painting — overlaps and the guide’s edge');
+  /* Build a wall and paint it with overlapping strokes of the wide brush, the
+     way you would block one in. */
+  function paintWall(strokeCount, brush, mm){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof12 = [];
+    for(var q=0;q<=16;q++) prof12.push({x:CX-240+480*(q/16), y:CY});
+    pen(prof12);
+    var wall = P.Guides.active;
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = brush; P.TOOL.sizeMM = mm; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#2fbf55');
+    for(var k=0;k<strokeCount;k++){
+      var x12 = CX - 210 + k*24, col12 = [];
+      for(q=0;q<=10;q++) col12.push({x:x12, y:CY-120+q*24});
+      pen(col12);
+    }
+    return wall;
+  }
+
+  /* THE SEAMS. Fourteen overlapping ribbons of one colour on one flat wall
+     should read as one flat wall. What gave the overlaps away was that each
+     sheet's SIDES were lit differently from its top — a dark line at every
+     seam, which no amount of thinning removes. Sampled across the painted
+     area, every pixel should now be the same value. */
+  var wallGuide = paintWall(18, 'wide', 70);
+  P.Guides.setActive(null);
+  P.VIEW.theta = 0.25; P.VIEW.phi = 1.25; P.applyCamera();
+  P.renderer.render(P.scene, P.cam());
+  var pxSeam = (function(){
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpS = P.viewport();
+    var buf = new W.Uint8Array(4*600);
+    gl.readPixels(Math.round(200*dpr), Math.round((vpS.h - CY)*dpr), 600, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    /* Runs of painted pixels, judged in their INTERIORS. The two pixels at
+       each end of a run straddle the silhouette and are part background, which
+       is antialiasing rather than a seam. */
+    var runs = [], cur = [];
+    for(var q=0;q<600;q++){
+      var r12 = buf[q*4], g12 = buf[q*4+1], b12 = buf[q*4+2];
+      if(g12 > r12+20 && g12 > b12+20) cur.push(g12);
+      else { if(cur.length) runs.push(cur); cur = []; }
+    }
+    if(cur.length) runs.push(cur);
+    var worst = 0, steps = 0, seen = 0;
+    for(var rq=0; rq<runs.length; rq++){
+      var run = runs[rq];
+      for(var sq=3; sq<run.length-2; sq++){
+        seen++;
+        var d12 = Math.abs(run[sq] - run[sq-1]);
+        worst = Math.max(worst, d12);
+        if(d12 > 4) steps++;
+      }
+    }
+    return { seen:seen, worst:worst, steps:steps };
+  })();
+  ck('a wall painted with overlapping strokes has no seams in it',
+     pxSeam.seen > 200 && pxSeam.steps === 0,
+     pxSeam.seen + ' painted pixels sampled, ' + pxSeam.steps +
+     ' visible steps, worst neighbour difference ' + pxSeam.worst);
+
+  /* THE EDGE. A brush is wider than the line it follows, so paint used to run
+     off the side of the guide by up to half a nib. */
+  function paintColumn(dx, mm){
+    P.Strokes.clear(); P.History.clear();
+    P.TOOL.brush = 'wide'; P.TOOL.sizeMM = mm;
+    var col13 = [];
+    for(var q=0;q<=8;q++) col13.push({x:CX+dx, y:CY-100+q*25});
+    pen(col13);
+    return P.Strokes.list[0];
+  }
+  var wall2 = paintWall(0, 'wide', 100);
+  var guideBox = new THREE.Box3().setFromObject(wall2.mesh);
+  var overflowWorst = -1e9, overflowAt = 0;
+  [0, 140, 190, 215, 232].forEach(function(dx){
+    var st13 = paintColumn(dx, 100);
+    if(!st13) return;
+    var box13 = new THREE.Box3().setFromObject(st13.mesh);
+    var over = Math.max(box13.max.x - guideBox.max.x, guideBox.min.x - box13.min.x);
+    if(over > overflowWorst){ overflowWorst = over; overflowAt = dx; }
+  });
+  ck('paint stays inside the guide, however close to the edge you work',
+     overflowWorst < 1e-6,
+     'worst overflow ' + (overflowWorst/P.MM).toFixed(0) + 'mm, painting ' +
+     overflowAt + 'px from centre on a 960mm wall');
+
+  /* ...and it narrows only on the side that would have hung over */
+  var edgeSt = paintColumn(215, 100);
+  var midEdge = Math.floor(edgeSt.pts.length/2);
+  ck('...by narrowing the nib on that side alone',
+     Math.min(edgeSt.pts[midEdge].fitL, edgeSt.pts[midEdge].fitR) < 0.6 &&
+     Math.max(edgeSt.pts[midEdge].fitL, edgeSt.pts[midEdge].fitR) > 0.99,
+     'nib fits ' + edgeSt.pts[midEdge].fitL.toFixed(2) + ' one side, ' +
+     edgeSt.pts[midEdge].fitR.toFixed(2) + ' the other');
+
+  /* a trimmed nib has to survive a save, since nothing recomputes it on load */
+  var fitJson = JSON.stringify(P.Doc.serialize());
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(fitJson));
+  var backSt = P.Strokes.list[0];
+  ck('...and the trim survives a save and reload', !!backSt &&
+     Math.abs(backSt.pts[midEdge].fitL - edgeSt.pts[midEdge].fitL) < 1e-5,
+     backSt ? backSt.pts[midEdge].fitL.toFixed(3) : 'no stroke');
+
+  /* out in open ground nothing is trimmed at all */
+  var openSt = paintColumn(0, 100);
+  var trimmed = 0;
+  for(var oq=0; oq<openSt.pts.length; oq++){
+    if(openSt.pts[oq].fitL < 0.999 || openSt.pts[oq].fitR < 0.999) trimmed++;
+  }
+  ck('a stroke in the middle of a guide keeps its whole nib', trimmed === 0,
+     trimmed + ' of ' + openSt.pts.length + ' points trimmed');
+
+  /* THE TRIMMED BAND, SHADED. Trimming a section moves its corner vertices but
+     the corner NORMALS have to keep facing out of the guide, or the strip of
+     paint beside a boundary is lit as though it were angled away and reads as
+     a dirty smear against the rest of the wall. Painted straight on, every
+     pixel of the wall — trimmed band included — is one value. */
+  reset();
+  P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+  P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+  P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+  P.TOOL.autoGuide = true;
+  var prof14 = [];
+  for(var q14=0;q14<=16;q14++) prof14.push({x:CX-240+480*(q14/16), y:CY});
+  pen(prof14);
+  P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+  P.TOOL.autoGuide = false;
+  P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 70; P.TOOL.opacity = 1;
+  P.TOOL.color.set('#2fbf55');
+  for(var k14=0;k14<20;k14++){
+    var col14 = [];
+    for(q14=0;q14<=10;q14++){
+      col14.push({x:CX-230+k14*26+Math.sin(q14*0.7+k14)*4, y:CY-120+q14*24});
+    }
+    pen(col14);
+  }
+  var trimmedStrokes = 0;
+  for(var s14=0; s14<P.Strokes.list.length; s14++){
+    var least = 1, ps14 = P.Strokes.list[s14].pts;
+    for(var t14=0; t14<ps14.length; t14++){
+      least = Math.min(least, ps14[t14].fitL, ps14[t14].fitR);
+    }
+    if(least < 0.999) trimmedStrokes++;
+  }
+  P.Guides.setActive(null);
+  P.renderer.render(P.scene, P.cam());
+  var bandShades = (function(){
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vp14 = P.viewport(), buf14 = new W.Uint8Array(4*900), seen14 = {};
+    gl.readPixels(0, Math.round((vp14.h - CY)*dpr), 900, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf14);
+    var painted = 0;
+    for(var q=0;q<900;q++){
+      var r14 = buf14[q*4], g14 = buf14[q*4+1], b14 = buf14[q*4+2];
+      if(g14 > r14+20 && g14 > b14+20){ seen14[g14] = (seen14[g14]||0)+1; painted++; }
+    }
+    return { shades: Object.keys(seen14), painted: painted };
+  })();
+  ck('paint trimmed at a boundary is shaded like the rest of the wall',
+     trimmedStrokes > 0 && bandShades.painted > 300 &&
+     bandShades.shades.length === 1,
+     trimmedStrokes + ' strokes trimmed, ' + bandShades.painted +
+     ' pixels sampled in ' + bandShades.shades.length + ' shade(s): ' +
+     bandShades.shades.join(', '));
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
+  reset();
+
+  /* ================= Smooth over painted work ================= */
+  group('Smooth — cost and what it must not undo');
+  /* Smoothing a wall painted with the wide brush was the slowest thing in
+     the app, and it also quietly threw away the boundary trim. Both are
+     measured here on the same drag. */
+  function paintedWall(){
+    reset();
+    P.setTool('draw');
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var pr15 = [], q15;
+    for(q15=0;q15<=16;q15++) pr15.push({x:CX-240+480*(q15/16), y:CY});
+    pen(pr15);
+    var g15 = P.Guides.active;
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 70; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#2fbf55');
+    for(var k15=0;k15<20;k15++){
+      var col15 = [];
+      for(q15=0;q15<=10;q15++){
+        col15.push({x:CX-230+k15*24+Math.sin(q15*0.7+k15)*5, y:CY-120+q15*24});
+      }
+      pen(col15);
+    }
+    return g15;
+  }
+  function trimCount(){
+    var t = 0;
+    for(var a=0;a<P.Strokes.list.length;a++){
+      var ps = P.Strokes.list[a].pts;
+      for(var b=0;b<ps.length;b++){ if(ps[b].fitL < 0.999 || ps[b].fitR < 0.999) t++; }
+    }
+    return t;
+  }
+  var wallG = paintedWall();
+  var trimBefore = trimCount();
+  var wallBox = new THREE.Box3().setFromObject(wallG.mesh);
+  P.setTool('smooth');
+  /* One drag to warm up before timing anything. This check runs several
+     hundred assertions into the page, and the first pass through the smooth
+     path pays for its own JIT: measured cold it reads 17.9ms worst where every
+     later drag on the same scene is 2.4-4.4ms. Timing the warm-up would make
+     this a test of the compiler. */
+  function smoothDrag(record){
+    penDown(CX-200, CY);
+    for(var q15=0;q15<40;q15++){
+      var t15 = (W.performance || Date).now();
+      penMoveTo(CX-200+q15*10, CY+Math.sin(q15*0.4)*30);
+      if(record) record.push((W.performance || Date).now() - t15);
+    }
+    penUpAt(CX+200, CY);
+  }
+  smoothDrag(null);
+  var moveTimes = [];
+  smoothDrag(moveTimes);
+  moveTimes.sort(function(a,b){ return a-b; });
+  /* the 90th percentile, not the outright maximum. A single garbage collection
+     anywhere in the drag put one move at 22.9ms against a 1.6ms median, and a
+     check that fails once in a while stops being read. The bug this guards was
+     16.6ms MEDIAN and 36.5ms worst, which blows both bounds below however the
+     collector behaves. */
+  var moveMax = moveTimes[Math.floor(moveTimes.length*0.9)];
+
+  /* A pointer event must fit inside a frame with room for the render. The
+     drag measured 16.6ms median and 36.5ms worst before this was fixed. */
+  ck('a smooth drag over a painted wall keeps inside a frame',
+     moveTimes[20] < 8 && moveMax < 16,
+     '40 moves over 20 wide strokes: median ' + moveTimes[20].toFixed(1) +
+     'ms, 90th percentile ' + moveMax.toFixed(1) + 'ms, worst ' +
+     moveTimes[moveTimes.length-1].toFixed(1) + 'ms');
+
+  var trimAfter = trimCount();
+  ck('...and does not throw away the boundary trim',
+     trimBefore > 100 && trimAfter > trimBefore * 0.9,
+     trimBefore + ' points trimmed before, ' + trimAfter + ' after');
+
+  var smOver = -1e9;
+  for(var o15=0;o15<P.Strokes.list.length;o15++){
+    var ob = new THREE.Box3().setFromObject(P.Strokes.list[o15].mesh);
+    smOver = Math.max(smOver, ob.max.x - wallBox.max.x, wallBox.min.x - ob.min.x);
+  }
+  ck('...so the paint stays on the guide after smoothing',
+     smOver < 5 * P.MM,
+     'worst overflow ' + (smOver/P.MM).toFixed(0) + 'mm');
+
+  /* The occlusion mask is cached against a viewpoint. Moving the camera has
+     to drop it, or a curve that just came out from behind a guide would
+     still be treated as hidden. */
+  reset();
+  P.Guides.isolate = true;
+  var maskCalls = 0;
+  ck('the occlusion mask answers without a ray once it has been asked',
+     (function(){
+       var wall16 = paintedWall();
+       if(!wall16) return false;
+       var probe = P.Strokes.list[0].pts[2].p.clone();
+       /* count real raycasts by watching the guide mesh */
+       var rays = 0, geo = wall16.mesh;
+       var oRay = geo.raycast;
+       geo.raycast = function(){ rays++; return oRay.apply(this, arguments); };
+       P.Guides.isMasked(probe);
+       var first = rays;
+       for(var r16=0;r16<50;r16++) P.Guides.isMasked(probe);
+       var after = rays;
+       geo.raycast = oRay;
+       maskCalls = first + '/' + (after - first);
+       return first === 1 && after === first;
+     })(),
+     'first ask cast ' + maskCalls + ' rays, fifty repeats cast the rest');
+
+  ck('...and forgets it when the camera moves', (function(){
+    var wall17 = paintedWall();
+    if(!wall17) return false;
+    var probe = P.Strokes.list[0].pts[2].p.clone();
+    var rays = 0, geo = wall17.mesh, oRay = geo.raycast;
+    geo.raycast = function(){ rays++; return oRay.apply(this, arguments); };
+    P.Guides.isMasked(probe);
+    var before = rays;
+    P.VIEW.theta += 0.4; P.applyCamera();
+    P.Guides.isMasked(probe);
+    var after = rays;
+    geo.raycast = oRay;
+    return before === 1 && after === 2;
+  })(), 'a moved camera re-casts rather than reusing the old answer');
+
+  P.setTool('draw');
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
+  reset();
+
+  /* ================= Fill ================= */
+  group('Fill — coat a whole guide in one go');
+
+  /* A bucket fill that lays down ORDINARY STROKES, so everything downstream
+     still works on it. It takes the current brush and colour because it is
+     the current brush. */
+  function fillWall(brush, mm){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof17 = [];
+    for(var q17=0;q17<=16;q17++) prof17.push({x:CX-240+480*(q17/16), y:CY});
+    pen(prof17);
+    var wall17 = P.Guides.active;
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = brush; P.TOOL.sizeMM = mm; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#2fbf55');
+    return { guide: wall17, made: P.Tools.fillGuide() };
+  }
+
+  var fill17 = fillWall('wide', 70);
+  ck('filling a guide makes ordinary strokes', !!fill17.made &&
+     fill17.made.length > 0 && fill17.made.length === P.Strokes.list.length &&
+     fill17.made.every(function(x){ return x.pts.length > 1 && !!x.mesh; }),
+     (fill17.made ? fill17.made.length : 0) + ' strokes');
+
+  ck('...in the brush and colour you have chosen',
+     fill17.made.every(function(x){
+       return x.brush === 'wide' &&
+              Math.abs(x.color.getHex() - 0x2fbf55) === 0; }),
+     'brush ' + fill17.made[0].brush + ', #' + fill17.made[0].color.getHexString());
+
+  /* EDGE TO EDGE. The rows sit half a pitch in from each side so the outermost
+     nib hangs over and gets trimmed back, exactly like a hand-painted edge. */
+  var gBox17 = new THREE.Box3().setFromObject(fill17.guide.mesh);
+  var pBox17 = new THREE.Box3();
+  for(var f17=0; f17<P.Strokes.list.length; f17++){
+    pBox17.union(new THREE.Box3().setFromObject(P.Strokes.list[f17].mesh));
+  }
+  var over17  = Math.max(pBox17.max.x - gBox17.max.x, gBox17.min.x - pBox17.min.x);
+  var short17 = Math.max(gBox17.max.x - pBox17.max.x, pBox17.min.x - gBox17.min.x);
+  ck('...reaching the edges without running past them',
+     over17 < 2*P.MM && short17 < 5*P.MM,
+     'overflow ' + (over17/P.MM).toFixed(1) + 'mm, shortfall ' +
+     (short17/P.MM).toFixed(1) + 'mm on a 960mm guide');
+
+  /* NO GROOVES BETWEEN THE ROWS. Spacing rounds the row count UP: rounding it
+     down left a step wider than the nib and a 2mm gap down every seam. */
+  P.Guides.setActive(null);
+  P.renderer.render(P.scene, P.cam());
+  var solid17 = (function(){
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpF = P.viewport(), buf17 = new W.Uint8Array(4*900);
+    gl.readPixels(0, Math.round((vpF.h - CY)*dpr), 900, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf17);
+    var runs17 = [], cur17 = 0, painted17 = 0;
+    for(var q=0;q<900;q++){
+      var r17 = buf17[q*4], g17 = buf17[q*4+1], b17 = buf17[q*4+2];
+      if(g17 > r17+20 && g17 > b17+20){ cur17++; painted17++; }
+      else if(cur17){ runs17.push(cur17); cur17 = 0; }
+    }
+    if(cur17) runs17.push(cur17);
+    return { runs: runs17.length, painted: painted17 };
+  })();
+  ck('...as one unbroken sheet, with no grooves between the rows',
+     solid17.painted > 300 && solid17.runs === 1,
+     solid17.painted + ' pixels across ' + solid17.runs + ' run(s)');
+
+  /* one history step for the whole coat */
+  var count17 = P.Strokes.list.length;
+  P.History.undo();
+  var undone17 = P.Strokes.list.length;
+  P.History.redo();
+  ck('a fill undoes in one step, not one per row',
+     undone17 === 0 && P.Strokes.list.length === count17,
+     count17 + ' strokes -> ' + undone17 + ' -> ' + P.Strokes.list.length);
+
+  /* a wider nib needs fewer passes */
+  var fine17 = fillWall('wide', 40).made.length;
+  var broad17 = fillWall('wide', 160).made.length;
+  ck('a wider brush fills the same guide in fewer strokes',
+     broad17 < fine17 && broad17 >= 1,
+     fine17 + ' strokes at 40mm, ' + broad17 + ' at 160mm');
+
+  /* and it declines politely when there is nothing to fill */
+  reset();
+  P.Guides.setActive(null);
+  var none17 = P.Tools.fillGuide();
+  ck('filling with no guide does nothing rather than throwing',
+     none17 === null && P.Strokes.list.length === 0,
+     'returned ' + none17 + ', ' + P.Strokes.list.length + ' strokes');
+  reset();
+
+  /* ================= flat shape guide ================= */
+  group('Flat shape guide — the outline you drew, facing you');
+
+  function flatGuide(pts20){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.shapeHold = false;
+    P.VIEW.ortho = true; P.VIEW.radius = 3.2; P.VIEW.pivot.set(0,0,0);
+    P.VIEW.pinned = true; P.VIEW.theta = 0; P.VIEW.phi = 0.9; P.applyCamera();
+    P.setTool('flatguide');
+    pen(pts20);
+    P.setTool('draw');
+    return P.Guides.active;
+  }
+  function ellipse20(rx, ry, n){
+    var o = [];
+    for(var a20=0; a20<=(n||32); a20++){
+      var t20 = a20/(n||32)*Math.PI*2;
+      o.push({x:CX+Math.cos(t20)*rx, y:CY+Math.sin(t20)*ry});
+    }
+    return o;
+  }
+
+  var flat = flatGuide(ellipse20(180, 120));
+  ck('a closed outline becomes a flat guide',
+     !!flat && flat.kind === 'flat' && !!flat.plane &&
+     flat.mesh.geometry.attributes.position.count > 3,
+     flat ? flat.kind + ', ' +
+       (flat.mesh.geometry.index ? flat.mesh.geometry.index.count/3 : 0) + ' triangles'
+          : 'none made');
+
+  /* IT FACES YOU. That is the whole difference from the swept guide, which
+     takes the stroke as a profile and extrudes it away along the view. */
+  var camDir20 = P.cam().getWorldDirection(new THREE.Vector3());
+  ck('...lying in the plane you drew it on, not extruded away from it',
+     Math.abs(flat.plane.normal.dot(camDir20)) > 0.999,
+     'normal against view ' + Math.abs(flat.plane.normal.dot(camDir20)).toFixed(4));
+  ck('...and it spans the shape that was drawn',
+     Math.abs(flat.plane.Lu / flat.plane.Lv - 1.5) < 0.05,
+     (flat.plane.Lu/P.MM).toFixed(0) + ' x ' + (flat.plane.Lv/P.MM).toFixed(0) +
+     'mm for a 3:2 ellipse');
+
+  /* the swept guide, drawn identically, does NOT lie in the screen plane */
+  reset();
+  P.VIEW.ortho = true; P.VIEW.radius = 3.2; P.VIEW.pivot.set(0,0,0);
+  P.VIEW.pinned = true; P.VIEW.theta = 0; P.VIEW.phi = 0.9; P.applyCamera();
+  P.setTool('guide');
+  pen(ellipse20(180, 120));
+  P.setTool('draw');
+  var swept20 = P.Guides.active;
+  ck('...where the ordinary guide extrudes along the view instead',
+     !!swept20 && !!swept20.sweep && !swept20.plane,
+     swept20 ? (swept20.sweep ? 'swept' : 'no sweep') : 'none');
+
+  /* DRAWING AND FILLING both stay inside the outline */
+  flat = flatGuide(ellipse20(180, 120));
+  P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 60; P.TOOL.opacity = 1;
+  var fillMade = P.Tools.fillGuide();
+  var gBox20 = new THREE.Box3().setFromObject(flat.mesh), pBox20 = new THREE.Box3();
+  for(var f20=0; f20<P.Strokes.list.length; f20++){
+    pBox20.union(new THREE.Box3().setFromObject(P.Strokes.list[f20].mesh));
+  }
+  var over20 = Math.max(pBox20.max.x - gBox20.max.x, gBox20.min.x - pBox20.min.x,
+                        pBox20.max.y - gBox20.max.y, gBox20.min.y - pBox20.min.y);
+  ck('a flat guide fills, and the paint stays inside the outline',
+     !!fillMade && fillMade.length > 0 && over20 < 6*P.MM,
+     fillMade.length + ' strokes, worst overflow ' + (over20/P.MM).toFixed(0) + 'mm');
+
+  /* ROWS ARE CUT BY THE SHAPE. Across an ellipse the middle row is the widest;
+     across a horseshoe a row crossing the gap must come out as TWO strokes
+     rather than one drawn straight over the hole. */
+  var lengths20 = fillMade.map(function(x){
+    var L = 0;
+    for(var q20=1;q20<x.pts.length;q20++) L += x.pts[q20].p.distanceTo(x.pts[q20-1].p);
+    return L;
+  });
+  ck('...and rows are cut to the shape, not run to its bounding box',
+     Math.max.apply(null, lengths20) > Math.min.apply(null, lengths20) * 1.15,
+     lengths20.map(function(x){ return (x/P.MM).toFixed(0); }).join(' / ') + 'mm rows');
+
+  var horse = [];
+  for(var h20=0; h20<=20; h20++){                    // outer arc, left to right
+    var ta = Math.PI * (h20/20);
+    horse.push({x:CX-Math.cos(ta)*200, y:CY-Math.sin(ta)*200});
+  }
+  for(h20=20; h20>=0; h20--){                        // inner arc, back again
+    var tb = Math.PI * (h20/20);
+    horse.push({x:CX-Math.cos(tb)*100, y:CY-Math.sin(tb)*100});
+  }
+  var uShape = flatGuide(horse);
+  P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 40; P.TOOL.opacity = 1;
+  var horseFill = P.Tools.fillGuide();
+  /* a row that crosses the opening of the horseshoe must not bridge it: with
+     more strokes than rows, some row was broken in two */
+  var rowsAcross = Math.ceil(Math.min(uShape.plane.Lu, uShape.plane.Lv) /
+                             (P.Strokes.nibHalfWidth(horseFill[0], horseFill[0].baseRadius *
+                               P.BRUSH[horseFill[0].brush].wide) * 2 * 0.9));
+  ck('a row crossing a gap in the shape comes out as two strokes',
+     horseFill.length > rowsAcross,
+     horseFill.length + ' strokes for about ' + rowsAcross + ' rows');
+
+  /* SAVE AND RELOAD */
+  var flatJson = JSON.stringify(P.Doc.serialize());
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(flatJson));
+  var back20 = P.Guides.active;
+  ck('a flat guide survives a save and reload',
+     !!back20 && back20.kind === 'flat' && !!back20.plane &&
+     Math.abs(back20.plane.Lu - uShape.plane.Lu) < 1e-4 &&
+     back20.plane.outline.length === uShape.plane.outline.length,
+     back20 ? back20.kind + ', outline of ' + back20.plane.outline.length + ' points'
+            : 'nothing came back');
+  reset();
+
+  /* ================= Liquify ================= */
+  group('Liquify — push, pinch and comb');
+  /* FACT: "select the curves or sketches you want to modify and tap Liquify.
+     Press and drag with your pen to liquify your curves or drawings." The
+     panel carries size, range and strength, each adjusted by sliding up or
+     down, a mode you tap to change, and an Apply button. */
+  var LD = W.document;
+  function straightCurve(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.brush = 'pen';
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    pen([{x:CX-220,y:CY},{x:CX-110,y:CY},{x:CX,y:CY},{x:CX+110,y:CY},{x:CX+220,y:CY}]);
+    return P.Strokes.list[0];
+  }
+  function dragReadout(id, dy){
+    var el10 = LD.getElementById(id), r10 = el10.getBoundingClientRect();
+    var x10 = r10.left + r10.width/2, y10 = r10.top + r10.height/2;
+    function pe(t, yy, btn){
+      el10.dispatchEvent(new W.PointerEvent(t, {pointerId:76, pointerType:'touch',
+        clientX:x10, clientY:yy, buttons:btn, bubbles:true, cancelable:true}));
+    }
+    pe('pointerdown', y10, 1);
+    pe('pointermove', y10 - dy/2, 1);
+    pe('pointermove', y10 - dy, 1);
+    pe('pointerup',   y10 - dy, 0);
+  }
+  function drag(from, to, steps){
+    steps = steps || 8;
+    penEvent('pointerdown', from.x, from.y, 1);
+    for(var q=1;q<=steps;q++){
+      penEvent('pointermove', from.x + (to.x-from.x)*q/steps,
+                              from.y + (to.y-from.y)*q/steps, 1);
+    }
+    penEvent('pointerup', to.x, to.y, 0);
+  }
+
+  var lqSt = straightCurve();
+  var lqBefore = lqSt.pts.map(function(q){ return q.p.clone(); });
+  P.Strokes.setSelected(lqSt, true); P.onSceneChange();
+  LD.getElementById('btnSelLiquify').click();
+  ck('Liquify opens from the selection and keeps the selection',
+     P.TOOL.mode === 'liquify' && P.Strokes.selection.length === 1);
+  ck('...and brings up its panel', !LD.getElementById('liquifyPanel').classList.contains('hidden'));
+
+  /* PUSH — "distorts naturally, as if pushing or pulling with a finger" */
+  P.TOOL.liquify.mode = 'push'; P.TOOL.liquify.size = 160;
+  P.TOOL.liquify.strength = 100; P.TOOL.liquify.range = 60;
+  drag({x:CX,y:CY}, {x:CX,y:CY+80});
+  var lqMid = Math.floor(lqSt.pts.length/2);
+  var movedMid = lqSt.pts[lqMid].p.distanceTo(lqBefore[lqMid]) / P.MM;
+  var movedEnd = lqSt.pts[0].p.distanceTo(lqBefore[0]) / P.MM;
+  ck('push moves the curve under the pen', movedMid > 20,
+     movedMid.toFixed(0) + 'mm at the centre of the brush');
+  ck('...and falls off to nothing outside it', movedEnd < movedMid*0.1,
+     movedEnd.toFixed(1) + 'mm at a point ' + P.TOOL.liquify.size + 'px away');
+  ck('the whole session is one undo step', P.History.canUndo() && (function(){
+    P.History.undo();
+    var back = lqSt.pts[lqMid].p.distanceTo(lqBefore[lqMid]) < 1e-9;
+    P.History.redo();
+    return back;
+  })());
+
+  /* the size setting really is the reach */
+  var lqSt2 = straightCurve();
+  var before2 = lqSt2.pts.map(function(q){ return q.p.clone(); });
+  P.Strokes.setSelected(lqSt2, true); P.setTool('liquify');
+  P.TOOL.liquify.size = 40;
+  drag({x:CX,y:CY}, {x:CX,y:CY+80});
+  var reached = 0;
+  for(var li=0; li<lqSt2.pts.length; li++){
+    if(lqSt2.pts[li].p.distanceTo(before2[li]) > 1e-6){
+      reached = Math.max(reached, Math.abs(ts(before2[li]).x - CX));
+    }
+  }
+  ck('a smaller size reaches less far', reached < 60,
+     'furthest point moved was ' + reached.toFixed(0) + 'px from the pen');
+
+  /* COMB — "gently smooths and aligns as if combing", for wavy curves */
+  reset();
+  P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+  P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+  var wobbly10 = [];
+  for(var wq=0; wq<=40; wq++){
+    var wt = wq/40;
+    wobbly10.push({x:CX-220+440*wt, y:CY+Math.sin(wt*22)*16});
+  }
+  pen(wobbly10);
+  var combSt = P.Strokes.list[0];
+  function waviness(st10){
+    var A10 = st10.pts[0].p, B10 = st10.pts[st10.pts.length-1].p;
+    var ab10 = B10.clone().sub(A10), L10 = ab10.length(), dev = 0;
+    for(var q10=0;q10<st10.pts.length;q10++){
+      dev += st10.pts[q10].p.clone().sub(A10).cross(ab10).length()/L10;
+    }
+    return dev/st10.pts.length/P.MM;
+  }
+  var wavy0 = waviness(combSt);
+  P.Strokes.setSelected(combSt, true); P.setTool('liquify');
+  P.TOOL.liquify.mode = 'comb'; P.TOOL.liquify.size = 300; P.TOOL.liquify.strength = 100;
+  for(var rub=0; rub<12; rub++) drag({x:CX-220,y:CY}, {x:CX+220,y:CY}, 20);
+  var wavy1 = waviness(combSt);
+  ck('comb straightens a wavy curve', wavy1 < wavy0*0.5,
+     wavy0.toFixed(1) + 'mm of wobble -> ' + wavy1.toFixed(1) + 'mm');
+
+  /* PINCH — "distorts sharply and precisely, as if pinching" */
+  var pinchSt = straightCurve();
+  P.Strokes.setSelected(pinchSt, true); P.setTool('liquify');
+  P.TOOL.liquify.mode = 'pinch'; P.TOOL.liquify.size = 400; P.TOOL.liquify.strength = 100;
+  var span0 = pinchSt.pts[pinchSt.pts.length-1].p.distanceTo(pinchSt.pts[0].p)/P.MM;
+  for(var pq=0; pq<6; pq++) drag({x:CX,y:CY}, {x:CX+40,y:CY}, 10);
+  var span1 = pinchSt.pts[pinchSt.pts.length-1].p.distanceTo(pinchSt.pts[0].p)/P.MM;
+  ck('pinch gathers the curve toward the pen', span1 < span0 - 20,
+     span0.toFixed(0) + 'mm across -> ' + span1.toFixed(0) + 'mm');
+
+  /* it is aimed: liquify only touches what is selected */
+  reset();
+  P.TOOL.stableOn = false;
+  P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+  pen([{x:CX-200,y:CY-8},{x:CX,y:CY-8},{x:CX+200,y:CY-8}]);
+  pen([{x:CX-200,y:CY+8},{x:CX,y:CY+8},{x:CX+200,y:CY+8}]);
+  var keepSt = P.Strokes.list[1];
+  var keepBefore = keepSt.pts.map(function(q){ return q.p.clone(); });
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  P.setTool('liquify');
+  P.TOOL.liquify.mode = 'push'; P.TOOL.liquify.size = 300; P.TOOL.liquify.strength = 100;
+  drag({x:CX,y:CY}, {x:CX,y:CY+70});
+  var untouched = true;
+  for(var kq=0;kq<keepSt.pts.length;kq++){
+    if(keepSt.pts[kq].p.distanceTo(keepBefore[kq]) > 1e-9) untouched = false;
+  }
+  ck('a curve that is not selected is not liquified', untouched);
+
+  /* the panel: modes, and the three numbers that drag */
+  LD.getElementById('lqModes').querySelector('[data-lq="pinch"]').click();
+  ck('tapping a mode selects it', P.TOOL.liquify.mode === 'pinch');
+  P.UI.refresh();
+  ck('...and the panel shows which one', LD.getElementById('lqModes')
+       .querySelector('[data-lq="pinch"]').classList.contains('on'));
+  var lqSizeWas = P.TOOL.liquify.size;
+  dragReadout('lqSizeVal', 60);
+  ck('size drags up and down like the brush numbers do',
+     P.TOOL.liquify.size > lqSizeWas, lqSizeWas + ' -> ' + P.TOOL.liquify.size);
+  var lqStrWas = P.TOOL.liquify.strength;
+  dragReadout('lqStrengthVal', -40);
+  ck('...so does strength', P.TOOL.liquify.strength < lqStrWas,
+     lqStrWas + '% -> ' + P.TOOL.liquify.strength + '%');
+  ck('strength cannot be dragged below 1%', (function(){
+    dragReadout('lqStrengthVal', -900);
+    return P.TOOL.liquify.strength >= 1;
+  })(), P.TOOL.liquify.strength + '%');
+
+  LD.getElementById('btnLqApply').click();
+  ck('Apply leaves the curves where the pen put them', P.Strokes.list.length === 2);
+  LD.getElementById('btnLqClose').click();
+  ck('closing the panel leaves the tool', P.TOOL.mode !== 'liquify' &&
+     LD.getElementById('liquifyPanel').classList.contains('hidden'));
+  P.TOOL.liquify.mode = 'push'; P.TOOL.liquify.size = 120;
+  P.TOOL.liquify.strength = 55; P.TOOL.liquify.range = 60;
+  P.setTool('draw'); reset();
+
+  /* ================= geometry export ================= */
+  group('Geometry export — OBJ and STL');
+  /* Verified against the CURVE, not against the writers: a round brush swept
+     along a straight line is a 12-sided prism, so its exported solid has a
+     volume that can be predicted from the polyline and the nib alone — and a
+     signed volume is positive only if every facet faces outward, which is the
+     one thing a slicer cannot recover for you. */
+  var EXP = P.Export;
+  var _l3 = new THREE.Line3(), _cp = new THREE.Vector3(), _pv = new THREE.Vector3();
+
+  function mmPolyline(st){
+    return st.pts.map(function(q){ return q.p.clone().multiplyScalar(1000); });
+  }
+  function distToPolyline(x, y, z, poly){
+    _pv.set(x, y, z);
+    var best = Infinity;
+    for(var i=0;i+1<poly.length;i++){
+      _l3.set(poly[i], poly[i+1]);
+      _l3.closestPointToPoint(_pv, true, _cp);
+      best = Math.min(best, _cp.distanceTo(_pv));
+    }
+    if(poly.length === 1) best = poly[0].distanceTo(_pv);
+    return best;
+  }
+  /* signed volume of a triangle soup: positive iff the solid is closed and
+     wound outward (divergence theorem on x -> x/3) */
+  function soupVolume(attr){
+    var v = 0;
+    for(var i=0;i<attr.count;i+=3){
+      var ax=attr.getX(i),   ay=attr.getY(i),   az=attr.getZ(i);
+      var bx=attr.getX(i+1), by=attr.getY(i+1), bz=attr.getZ(i+1);
+      var cx=attr.getX(i+2), cy=attr.getY(i+2), cz=attr.getZ(i+2);
+      v += (ax*(by*cz - bz*cy) + ay*(bz*cx - bx*cz) + az*(bx*cy - by*cx)) / 6;
+    }
+    return v;
+  }
+
+  reset();
+  P.TOOL.autoGuide = false; P.TOOL.pressureOn = false; P.TOOL.stableOn = false;
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 20; P.TOOL.opacity = 1;
+  P.TOOL.color.set('#c8323c');
+  pen([{x:CX-160,y:CY},{x:CX-80,y:CY},{x:CX,y:CY},{x:CX+80,y:CY},{x:CX+160,y:CY}]);
+  ck('a straight curve to export', P.Strokes.list.length === 1,
+     P.Strokes.list[0].pts.length + ' points');
+
+  var eParts = EXP.collect();
+  var eStat  = EXP.stats(eParts);
+  ck('one exported object per curve', eParts.length === P.Strokes.list.length,
+     eParts.length + ' object(s), ' + eStat.triangles + ' triangles');
+  ck('the tube is actually tessellated', eStat.triangles > 100);
+
+  var eStroke = P.Strokes.list[0];
+  var ePoly = mmPolyline(eStroke);
+  var eRad = eStroke.baseRadius * 1000 * P.BRUSH[eStroke.brush].wide;
+  var eLen = 0;
+  for(var ei=1;ei<ePoly.length;ei++) eLen += ePoly[ei].distanceTo(ePoly[ei-1]);
+
+  var offLo = Infinity, offHi = 0;
+  for(ei=0;ei<eParts[0].pos.length;ei+=3){
+    var dOff = distToPolyline(eParts[0].pos[ei], eParts[0].pos[ei+1], eParts[0].pos[ei+2], ePoly);
+    offLo = Math.min(offLo, dOff); offHi = Math.max(offHi, dOff);
+  }
+  /* off by 1000x and this fails by three orders of magnitude, so it doubles as
+     the units check: a 20mm nib exports as a 10mm-radius tube, not 0.01 */
+  ck('every exported vertex sits on the nib radius, in millimetres',
+     offHi <= eRad*1.02 && offHi >= eRad*0.9,
+     'r ' + offLo.toFixed(2) + '–' + offHi.toFixed(2) + 'mm, nib ' + eRad.toFixed(2) + 'mm');
+
+  var eStl = EXP.stlBuffer(eParts);
+  ck('binary STL is exactly 84 + 50 bytes per triangle',
+     eStl.byteLength === 84 + eStat.triangles*50, eStl.byteLength + ' bytes');
+  ck('its header does not begin with "solid", or readers take it for ASCII',
+     String.fromCharCode.apply(null, new Uint8Array(eStl, 0, 5)).toLowerCase() !== 'solid');
+
+  var eBack = P.Import.parseSTL(eStl);
+  ck('the app reads its own binary STL back',
+     !!eBack && eBack.attributes.position.count === eStat.triangles*3);
+
+  var eVol = soupVolume(eBack.attributes.position);
+  /* a regular 12-gon of circumradius r has area 3r^2, and the caps are flat */
+  var eWant = 3 * eRad*eRad * eLen;
+  ck('the solid is wound outward, not inside out', eVol > 0,
+     (eVol/1000).toFixed(1) + ' cm^3');
+  ck('and its volume is the tube the curve describes',
+     Math.abs(eVol/eWant - 1) < 0.05,
+     'got ' + eVol.toFixed(0) + 'mm^3, predicted ' + eWant.toFixed(0));
+
+  var eAscii = EXP.stlSource(eParts, {name:'plume-test'});
+  ck('ASCII STL writes one facet per triangle',
+     (eAscii.match(/facet normal/g) || []).length === eStat.triangles);
+  var eAsciiGeom = P.Import.parseSTL(new W.TextEncoder().encode(eAscii).buffer);
+  ck('the app reads its own ASCII STL back',
+     !!eAsciiGeom && eAsciiGeom.attributes.position.count === eStat.triangles*3);
+
+  var eObjSrc = EXP.objSource(eParts, {name:'plume-test'});
+  ck('OBJ points at its material library', /^mtllib plume-test\.mtl$/m.test(eObjSrc.obj));
+  ck('one object block per curve',
+     (eObjSrc.obj.match(/^o /gm) || []).length === eParts.length);
+  var eObjGeom = P.Import.parseOBJ(eObjSrc.obj);
+  ck('the app reads its own OBJ back',
+     !!eObjGeom && eObjGeom.attributes.position.count === eStat.triangles*3);
+  /* two writers, written independently, describing one solid */
+  var eObjVol = soupVolume(eObjGeom.attributes.position);
+  ck('OBJ and STL describe the same solid',
+     Math.abs(eObjVol - eVol) / Math.abs(eVol) < 1e-3,
+     'delta ' + (100*Math.abs(eObjVol-eVol)/Math.abs(eVol)).toFixed(4) + '%');
+
+  ck('vertex colours are off by default', !/^v (-?[\d.]+ ){3}[\d.]/m.test(eObjSrc.obj));
+  var eVC = EXP.objSource(eParts, {name:'plume-test', vertexColors:true});
+  ck('...and add rgb to the v lines when asked', /^v (-?[\d.]+ ){5}[\d.]+$/m.test(eVC.obj));
+  ck('...without breaking the app\'s own reader',
+     P.Import.parseOBJ(eVC.obj).attributes.position.count === eStat.triangles*3);
+
+  /* colour and opacity travel in the .mtl */
+  P.TOOL.color.set('#3264c8'); P.TOOL.opacity = 0.5; P.TOOL.brush = 'rectangle';
+  pen([{x:CX-140,y:CY+90},{x:CX,y:CY+120},{x:CX+140,y:CY+80}]);
+  var eParts2 = EXP.collect();
+  var eSrc2 = EXP.objSource(eParts2, {name:'plume-test'});
+  ck('a second curve exports as a second object', eParts2.length === 2);
+  ck('one material per distinct colour',
+     (eSrc2.mtl.match(/^newmtl /gm) || []).length === 2,
+     (eSrc2.mtl.match(/^newmtl /gm) || []).join(' ').trim());
+  var eKd = /^newmtl plume_c8323c$[\s\S]*?^Kd ([\d.]+) ([\d.]+) ([\d.]+)$/m.exec(eSrc2.mtl);
+  ck('the material carries the curve colour', !!eKd &&
+     Math.abs(parseFloat(eKd[1]) - 200/255) < 1e-3 &&
+     Math.abs(parseFloat(eKd[2]) - 50/255) < 1e-3 &&
+     Math.abs(parseFloat(eKd[3]) - 60/255) < 1e-3,
+     eKd ? eKd.slice(1).join(', ') : 'no Kd');
+  ck('opacity travels as the material dissolve', /^newmtl plume_3264c8_a50$/m.test(eSrc2.mtl) &&
+     /^d 0\.5$/m.test(eSrc2.mtl));
+  ck('each object references its own material',
+     (eSrc2.obj.match(/^usemtl /gm) || []).length === 2);
+
+  /* selection, guides, and the empty case */
+  P.Strokes.setSelected(P.Strokes.list[1], true);
+  ck('a selection exports on its own',
+     EXP.collect({selectionOnly:true}).length === 1);
+  P.Strokes.clearSelection();
+
+  var eZ = EXP.collect({zUp:true})[0];
+  ck('zUp rolls Y-up over to Z-up for printing',
+     Math.abs(eZ.pos[1] + eParts[0].pos[2]) < 1e-3 &&
+     Math.abs(eZ.pos[2] - eParts[0].pos[1]) < 1e-3);
+
+  reset();
+  P.TOOL.autoGuide = true;
+  pen(circle(CX, CY, 60));
+  ck('a guide is not geometry, so it is left out', EXP.collect().length === 0);
+  ck('...but can be asked for', EXP.collect({guides:true}).length === 1);
+
+  /* Duplicate points are a hole in an exported solid: two rings land on top of
+     one another, every triangle between them has zero area, and the writer
+     drops degenerate faces — so the tube opens up where nothing looked wrong
+     on screen. A guide that clamps off-edge samples is the way they get made. */
+  reset();
+  P.TOOL.stableOn = false;
+  P.Guides.setActive(P.Guides.primitive('sphere', 32, 1));
+  P.TOOL.brush = 'cube'; P.TOOL.sizeMM = 30; P.TOOL.pressureOn = true;
+  pen([{x:CX-300,y:CY-40},{x:CX-100,y:CY},{x:CX+100,y:CY+30},{x:CX+300,y:CY-20}]);
+  var dupWorst = Infinity, dupCount = 0;
+  for(var dq=0; dq<P.Strokes.list.length; dq++){
+    var dst = P.Strokes.list[dq];
+    for(var dp=1; dp<dst.pts.length; dp++){
+      var gap = dst.pts[dp].p.distanceTo(dst.pts[dp-1].p);
+      if(gap < 1e-5) dupCount++;
+      dupWorst = Math.min(dupWorst, gap);
+    }
+  }
+  ck('a committed curve never holds the same point twice', dupCount === 0,
+     'closest pair ' + (dupWorst*1e6).toFixed(1) + ' micrometres apart');
+  ck('...so nothing degenerate reaches the exporter', (function(){
+    var parts11 = P.Export.collect();
+    for(var q11=0; q11<parts11.length; q11++){
+      var raw = parts11[q11].stroke.mesh.geometry.index.count/3;
+      if(parts11[q11].tris.length/3 !== raw) return false;
+    }
+    return parts11.length > 0;
+  })());
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14;
+  reset();
+
+  /* Every brush, not just the round one: a solid is only printable if each
+     directed edge appears exactly once — i.e. the surface is closed AND every
+     face agrees with its neighbours. This is the check that caught the tube
+     walls being wound inside out, which nothing on screen made obvious. */
+  function partVolume(part){
+    var v = 0, pos = part.pos, tris = part.tris;
+    for(var i=0;i<tris.length;i+=3){
+      var a=tris[i]*3, b=tris[i+1]*3, c=tris[i+2]*3;
+      v += (pos[a]  *(pos[b+1]*pos[c+2] - pos[b+2]*pos[c+1]) +
+            pos[a+1]*(pos[b+2]*pos[c]   - pos[b]  *pos[c+2]) +
+            pos[a+2]*(pos[b]  *pos[c+1] - pos[b+1]*pos[c])) / 6;
+    }
+    return v;
+  }
+  function openEdges(part){
+    var seen = {}, tris = part.tris, i, k;
+    for(i=0;i<tris.length;i+=3){
+      var t = [tris[i], tris[i+1], tris[i+2]];
+      for(k=0;k<3;k++){
+        var key = t[k] + '>' + t[(k+1)%3];
+        seen[key] = (seen[key] || 0) + 1;
+      }
+    }
+    var bad = 0;
+    for(k in seen){
+      if(seen[k] !== 1) bad++;                       // two faces the same way round
+      var back = k.split('>');
+      if(!seen[back[1] + '>' + back[0]]) bad++;      // nothing on the other side
+    }
+    return bad;
+  }
+
+  reset();
+  P.TOOL.autoGuide = false; P.TOOL.stableOn = false; P.TOOL.pressureOn = true;
+  var eBrushes = Object.keys(P.BRUSH), eNotClosed = [], eInsideOut = [], eTri = 0;
+  for(var ebi=0;ebi<eBrushes.length;ebi++){
+    P.Strokes.clear(); P.History.clear();
+    P.TOOL.brush = eBrushes[ebi]; P.TOOL.sizeMM = 6 + ebi*5;
+    pen([{x:CX-170,y:CY-40},{x:CX-40,y:CY+30},{x:CX+70,y:CY-30},{x:CX+180,y:CY+40}]);
+    var ePart = EXP.collect()[0];
+    if(!ePart){ eNotClosed.push(eBrushes[ebi] + '(nothing)'); continue; }
+    eTri += ePart.tris.length/3;
+    if(openEdges(ePart)) eNotClosed.push(eBrushes[ebi] + '(' + openEdges(ePart) + ')');
+    if(partVolume(ePart) <= 0) eInsideOut.push(eBrushes[ebi]);
+  }
+  ck('every brush exports a closed surface, with no edge left open',
+     eNotClosed.length === 0, eNotClosed.join(' ') || eBrushes.length + ' brushes, ' + eTri + ' triangles');
+  ck('...and every one of them is wound outward, not inside out',
+     eInsideOut.length === 0, eInsideOut.join(' ') || 'all positive volume');
+
+  reset();
+  ck('an empty sketch exports nothing rather than a broken file',
+     EXP.collect().length === 0 && EXP.download('obj') === null);
+
+  /* the buttons, without actually writing files to the machine */
+  var eSaved = [], eRealSave = EXP.saveBlob;
+  EXP.saveBlob = function(blob, filename){ eSaved.push({name:filename, size:blob.size}); };
+  try {
+    P.TOOL.autoGuide = false;
+    pen([{x:CX-120,y:CY},{x:CX,y:CY+40},{x:CX+120,y:CY}]);
+    W.document.getElementById('btnOBJ').click();
+    ck('the OBJ button writes an .obj and its .mtl',
+       eSaved.length === 2 && /^plume-\d+\.obj$/.test(eSaved[0].name) &&
+       /^plume-\d+\.mtl$/.test(eSaved[1].name),
+       eSaved.map(function(f){ return f.name; }).join(' + '));
+    eSaved.length = 0;
+    W.document.getElementById('btnSTL').click();
+    var eTri = EXP.stats(EXP.collect()).triangles;
+    ck('the STL button writes one binary .stl',
+       eSaved.length === 1 && /^plume-\d+\.stl$/.test(eSaved[0].name) &&
+       eSaved[0].size === 84 + eTri*50,
+       eSaved.length ? eSaved[0].name + ', ' + eSaved[0].size + ' bytes' : 'nothing written');
+  } finally {
+    EXP.saveBlob = eRealSave;
+  }
+  P.TOOL.pressureOn = true; P.TOOL.opacity = 1; P.TOOL.brush = 'pen';
 
   /* ================= compact / responsive ================= */
   group('Responsive layout');
@@ -780,8 +2523,19 @@ function run(W){
     }
     ck('compact tool buttons meet a 44px target', small === 0 && tb.length > 0,
        tb.length + ' visible buttons');
-    ck('toggle pairs stay merged when compact', tb.length === 4,
-       tb.map(function(b){ return b.dataset.tool; }).join(','));
+    /* The rule, rather than a count: a toggle pair shows ONE of its two
+       buttons and keeps the other in the DOM behind a repeat tap. Stated as a
+       magic number this needed editing every time a tool was added, which is
+       how it came to assert a stale 4. */
+    var hidden17 = Array.from(D.getElementById('tools')
+                     .querySelectorAll('button[data-tool].alt'))
+                     .filter(function(b){ return b.getBoundingClientRect().width > 0; });
+    var expect17 = D.getElementById('tools')
+                     .querySelectorAll('button[data-tool]:not(.alt)').length;
+    ck('toggle pairs stay merged when compact',
+       tb.length === expect17 && hidden17.length === 0,
+       tb.map(function(b){ return b.dataset.tool; }).join(',') +
+       ' visible, ' + hidden17.length + ' partners showing');
 
     var dk = rect('dock');
     ck('dock is pinned to the bottom', Math.abs(dk.bottom - vh) < 2);
@@ -893,6 +2647,54 @@ function run(W){
   DD.getElementById('btnStage').click();
   ck('stage panel clears the tool rail', scan(base.concat(['stagePanel'])).length === 0,
      scan(base.concat(['stagePanel'])).join(', ') || 'clean');
+
+  /* The Scene tab grew from two rows to a dozen. Every control in it has to
+     stay reachable, and the background swatch in particular has to keep an
+     edge you can see even when it holds the panel's own colour — with no ring
+     it reads as an empty label and the setting looks like it was removed. */
+  (function sceneTab(){
+    /* the compact-layout block above unhides every sheet, so btnStage's toggle
+       parity cannot be relied on — put the panel in a known state first */
+    DD.getElementById('stagePanel').classList.remove('hidden');
+    P.UI.refresh();
+    var tab = DD.querySelector('#stageTabs [data-tab="env"]');
+    tab.click();
+    var sp = DD.getElementById('stagePanel');
+    ck('Scene tab shows the background colour picker',
+       !DD.getElementById('bodyEnv').classList.contains('hidden') &&
+       DD.getElementById('bgPick').getBoundingClientRect().width > 10);
+
+    var spb = sp.getBoundingClientRect(), spill = [];
+    var kids = DD.querySelectorAll('#bodyEnv button, #bodyEnv input, #bodyEnv .val');
+    for(var q=0;q<kids.length;q++){
+      var kb = kids[q].getBoundingClientRect();
+      if(kb.width > 0 && (kb.right > spb.right + 0.5 || kb.left < spb.left - 0.5))
+        spill.push(kids[q].id || kids[q].textContent.trim());
+    }
+    ck('no Scene control spills past the panel edge', spill.length === 0,
+       spill.join(', ') || 'clean');
+    ck('the Scene panel needs no sideways scroll', sp.scrollWidth <= sp.clientWidth,
+       sp.scrollWidth + ' <= ' + sp.clientWidth);
+
+    /* the ring is on the input, not on ::-webkit-color-swatch: the input's own
+       overflow:hidden would clip a shadow drawn inside it */
+    var ring = W.getComputedStyle(DD.getElementById('bgPick')).boxShadow;
+    ck('the background swatch carries its own ring', /\d/.test(ring) && ring !== 'none',
+       ring.slice(0, 46));
+
+    /* and it is wired to the scene, not just present */
+    var was = P.ENV.bg.getHexString();
+    var pick = DD.getElementById('bgPick');
+    pick.value = '#3366cc';
+    pick.dispatchEvent(new W.Event('input', { bubbles: true }));
+    ck('editing it repaints the background', P.ENV.bg.getHexString() === '3366cc',
+       '#' + P.ENV.bg.getHexString());
+    pick.value = '#' + was;
+    pick.dispatchEvent(new W.Event('input', { bubbles: true }));
+
+    DD.querySelector('#stageTabs [data-tab="group"]').click();
+  })();
+
   DD.getElementById('btnStage').click();
 
   ck('joystick is hidden while nothing is selected', !shown('joy'));
@@ -903,14 +2705,1133 @@ function run(W){
   ck('joystick appears when there is something to move', shown('joy'));
   ck('and still does not overlap anything', scan(base.concat(['joy'])).length === 0,
      scan(base.concat(['joy'])).join(', ') || 'clean');
+  /* liquify always runs with a selection, so it shares the screen with the
+     joystick and the selection bar every single time it is open */
+  P.setTool('liquify'); P.UI.refresh();
+  var lqScan = base.concat(['joy','selBar','liquifyPanel']);
+  ck('the liquify strip clears everything else on screen',
+     scan(lqScan).length === 0, scan(lqScan).join(', ') || 'clean');
+  ck('...taking the selection bar\u2019s place rather than fighting it for it',
+     !shown('selBar') && shown('liquifyPanel'));
+  P.setTool('select'); P.UI.refresh();
   P.Strokes.clearSelection(); P.onSceneChange();
   ck('joystick hides again', !shown('joy'));
+
+  /* ---- the axis handles stay where you left them ----
+     They used to be drawn wherever each world axis happened to project to, so
+     the handle you were reaching for slid out from under your thumb every time
+     you orbited, and two axes could crowd into one place while the third had a
+     third of the ring to itself. */
+  reset();
+  P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+  pen([{x:CX-80,y:CY},{x:CX,y:CY},{x:CX+80,y:CY}]);
+  var joySt = P.Strokes.list[0];
+  P.Strokes.setSelected(joySt, true);
+  P.setTool('select'); P.UI.refresh();
+
+  function labAt(k21){
+    var el21 = D.getElementById('lab' + k21);
+    return { x:+el21.getAttribute('x'), y:+el21.getAttribute('y') };
+  }
+  function allLabs(){ return { X:labAt('X'), Y:labAt('Y'), Z:labAt('Z') }; }
+  function lookFrom(th21, ph21){
+    P.VIEW.theta = th21; P.VIEW.phi = ph21; P.applyCamera(); P.UI.layoutJoystick();
+    return allLabs();
+  }
+  var view1 = lookFrom(0, 1.1), view2 = lookFrom(1.9, 0.5), view3 = lookFrom(-2.6, 2.2);
+  function sameSpot(a21, b21){
+    return ['X','Y','Z'].every(function(k21){
+      return Math.abs(a21[k21].x - b21[k21].x) < 0.01 &&
+             Math.abs(a21[k21].y - b21[k21].y) < 0.01;
+    });
+  }
+  ck('the joystick axis handles do not move when the camera orbits',
+     sameSpot(view1, view2) && sameSpot(view1, view3),
+     'X at ' + view1.X.x + ',' + view1.X.y + ' from every angle');
+
+  var C21 = 54;
+  var angs21 = ['X','Y','Z'].map(function(k21){
+    return Math.atan2(view1[k21].y - C21, view1[k21].x - C21) * 180/Math.PI;
+  }).sort(function(m21, n21){ return m21 - n21; });
+  var gaps21 = [angs21[1]-angs21[0], angs21[2]-angs21[1],
+                360 - (angs21[2]-angs21[0])];
+  ck('...and sit a third of the ring apart',
+     gaps21.every(function(g21){ return Math.abs(g21 - 120) < 0.5; }),
+     gaps21.map(function(g21){ return g21.toFixed(0); }).join(' / ') + ' degrees');
+
+  /* ONLY THE PLACEMENT IS FIXED. Dragging an axis still has to move along that
+     world axis, using its real screen direction — which is exactly what fixing
+     the arcs could have broken. */
+  (function(){
+    P.VIEW.theta = 0.8; P.VIEW.phi = 1.0; P.applyCamera(); P.UI.layoutJoystick();
+    var before21 = joySt.pts[0].p.clone();
+    var pad = D.getElementById('joyPad'), r21 = pad.getBoundingClientRect();
+    /* press on the X arc: a third of the ring right and down from centre */
+    var px = r21.left + r21.width  * (54 + Math.cos(Math.PI/6)*43) / 108;
+    var py = r21.top  + r21.height * (54 + Math.sin(Math.PI/6)*43) / 108;
+    function padEv(t21, x21, y21, b21){
+      pad.dispatchEvent(new W.PointerEvent(t21, {pointerId:77, pointerType:'touch',
+        clientX:x21, clientY:y21, buttons:b21, bubbles:true, cancelable:true}));
+    }
+    padEv('pointerdown', px, py, 1);
+    padEv('pointermove', px + 40, py + 24, 1);
+    padEv('pointerup',   px + 40, py + 24, 0);
+    var moved = joySt.pts[0].p.clone().sub(before21);
+    ck('...while dragging one still moves along that world axis',
+       moved.length() > 1e-6 &&
+       Math.abs(moved.x) > 20 * Math.max(Math.abs(moved.y), Math.abs(moved.z)),
+       'moved (' + moved.x.toFixed(3) + ', ' + moved.y.toFixed(3) + ', ' +
+       moved.z.toFixed(3) + ')');
+  })();
+  reset();
+
+  /* ---- the rail shows the brush you are holding ---- */
+  var railBtn = D.getElementById('brushType');
+  var brushMarks = {}, allMatch = true;
+  Object.keys(P.BRUSH).forEach(function(bn21){
+    P.TOOL.brush = bn21; P.UI.refresh();
+    var gridBtn = D.querySelector('#brushGrid button[data-brush="' + bn21 + '"]');
+    if(!gridBtn || railBtn.innerHTML !== gridBtn.innerHTML) allMatch = false;
+    brushMarks[railBtn.innerHTML] = 1;
+  });
+  ck('the brush button wears the icon of the brush in hand',
+     allMatch, allMatch ? 'all ' + Object.keys(P.BRUSH).length + ' match their grid icon'
+                        : 'a brush showed the wrong mark');
+  ck('...and every brush has its own mark, not a shared one',
+     Object.keys(brushMarks).length === Object.keys(P.BRUSH).length,
+     Object.keys(brushMarks).length + ' distinct icons for ' +
+     Object.keys(P.BRUSH).length + ' brushes');
+  P.TOOL.brush = 'pen'; P.UI.refresh();
+
+  /* ================= lighting ================= */
+  group('Lighting — one key light you can aim, colour and dim');
+
+  function litStroke(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.pinned = true; P.VIEW.theta = 0.4; P.VIEW.phi = 1.1; P.applyCamera();
+    P.TOOL.autoGuide = false; P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 90;
+    P.TOOL.color.set('#c8c8c8'); P.TOOL.opacity = 1;
+    P.refreshDrawPlane();
+    pen([{x:CX-160,y:CY},{x:CX,y:CY},{x:CX+160,y:CY}]);
+    return P.Strokes.list[0];
+  }
+  /* ACROSS the tube: a horizontal stroke's normals barely change along its
+     length, so a lengthwise scan cannot see the shading fall off at all */
+  function acrossTube(){
+    P.renderer.render(P.scene, P.cam());
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpL = P.viewport(), buf26 = new W.Uint8Array(4*200);
+    gl.readPixels(Math.round(CX*dpr), Math.round((vpL.h - CY - 100)*dpr), 1, 200,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf26);
+    var seen26 = {}, n26 = 0, sum26 = 0;
+    for(var q26=0;q26<200;q26++){
+      var r26 = buf26[q26*4], g26 = buf26[q26*4+1], b26 = buf26[q26*4+2];
+      if(Math.abs(r26-g26) < 12 && Math.abs(g26-b26) < 12 && r26 < 215){
+        seen26[r26] = 1; n26++; sum26 += r26;
+      }
+    }
+    return { px:n26, levels:Object.keys(seen26).length, mean:sum26/(n26||1) };
+  }
+
+  var litSt = litStroke();
+  ck('every stroke shares the one light rather than carrying a copy',
+     litSt.mesh.material.uniforms.uLightDir === P.LIGHT_UNIFORMS.uLightDir &&
+     litSt.mesh.material.uniforms.uAmbient === P.LIGHT_UNIFORMS.uAmbient,
+     'uniform objects are shared, so aiming the light is one assignment');
+
+  /* the defaults have to reproduce the light that used to be hardcoded, or
+     every sketch already drawn would shift the day this landed */
+  var dir26 = P.LIGHT_UNIFORMS.uLightDir.value;
+  ck('the default light is the one the shader used to hold hardcoded',
+     Math.abs(dir26.x - 0.319) < 0.002 && Math.abs(dir26.y - 0.618) < 0.002 &&
+     Math.abs(dir26.z - 0.718) < 0.002 && Math.abs(P.LIGHT.ambient - 0.66) < 1e-9,
+     '(' + dir26.x.toFixed(3) + ', ' + dir26.y.toFixed(3) + ', ' +
+     dir26.z.toFixed(3) + ') at ambient ' + P.LIGHT.ambient);
+
+  var base26 = acrossTube();
+  ck('a stroke is shaded across its width, not flat',
+     base26.px > 10 && base26.levels > 8,
+     base26.levels + ' shades over ' + base26.px + ' pixels');
+
+  P.LIGHT.az = -2.0; P.applyLight();
+  var moved26 = acrossTube();
+  ck('aiming the light somewhere else changes the shading',
+     Math.abs(moved26.mean - base26.mean) > 8,
+     'mean ' + base26.mean.toFixed(1) + ' -> ' + moved26.mean.toFixed(1));
+  P.LIGHT.az = 0.4185; P.applyLight();
+
+  P.LIGHT.ambient = 0.05; P.applyLight();
+  var dark26 = acrossTube();
+  ck('dropping the ambient darkens the unlit side',
+     dark26.mean < base26.mean - 8,
+     'mean ' + base26.mean.toFixed(1) + ' -> ' + dark26.mean.toFixed(1));
+  P.LIGHT.ambient = 0.66; P.applyLight();
+
+  P.LIGHT.color.set('#ff4020'); P.applyLight();
+  var warm26 = (function(){
+    P.renderer.render(P.scene, P.cam());
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpW = P.viewport(), bw = new W.Uint8Array(4*400), warm = 0;
+    gl.readPixels(Math.round((CX-200)*dpr), Math.round((vpW.h - CY)*dpr), 400, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, bw);
+    for(var q=0;q<400;q++) if(bw[q*4] > bw[q*4+2] + 25) warm++;
+    return warm;
+  })();
+  ck('a coloured light tints what it falls on', warm26 > 100,
+     warm26 + ' pixels went warm under a red light');
+  P.LIGHT.color.set('#ffffff'); P.applyLight();
+
+  /* TOON bands the same term rather than replacing it */
+  var smooth26 = acrossTube().levels;
+  P.LIGHT.toon = true; P.LIGHT.toonSteps = 4; P.applyLight();
+  var toon26 = acrossTube().levels;
+  ck('toon shading bands the gradient into steps',
+     toon26 < smooth26 / 3 && toon26 >= 2,
+     smooth26 + ' shades became ' + toon26);
+  P.LIGHT.toon = false; P.applyLight();
+
+  /* the pad aims it, and the light belongs to the sketch */
+  var padEl = D.getElementById('lightPad');
+  ck('the environment panel carries a light pad and its readouts',
+     !!padEl && !!D.getElementById('lightIntVal') &&
+     !!D.getElementById('lightAmbVal') && !!D.getElementById('lightPick'));
+
+  P.LIGHT.az = -1.1; P.LIGHT.alt = 0.3; P.LIGHT.intensity = 1.7;
+  P.LIGHT.color.set('#88ccff'); P.LIGHT.toon = true; P.applyLight();
+  var lightJson = JSON.stringify(P.Doc.serialize());
+  P.LIGHT.az = 0; P.LIGHT.alt = 1; P.LIGHT.intensity = 1;
+  P.LIGHT.color.set('#ffffff'); P.LIGHT.toon = false; P.applyLight();
+  P.Doc.clear();
+  P.Doc.restore(JSON.parse(lightJson));
+  ck('the light is saved with the sketch and comes back with it',
+     Math.abs(P.LIGHT.az + 1.1) < 1e-3 && Math.abs(P.LIGHT.alt - 0.3) < 1e-3 &&
+     Math.abs(P.LIGHT.intensity - 1.7) < 1e-3 &&
+     P.LIGHT.color.getHexString() === '88ccff' && P.LIGHT.toon === true,
+     'az ' + P.LIGHT.az.toFixed(2) + ', #' + P.LIGHT.color.getHexString() +
+     ', toon ' + P.LIGHT.toon);
+  P.LIGHT.toon = false; P.LIGHT.az = 0.4185; P.LIGHT.alt = 0.6664;
+  P.LIGHT.intensity = 1; P.LIGHT.ambient = 0.66;
+  P.LIGHT.color.set('#ffffff'); P.applyLight();
+  reset();
+
+  /* ================= post-processing ================= */
+  group('Post — depth of field, grain, pixelation');
+
+  /* Tools.begin resets the draw plane to the pivot when no guide is active,
+     so you cannot ask to draw AT a depth. Draw them together, then push them
+     apart along the view, which is the only way this scene has real depth in
+     it - and the reason a first pass at this check found DOF doing nothing. */
+  function threeDepths(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.autoGuide = false;
+    P.VIEW.pinned = true; P.VIEW.pivot.set(0,0,0);
+    P.VIEW.theta = 0.35; P.VIEW.phi = 1.2; P.VIEW.radius = 3.0; P.applyCamera();
+    P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 55; P.TOOL.opacity = 1;
+    var cols28 = ['#d9534f','#4a90d9','#e8c34a'], k28, i28;
+    for(k28=0;k28<3;k28++){
+      P.TOOL.color.set(cols28[k28]);
+      var c28 = [];
+      for(i28=0;i28<=14;i28++){
+        var t28 = i28/14*Math.PI*2;
+        c28.push({x:CX-150+k28*150+Math.cos(t28)*48, y:CY-40+Math.sin(t28)*48});
+      }
+      pen(c28);
+    }
+    var fwd28 = P.cam().getWorldDirection(new THREE.Vector3());
+    [-1.1, 0, 1.1].forEach(function(dz28, j28){
+      var st28 = P.Strokes.list[j28];
+      if(!st28 || !dz28) return;
+      for(var q28=0;q28<st28.pts.length;q28++) st28.pts[q28].p.addScaledVector(fwd28, dz28);
+      P.Strokes.freezeFrames(st28); P.Strokes.rebuild(st28);
+    });
+    P.Guides.setActive(null);
+    P.ENV.render = true;
+    P.FX.dofOn = false; P.FX.grainOn = false; P.FX.pixelOn = false;
+  }
+  /* how much a block of the image differs between two renders */
+  function frameDiff(setup28){
+    function grab(){
+      if(!P.renderWithFX(P.scene, P.cam())) P.renderer.render(P.scene, P.cam());
+      var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+      var vpF = P.viewport();
+      var w28 = Math.round(300*dpr), h28 = Math.round(200*dpr);
+      var b28 = new W.Uint8Array(4*w28*h28);
+      gl.readPixels(Math.round((CX-260)*dpr), Math.round((vpF.h - CY - 60)*dpr),
+                    w28, h28, gl.RGBA, gl.UNSIGNED_BYTE, b28);
+      return b28;
+    }
+    var before28 = grab();
+    setup28();
+    var after28 = grab();
+    var diff = 0;
+    for(var q=0;q<before28.length;q+=4){
+      if(Math.abs(before28[q] - after28[q]) > 6) diff++;
+    }
+    return diff / (before28.length/4);
+  }
+
+  threeDepths();
+  ck('depth of field blurs what is not at the orbit point',
+     frameDiff(function(){ P.FX.dofOn = true; P.FX.fstop = 1.8; }) > 0.04,
+     'rings sit at 1.9, 3.0 and 4.1 from a camera focused at 3.0');
+
+  /* THE SHARP ONE MUST STAY SHARP - a blur that ate the whole image would pass
+     the check above just as well. Sharpness measured as LOCAL CONTRAST: a
+     crisp edge steps between ink and ground in a pixel or two, a defocused one
+     ramps across a dozen. Trying to classify each pixel as ink or ground
+     instead put 9 soft pixels on the sharp ring and 7 on the blurred one -
+     three ink colours, their shadows and a lilac ground do not sort into two
+     buckets. */
+  (function(){
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpS = P.viewport();
+    if(!P.renderWithFX(P.scene, P.cam())) P.renderer.render(P.scene, P.cam());
+    function contrast(x0, wide){
+      var w29 = Math.round(wide*dpr), h29 = Math.round(190*dpr);
+      var b = new W.Uint8Array(4*w29*h29);
+      gl.readPixels(Math.round(x0*dpr), Math.round((vpS.h - CY - 60)*dpr), w29, h29,
+                    gl.RGBA, gl.UNSIGNED_BYTE, b);
+      var sum = 0, n = 0;
+      for(var y=0;y<h29;y++){
+        for(var x=1;x<w29;x++){
+          var i = (y*w29 + x)*4, j = i - 4;
+          sum += Math.abs(b[i] - b[j]); n++;
+        }
+      }
+      return sum / Math.max(n,1);
+    }
+    var nearBlur = contrast(CX-350, 220);      // the ring pushed towards us
+    var atFocus  = contrast(CX-80,  200);      // the one on the orbit point
+    ck('...while what is at the orbit point stays sharp',
+       atFocus > nearBlur * 1.6,
+       'edge contrast ' + atFocus.toFixed(2) + ' at the focused ring against ' +
+       nearBlur.toFixed(2) + ' at the near one');
+  })();
+  P.FX.dofOn = false;
+
+  threeDepths();
+  ck('grain lays noise over the image',
+     frameDiff(function(){ P.FX.grainOn = true; P.FX.grain = 80; }) > 0.25,
+     'at 80% level');
+  P.FX.grainOn = false;
+
+  threeDepths();
+  ck('pixelation quantises it to blocks',
+     frameDiff(function(){ P.FX.pixelOn = true; P.FX.pixel = 10; }) > 0.03,
+     'at a 10px block');
+  P.FX.pixelOn = false;
+
+  /* NONE OF IT OUTSIDE RENDER MODE. The pass is a cost you ask for. */
+  threeDepths();
+  P.FX.dofOn = true; P.FX.grainOn = true; P.FX.pixelOn = true;
+  P.ENV.render = false;
+  ck('no effect runs outside render mode',
+     P.fxActive() === false &&
+     P.renderWithFX(P.scene, P.cam()) === false,
+     'render mode off, so the pass declines and the frame goes straight out');
+  P.ENV.render = true;
+  ck('...and they all come back with it', P.fxActive() === true);
+  P.FX.dofOn = false; P.FX.grainOn = false; P.FX.pixelOn = false;
+  P.ENV.render = false;
+  reset();
+
+  /* ================= ground shadow ================= */
+  group('Ground shadow — the sketch thrown down the light');
+
+  function ringScene(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false; P.TOOL.autoGuide = false;
+    P.VIEW.pinned = true; P.VIEW.pivot.set(0,0,0);
+    P.VIEW.theta = 0.55; P.VIEW.phi = 1.15; P.VIEW.radius = 3.4; P.applyCamera();
+    P.refreshDrawPlane();
+    P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 60; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#d9534f');
+    var c27 = [];
+    for(var q27=0;q27<=14;q27++){
+      var t27 = q27/14*Math.PI*2;
+      c27.push({x:CX+Math.cos(t27)*52, y:CY-70+Math.sin(t27)*52});
+    }
+    pen(c27);
+    P.Guides.setActive(null);
+    P.LIGHT.az = 0.6; P.LIGHT.alt = 0.62; P.LIGHT.intensity = 1.3;
+    P.LIGHT.ambient = 0.5; P.applyLight();
+    P.ENV.groundShadow = true;
+  }
+  /* A BLOCK around the ring, not a guessed line. Where the shadow lands on
+     screen depends on the light, the camera and the ground all at once - the
+     first version of this sampled a row twenty pixels below centre and found
+     only background, because from this angle the ground the shadow falls on
+     projects ABOVE centre. Averaging a block that certainly contains it is
+     insensitive to all of that and still moves when the shadow appears. */
+  function groundMean(){
+    P.invalidateGroundShadow();
+    P.updateGroundShadow();
+    P.renderer.render(P.scene, P.cam());
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpG = P.viewport();
+    var w27 = Math.round(320*dpr), h27 = Math.round(200*dpr);
+    var buf27 = new W.Uint8Array(4*w27*h27), sum27 = 0;
+    gl.readPixels(Math.round((CX-160)*dpr), Math.round((vpG.h - CY - 40)*dpr),
+                  w27, h27, gl.RGBA, gl.UNSIGNED_BYTE, buf27);
+    for(var q=0;q<w27*h27;q++) sum27 += buf27[q*4];
+    return sum27/(w27*h27);
+  }
+
+  ringScene();
+  P.ENV.render = false;
+  var noShadow27 = groundMean();
+  P.ENV.render = true;
+  var withShadow27 = groundMean();
+  ck('render mode casts a shadow on the ground',
+     withShadow27 < noShadow27 - 1.5,
+     'ground reads ' + noShadow27.toFixed(1) + ' in draw mode, ' +
+     withShadow27.toFixed(1) + ' in render mode');
+
+  P.ENV.groundShadow = false;
+  var toggledOff27 = groundMean();
+  ck('...and the shadow toggle turns it off again',
+     Math.abs(toggledOff27 - noShadow27) < 0.5,
+     'back to ' + toggledOff27.toFixed(1) + ' against ' + noShadow27.toFixed(1));
+  P.ENV.groundShadow = true;
+
+  /* A LIGHT BELOW THE HORIZON has nothing sensible to cast. Compared against
+     the same light with shadows switched off, not against the earlier reading:
+     dropping the sun under the horizon darkens the STROKES in the sampled
+     block too, and that has nothing to do with whether a shadow was cast. */
+  var wasAlt27 = P.LIGHT.alt;
+  P.LIGHT.alt = -0.2; P.applyLight();
+  P.ENV.groundShadow = false;
+  var underNoCast = groundMean();
+  P.ENV.groundShadow = true;
+  var belowHorizon27 = groundMean();
+  ck('a light under the horizon casts nothing rather than something wrong',
+     Math.abs(belowHorizon27 - underNoCast) < 0.2,
+     'ground reads ' + belowHorizon27.toFixed(2) + ' against ' +
+     underNoCast.toFixed(2) + ' with casting off');
+  P.LIGHT.alt = wasAlt27; P.applyLight();
+
+  /* THE SHADOW IS CACHED. Orbiting does not move a shadow cast by a fixed
+     light onto a fixed ground, so spinning the view must not redraw it. */
+  P.ENV.render = true;
+  P.invalidateGroundShadow(); P.updateGroundShadow();
+  var passes27 = 0;
+  var realSet27 = P.renderer.setRenderTarget;
+  P.renderer.setRenderTarget = function(t27){
+    if(t27) passes27++;
+    return realSet27.apply(this, arguments);
+  };
+  for(var o27=0;o27<8;o27++){
+    P.VIEW.theta += 0.12; P.applyCamera();
+    P.updateGroundShadow();
+  }
+  var orbitPasses = passes27;
+  P.Strokes.list[0].color.set('#00aa55');
+  P.onSceneChange();
+  P.updateGroundShadow();
+  var afterEdit = passes27;
+  P.renderer.setRenderTarget = realSet27;
+  ck('orbiting does not redraw the shadow, but changing the sketch does',
+     orbitPasses === 0 && afterEdit > orbitPasses,
+     orbitPasses + ' passes over 8 orbits, ' + (afterEdit-orbitPasses) +
+     ' after an edit');
+
+  /* it is only scaffolding that does not cast: an empty sketch casts nothing */
+  P.Strokes.clear();
+  var emptyGround = groundMean();
+  ck('an empty sketch casts no shadow',
+     emptyGround > withShadow27 + 1.5, 'ground reads ' + emptyGround.toFixed(1));
+
+  P.ENV.render = false;
+  P.LIGHT.az = 0.4185; P.LIGHT.alt = 0.6664; P.LIGHT.intensity = 1;
+  P.LIGHT.ambient = 0.66; P.applyLight();
+  reset();
+
+  /* ================= selecting ================= */
+  group('Select — tapping, sweeping, lassoing');
+
+  function fourStrokes24(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof24 = [];
+    for(var q24=0;q24<=12;q24++) prof24.push({x:CX-220+440*(q24/12), y:CY});
+    pen(prof24);
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false; P.TOOL.sizeMM = 16;
+    for(var k24=0;k24<4;k24++){
+      pen([{x:CX-170+k24*95, y:CY-110},{x:CX-170+k24*95, y:CY},
+           {x:CX-170+k24*95, y:CY+110}]);
+    }
+    P.setTool('select');
+    P.Strokes.clearSelection();
+    return P.Strokes.list.slice();
+  }
+
+  /* A TAP ADDS. There is no modifier key on a tablet, so a tap that replaced
+     the selection left no way to pick two curves by tapping at all. */
+  fourStrokes24();
+  P.Tools.tapSelect(CX-170, CY, true);
+  var tap1 = P.Strokes.selection.length;
+  P.Tools.tapSelect(CX-75, CY, true);
+  var tap2 = P.Strokes.selection.length;
+  ck('tapping a second curve keeps the first',
+     tap1 === 1 && tap2 === 2, tap1 + ' then ' + tap2 + ' selected');
+  P.Tools.tapSelect(CX-75, CY, true);
+  ck('...and tapping it again takes it back out',
+     P.Strokes.selection.length === 1, P.Strokes.selection.length + ' selected');
+  P.Tools.tapSelect(CX, CY+240, true);
+  ck('...while a tap on empty space clears',
+     P.Strokes.selection.length === 0, P.Strokes.selection.length + ' selected');
+
+  /* SWEEPING picks up everything the hand crossed, including the curve under
+     the press and any the sampling would otherwise have stepped over. */
+  fourStrokes24();
+  penDown(CX-200, CY);
+  for(var q25=1;q25<=24;q25++) penMoveTo(CX-200+q25*17, CY);
+  penUpAt(CX+208, CY);
+  ck('sweeping across curves selects every one it crossed',
+     P.Strokes.selection.length === 4,
+     P.Strokes.selection.length + ' of 4, sampled every 17px across 16mm curves');
+  P.History.undo();
+  ck('...and the whole sweep undoes in one step',
+     P.Strokes.selection.length === 0,
+     P.Strokes.selection.length + ' left selected');
+
+  /* THE LASSO IS VISIBLE. The stylesheet holds display:none for the resting
+     state, and clearing the inline style let that rule apply again - so the
+     loop had a path and a display the whole time and still never showed. */
+  fourStrokes24();
+  P.setTool('lasso');
+  var lassoEl = D.getElementById('lassoPath');
+  penDown(CX-230, CY-150);
+  var shownMid = null;
+  [[CX+230,CY-150],[CX+230,CY+150],[CX-230,CY+150],[CX-230,CY-150]]
+    .forEach(function(pt24, i24){
+      penMoveTo(pt24[0], pt24[1]);
+      if(i24 === 1){
+        shownMid = { display: W.getComputedStyle(lassoEl).display,
+                     d: (lassoEl.getAttribute('d')||'').length };
+      }
+    });
+  ck('the lasso loop is drawn on screen while you drag it',
+     shownMid.display !== 'none' && shownMid.d > 10,
+     'display ' + shownMid.display + ', path of ' + shownMid.d + ' chars');
+  penUpAt(CX-230, CY-150);
+  ck('...it takes what it enclosed, and clears itself away',
+     P.Strokes.selection.length === 4 &&
+     W.getComputedStyle(lassoEl).display === 'none',
+     P.Strokes.selection.length + ' selected, then ' +
+     W.getComputedStyle(lassoEl).display);
+
+  /* LOFT TAKES THE SELECTION rather than asking for it again */
+  fourStrokes24();
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  P.Strokes.setSelected(P.Strokes.list[2], true);
+  var loftBefore = P.Strokes.selection.length;
+  P.setTool('loft');
+  ck('choosing Loft adopts the curves already selected',
+     loftBefore === 2 && P.Tools.loftCount() === 2 && !!P.Tools.loftPreview(),
+     loftBefore + ' selected became ' + P.Tools.loftCount() + ' staged');
+  P.Tools.stagedCancel();
+  P.setTool('draw');
+  reset();
+
+  /* ================= hover preview ================= */
+  group('Hover preview — the nib you are about to draw with');
+
+  /* FACT (C.3): hover previews brush size and colour on a guide. */
+  var hoverFill22 = null, hoverEdge22 = null;
+  P.scene.traverse(function(o22){
+    if(o22.isLineLoop && o22.renderOrder === 901) hoverEdge22 = o22;
+    else if(o22.isMesh && o22.renderOrder === 900) hoverFill22 = o22;
+  });
+  ck('the hover preview exists as a filled shape with an outline',
+     !!hoverFill22 && !!hoverEdge22,
+     (hoverFill22 ? 'fill' : 'no fill') + ', ' + (hoverEdge22 ? 'edge' : 'no edge'));
+
+  (function(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof22 = [];
+    for(var q22=0;q22<=16;q22++) prof22.push({x:CX-240+480*(q22/16), y:CY});
+    pen(prof22);
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.color.set('#2fbf55');
+
+    /* EVERY brush previews at the size it would actually lay down. The old
+       ring sized itself off baseRadius alone, ignoring each brush's own width
+       multiplier, and squashed itself only for two brushes by name. */
+    var wrong22 = [], names22 = Object.keys(P.BRUSH);
+    for(var b22=0; b22<names22.length; b22++){
+      P.TOOL.brush = names22[b22]; P.TOOL.sizeMM = 60;
+      P.updateHoverCursor(CX, CY, null);
+      var cfg22 = P.Strokes.cfgOf({ brush: names22[b22] });
+      var want22 = P.Strokes.nibHalfWidth(
+        { brush: names22[b22], baseRadius: P.Tools.baseRadius() },
+        P.Tools.baseRadius() * cfg22.wide);
+      var thick22 = P.Strokes.nibHalfThick(
+        { brush: names22[b22], baseRadius: P.Tools.baseRadius() },
+        P.Tools.baseRadius() * cfg22.wide);
+      if(!hoverFill22.visible ||
+         Math.abs(hoverFill22.scale.x - want22) > 1e-6 ||
+         Math.abs(hoverFill22.scale.y - thick22) > 1e-6){
+        wrong22.push(names22[b22]);
+      }
+    }
+    ck('every brush previews at the size it would actually draw',
+       wrong22.length === 0, wrong22.join(', ') || 'all ' + names22.length + ' match');
+
+    /* the ribbon is the case the old preview got most wrong */
+    P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 60; P.updateHoverCursor(CX, CY, null);
+    var wRatio22 = hoverFill22.scale.x / hoverFill22.scale.y;
+    ck('...so the wide brush previews as a broad ribbon, not a small circle',
+       hoverFill22.scale.x*2/P.MM > 150 && wRatio22 > 8,
+       (hoverFill22.scale.x*2/P.MM).toFixed(0) + ' x ' +
+       (hoverFill22.scale.y*2/P.MM).toFixed(0) + 'mm at a 60mm slider');
+
+    ck('...and the rectangle previews its fixed width and raised height',
+       Math.abs(hoverFill22.scale.x*2/P.MM - 22.4) > 1e6 ? false : (function(){
+         P.TOOL.brush = 'rectangle'; P.TOOL.sizeMM = 60;
+         P.updateHoverCursor(CX, CY, null);
+         return Math.abs(hoverFill22.scale.x*2/P.MM - 22.4) < 0.2 &&
+                hoverFill22.scale.y > hoverFill22.scale.x*3;
+       })(),
+       (hoverFill22.scale.x*2/P.MM).toFixed(1) + ' x ' +
+       (hoverFill22.scale.y*2/P.MM).toFixed(1) + 'mm');
+
+    /* colour and 50% */
+    P.TOOL.brush = 'pen'; P.TOOL.color.set('#3270cc');
+    P.updateHoverCursor(CX, CY, null);
+    ck('the preview carries the brush colour at half opacity',
+       hoverFill22.material.color.getHexString() === '3270cc' &&
+       Math.abs(hoverFill22.material.opacity - 0.5) < 1e-9,
+       '#' + hoverFill22.material.color.getHexString() + ' at ' +
+       hoverFill22.material.opacity);
+
+    /* size follows the slider */
+    P.TOOL.sizeMM = 20; P.updateHoverCursor(CX, CY, null);
+    var small22 = hoverFill22.scale.x;
+    P.TOOL.sizeMM = 80; P.updateHoverCursor(CX, CY, null);
+    ck('...and follows the size slider',
+       Math.abs(hoverFill22.scale.x / small22 - 4) < 0.01,
+       (hoverFill22.scale.x/small22).toFixed(2) + 'x for 20mm -> 80mm');
+
+    /* it lies ON the guide rather than facing the camera */
+    var nrm22 = new THREE.Vector3(0,0,1).applyQuaternion(hoverFill22.quaternion);
+    var hit22 = P.Tools.projectSample(CX, CY);
+    ck('the preview lies flat on the guide, not square to the camera',
+       !!hit22 && Math.abs(nrm22.dot(hit22.normal)) > 0.999,
+       'preview normal against the surface: ' +
+       (hit22 ? Math.abs(nrm22.dot(hit22.normal)).toFixed(4) : 'no hit'));
+
+    /* the eraser keeps its own size and its warning colour */
+    P.setTool('erase'); P.TOOL.eraserMM = 50;
+    P.updateHoverCursor(CX, CY, null);
+    ck('the eraser previews at its own size, in its own colour',
+       hoverFill22.material.color.getHexString() === 'ff5d7e' &&
+       Math.abs(hoverFill22.scale.x*2/P.MM - 50) < 0.2,
+       '#' + hoverFill22.material.color.getHexString() + ' at ' +
+       (hoverFill22.scale.x*2/P.MM).toFixed(0) + 'mm');
+
+    P.hideHoverCursor();
+    ck('...and it goes away when the pen does',
+       !hoverFill22.visible && !hoverEdge22.visible);
+    P.setTool('draw'); reset();
+  })();
+
+  /* ================= restyling a selection ================= */
+  group('Restyle — the brush panel edits selected curves');
+
+  function threeStrokes(){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    var sizes19 = [20, 40, 80], cols19 = ['#cc3232', '#32cc70', '#3270cc'];
+    for(var k19=0;k19<3;k19++){
+      P.TOOL.brush = 'pen'; P.TOOL.sizeMM = sizes19[k19];
+      P.TOOL.color.set(cols19[k19]); P.TOOL.opacity = 1;
+      pen([{x:CX-150,y:CY-80+k19*70},{x:CX,y:CY-80+k19*70},{x:CX+150,y:CY-80+k19*70}]);
+    }
+    var made19 = P.Strokes.list.slice();
+    for(k19=0;k19<made19.length;k19++) P.Strokes.setSelected(made19[k19], true);
+    P.UI.refresh();
+    return made19;
+  }
+  function widths(){
+    return P.Strokes.list.map(function(x){ return +(x.baseRadius*2/P.MM).toFixed(1); });
+  }
+
+  var trio = threeStrokes();
+  ck('three strokes of different widths are selected', trio.length === 3 &&
+     P.Strokes.selection.length === 3, widths().join(' / ') + 'mm');
+
+  /* SELECTING LOADS THE PANEL, so the slider starts where the selection is */
+  ck('selecting adopts the size the selection averages to',
+     Math.abs(P.UI.getSize() - (20+40+80)/3) < 0.5,
+     'panel reads ' + P.UI.getSize().toFixed(1) + 'mm for 20/40/80');
+  ck('...and the brush and opacity they agree on',
+     P.TOOL.brush === 'pen' && P.TOOL.opacity === 1,
+     P.TOOL.brush + ' at ' + P.TOOL.opacity);
+  /* they were drawn in three different colours, so there is nothing to adopt */
+  var mixedHex = P.Strokes.styleOf(P.Strokes.selection).hex;
+  ck('...but not a colour they do not agree on', mixedHex === null,
+     'shared colour: ' + mixedHex);
+
+  /* PROPORTIONAL: the spread of widths survives */
+  P.UI.styleOnce('resize', { scale: 2 });
+  var doubled = widths();
+  ck('the size control scales the selection proportionally',
+     doubled[0] === 40 && doubled[1] === 80 && doubled[2] === 160,
+     doubled.join(' / ') + 'mm');
+  ck('...so the thick and thin the drawing had is not flattened',
+     doubled[2] / doubled[0] === 4, 'ratio ' + (doubled[2]/doubled[0]).toFixed(1) + ':1');
+
+  /* colour, opacity and brush go on absolutely */
+  P.TOOL.color.set('#ffcc00');
+  P.UI.styleOnce('recolour', { color: P.TOOL.color });
+  P.UI.styleOnce('restyle opacity', { opacity: 0.4 });
+  P.UI.styleOnce('restyle brush', { brush: 'sketch' });
+  var allYellow = P.Strokes.list.every(function(x){ return x.color.getHexString() === 'ffcc00'; }),
+      allFaint  = P.Strokes.list.every(function(x){ return Math.abs(x.opacity - 0.4) < 1e-6; }),
+      allSketch = P.Strokes.list.every(function(x){ return x.brush === 'sketch'; });
+  ck('colour, opacity and brush all apply to the whole selection',
+     allYellow && allFaint && allSketch,
+     'colour ' + allYellow + ', opacity ' + allFaint + ', brush ' + allSketch);
+  ck('...and the strokes are rebuilt, not just relabelled',
+     P.Strokes.list.every(function(x){ return x.mesh && x.mesh.geometry.index.count > 0; }),
+     P.Strokes.list.map(function(x){
+       return x.mesh ? x.mesh.geometry.index.count/3 : 0; }).join('/') + ' triangles');
+
+  /* ONE HISTORY STEP PER EDIT */
+  P.History.undo();
+  ck('each edit is a single undo step', P.Strokes.list.every(function(x){
+       return x.brush === 'pen'; }) &&
+     P.Strokes.list.every(function(x){ return x.color.getHexString() === 'ffcc00'; }),
+     'brush reverted, colour still ' + P.Strokes.list[0].color.getHexString());
+  P.History.undo(); P.History.undo(); P.History.undo();
+  ck('...and unwinding them all restores what was drawn',
+     widths().join('/') === '20/40/80' &&
+     P.Strokes.list[0].color.getHexString() === 'cc3232',
+     widths().join('/') + 'mm, first is #' + P.Strokes.list[0].color.getHexString());
+
+  /* WITH NOTHING SELECTED the panel is only the tool again */
+  reset();
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 30; P.TOOL.color.set('#cc3232');
+  pen([{x:CX-80,y:CY},{x:CX,y:CY},{x:CX+80,y:CY}]);
+  var lone = P.Strokes.list[0], loneWas = lone.baseRadius;
+  P.Strokes.clearSelection();
+  P.TOOL.color.set('#00ff88');
+  P.UI.styleOnce('recolour', { color: P.TOOL.color });
+  P.UI.styleOnce('resize', { scale: 3 });
+  ck('with nothing selected the panel leaves the drawing alone',
+     lone.color.getHexString() === 'cc3232' && lone.baseRadius === loneWas,
+     'stroke is still #' + lone.color.getHexString() + ' at ' +
+     (lone.baseRadius*2/P.MM).toFixed(0) + 'mm');
+  reset();
 
   /* ================= brushes ================= */
   group('Brushes');
   reset();
   var names = Object.keys(P.BRUSH);
-  ck('ten brush profiles are defined', names.length === 10, names.join(', '));
+  ck('eight brush profiles are defined', names.length === 8, names.join(', '));
+
+  /* No two brushes may be the same brush wearing another name — that is what
+     the old ten-entry set was: `pencil` was round at 0.7x and `chisel`,
+     `ribbon` and `wide` were three hard blades apart only in width. Compare
+     the profiles that actually shape the tube. */
+  var samey = [];
+  for(i=0;i<names.length;i++){
+    for(var j2=i+1;j2<names.length;j2++){
+      var A2 = P.BRUSH[names[i]], B2 = P.BRUSH[names[j2]];
+      var diff = Math.abs(A2.flat - B2.flat) > 0.15 ? 1 : 0;
+      if(Math.abs(A2.square - B2.square) > 0.25) diff++;
+      if(A2.taper !== B2.taper) diff++;
+      if(Math.max(A2.wide,B2.wide) / Math.min(A2.wide,B2.wide) > 1.3) diff++;
+      if(!!A2.glow !== !!B2.glow) diff++;
+      /* a dimension pinned in millimetres shapes the tube as surely as a
+         ratio does: `flat` and `wide` are the same section, and what makes
+         them two brushes is that one of them stays 2mm thick at any size */
+      if(!!A2.thickMM !== !!B2.thickMM || A2.thickMM !== B2.thickMM) diff++;
+      if(!!A2.halfWidthMM !== !!B2.halfWidthMM ||
+         A2.halfWidthMM !== B2.halfWidthMM) diff++;
+      if(!!A2.rise !== !!B2.rise) diff++;
+      if(!!A2.grit !== !!B2.grit) diff++;
+      if(!diff) samey.push(names[i] + '=' + names[j2]);
+    }
+  }
+  ck('and no two of them are the same brush twice', samey.length === 0,
+     samey.join(', ') || 'all distinct');
+
+  /* ---- each brush does the job it is described as doing ----
+     Measured off the ring at the middle of a straight stroke: the extent along
+     the nib's wide axis, the extent across it, how far the corners stand out
+     from the flats, and the radius at the very end against the middle. */
+  function nibSection(brushName, mm){
+    P.Strokes.clear(); P.History.clear();
+    P.TOOL.brush = brushName; P.TOOL.sizeMM = mm || 40;
+    P.TOOL.pressureOn = false; P.TOOL.stableOn = false;
+    pen([{x:CX-200,y:CY},{x:CX-100,y:CY},{x:CX,y:CY},{x:CX+100,y:CY},{x:CX+200,y:CY}]);
+    var st8 = P.Strokes.list[0];
+    var seg8 = P.Strokes.segOf(st8), pos8 = st8.mesh.geometry.attributes.position;
+    var mid8 = Math.floor(st8.pts.length/2);
+    var u8 = wideAxisAt(st8, mid8);
+    var v8 = new THREE.Vector3().crossVectors(st8.pts[mid8].tan, u8).normalize();
+    /* measured about the SECTION's own centre, not the point — a brush that
+       rises off the surface puts the two in different places on purpose */
+    var c8 = new THREE.Vector3(), k8, o8;
+    for(k8=0;k8<seg8;k8++){
+      o8 = 2 + mid8*seg8 + k8;
+      c8.add(new THREE.Vector3(pos8.getX(o8), pos8.getY(o8), pos8.getZ(o8)));
+    }
+    c8.multiplyScalar(1/seg8);
+    var eu = 0, ev = 0, maxR = 0, minR = 1e9, d8 = new THREE.Vector3();
+    for(k8=0;k8<seg8;k8++){
+      o8 = 2 + mid8*seg8 + k8;
+      d8.set(pos8.getX(o8), pos8.getY(o8), pos8.getZ(o8)).sub(c8);
+      eu = Math.max(eu, Math.abs(d8.dot(u8)));
+      ev = Math.max(ev, Math.abs(d8.dot(v8)));
+      var r8 = d8.length();
+      maxR = Math.max(maxR, r8); minR = Math.min(minR, r8);
+    }
+    var endR = 0;
+    for(k8=0;k8<seg8;k8++){
+      o8 = 2 + k8;
+      d8.set(pos8.getX(o8), pos8.getY(o8), pos8.getZ(o8)).sub(st8.pts[0].p);
+      endR = Math.max(endR, d8.length());
+    }
+    return { wideMM: eu/P.MM, thinMM: ev/P.MM, corner: maxR/(minR || 1e-9),
+             endOverMid: endR/(maxR || 1e-9) };
+  }
+
+  var secPen    = nibSection('pen'),    secTaper = nibSection('taper');
+  var secSquare = nibSection('rectangle', 14), secCube  = nibSection('cube');
+  var secWide   = nibSection('wide');
+
+  ck('the pen is still a plain round nib, end to end',
+     secPen.corner < 1.02 && Math.abs(secPen.wideMM - secPen.thinMM) < 0.2 &&
+     secPen.endOverMid > 0.9,
+     'corner ' + secPen.corner.toFixed(3) + ', ends ' +
+     (secPen.endOverMid*100).toFixed(0) + '% of mid');
+
+  ck('the tapered brush keeps a round section but comes to a point',
+     secTaper.corner < 1.02 && secTaper.endOverMid < 0.12,
+     'ends ' + (secTaper.endOverMid*100).toFixed(1) + '% of the nib');
+
+  ck('the rectangle has hard corners, and square sides at the default size',
+     Math.abs(secSquare.wideMM - secSquare.thinMM) / secSquare.wideMM < 0.05 &&
+     secSquare.corner > 1.35,
+     'sides ' + secSquare.wideMM.toFixed(1) + ' x ' + secSquare.thinMM.toFixed(1) +
+     'mm, corners ' + secSquare.corner.toFixed(2) + 'x the flats');
+
+  /* THE SIZE SLIDER RAISES IT RATHER THAN INFLATING IT. Every other brush
+     scales in every direction at once; this one holds its width across the
+     surface and grows only the height standing off it, which is the whole
+     reason it is a rectangle and not a square. */
+  var rectSizes = [14, 40, 100, 200].map(function(mm){ return nibSection('rectangle', mm); });
+  var widthSpread = 0, tallest = rectSizes[0].thinMM / rectSizes[0].wideMM;
+  for(var r16=0; r16<rectSizes.length; r16++){
+    widthSpread = Math.max(widthSpread,
+      Math.abs(rectSizes[r16].wideMM - rectSizes[0].wideMM) / rectSizes[0].wideMM);
+    tallest = Math.max(tallest, rectSizes[r16].thinMM / rectSizes[r16].wideMM);
+  }
+  ck('the rectangle keeps its width and the size sets its height off the surface',
+     widthSpread < 0.02 && rectSizes[3].thinMM > rectSizes[0].thinMM * 10 &&
+     tallest > 10,
+     rectSizes.map(function(x, q16){
+       return [14,40,100,200][q16] + 'mm: ' + x.wideMM.toFixed(1) + ' x ' +
+              x.thinMM.toFixed(1);
+     }).join(', '));
+
+  /* A SKETCH SAVED BEFORE THE RENAME STILL OPENS. The brush key changed from
+     square to rectangle, so the old name has to resolve like every other
+     retired one rather than silently falling back to the round pen. */
+  ck('the old "square" name still resolves to the rectangle',
+     P.brushName('square') === 'rectangle' &&
+     P.brushName('marker') === 'rectangle' &&
+     P.brushName('chisel') === 'rectangle',
+     'square -> ' + P.brushName('square'));
+  /* `flat` used to alias the rectangle and is a brush of its own now, so a
+     sketch saved with the retired name opens as the ribbon. Nothing in a
+     document tells the two apart; this records the choice rather than
+     pretending it did not happen. */
+  ck('...but "flat" is a brush in its own right, no longer an alias',
+     P.brushName('flat') === 'flat' && !P.BRUSH_ALIAS.flat,
+     'flat -> ' + P.brushName('flat'));
+  (function(){
+    P.Strokes.clear(); P.History.clear();
+    P.TOOL.brush = 'rectangle'; P.TOOL.sizeMM = 40;
+    pen([{x:CX-100,y:CY},{x:CX,y:CY},{x:CX+100,y:CY}]);
+    var saved = JSON.stringify(P.Doc.serialize());
+    var aged  = JSON.parse(saved.split('"rectangle"').join('"square"'));
+    P.Doc.clear();
+    P.Doc.restore(aged);
+    var back16 = P.Strokes.list[0];
+    ck('...and a document written with it reloads as a rectangle',
+       !!back16 && back16.brush === 'rectangle' && !!back16.mesh &&
+       back16.mesh.geometry.index.count > 0,
+       back16 ? 'brush ' + back16.brush + ', ' +
+                (back16.mesh ? back16.mesh.geometry.index.count/3 : 0) + ' triangles'
+              : 'no stroke came back');
+  })();
+
+  /* and a brush that is NOT the rectangle still scales both ways together */
+  var penSmall = nibSection('pen', 20), penBig = nibSection('pen', 100);
+  ck('...while every other brush still grows in both directions',
+     penBig.wideMM > penSmall.wideMM * 4 && penBig.thinMM > penSmall.thinMM * 4,
+     'pen 20mm ' + penSmall.wideMM.toFixed(0) + ' x ' + penSmall.thinMM.toFixed(0) +
+     ', 100mm ' + penBig.wideMM.toFixed(0) + ' x ' + penBig.thinMM.toFixed(0));
+  ck('...and uniform along its length, with no taper',
+     secSquare.endOverMid > 0.9, (secSquare.endOverMid*100).toFixed(0) + '% at the end');
+
+  ck('the cube keeps the square section',
+     secCube.corner > 1.35 &&
+     Math.abs(secCube.wideMM - secCube.thinMM) / secCube.wideMM < 0.05,
+     secCube.wideMM.toFixed(1) + ' x ' + secCube.thinMM.toFixed(1) + 'mm, corners ' +
+     secCube.corner.toFixed(2) + 'x');
+
+  ck('the wide brush is a broad flat ribbon, not a rod',
+     secWide.wideMM / secWide.thinMM > 8,
+     secWide.wideMM.toFixed(1) + ' x ' + secWide.thinMM.toFixed(1) + 'mm, ratio ' +
+     (secWide.wideMM/secWide.thinMM).toFixed(1) + ':1');
+  ck('...and the broadest of them at the same nib size',
+     secWide.wideMM > secSquare.wideMM && secWide.wideMM > secPen.wideMM,
+     [secPen.wideMM, secTaper.wideMM, secSquare.wideMM, secCube.wideMM, secWide.wideMM]
+       .map(function(x){ return x.toFixed(0); }).join(' / ') + 'mm across');
+  /* ---- flat and wide: the same ribbon, thickness apart ----
+     `flat` keeps the thinness scaling with the width, so it is a sheet at
+     every size. `wide` pins it at 2mm, so it stays a skin over the guide
+     however far the slider is pushed instead of fattening into a slab. */
+  /* nibSection reports HALF-extents about the section's centre, so doubling
+     them gives the width and thickness the brush actually lays down */
+  function ribbon23(brush23, mm23){
+    var sec23 = nibSection(brush23, mm23);
+    return { w:+(sec23.wideMM*2).toFixed(1), t:+(sec23.thinMM*2).toFixed(2) };
+  }
+  var w20 = ribbon23('wide', 20), w60 = ribbon23('wide', 60), w150 = ribbon23('wide', 150);
+  var f20 = ribbon23('flat', 20), f60 = ribbon23('flat', 60), f150 = ribbon23('flat', 150);
+
+  ck('flat and wide are the same ribbon across the surface',
+     Math.abs(w60.w - f60.w) < 0.2 && Math.abs(w150.w - f150.w) < 0.2,
+     'wide ' + w60.w + 'mm and flat ' + f60.w + 'mm at a 60mm slider');
+  ck('the wide brush holds 2mm of thickness at any size',
+     Math.abs(w20.t - 2) < 0.05 && Math.abs(w60.t - 2) < 0.05 &&
+     Math.abs(w150.t - 2) < 0.05,
+     [w20.t, w60.t, w150.t].join(' / ') + 'mm at 20 / 60 / 150mm');
+  ck('...where flat still thickens with its width',
+     f150.t > f20.t * 5 && f60.t > f20.t * 2,
+     [f20.t, f60.t, f150.t].join(' / ') + 'mm at 20 / 60 / 150mm');
+
+  /* ---- the sketch pencil ----
+     A chisel edge lying along the surface, laid down at part strength through
+     a paper tooth, so going over the same ground darkens it. */
+  var secSketch = nibSection('sketch');
+  /* `corner` is the furthest point of the outline over the nearest, so for a
+     FLATTENED section it already equals the aspect ratio however round the
+     section is - a squared-off one pushes its corners out by a further root
+     two on top of that. Comparing the two is what separates a soft chisel
+     from a hard one; comparing corner against 1 would only ever have been
+     true for a circle. */
+  var sketchRatio = secSketch.wideMM / secSketch.thinMM;
+  ck('the sketch pencil is a flattened chisel, not a rod',
+     sketchRatio > 2.2 && sketchRatio < 4,
+     'ratio ' + sketchRatio.toFixed(1) + ':1');
+  ck('...with a rounded edge rather than a squared-off one',
+     secSketch.corner < sketchRatio * 1.15 &&
+     secSquare.corner > (secSquare.wideMM/secSquare.thinMM) * 1.2,
+     'pencil corners ' + secSketch.corner.toFixed(2) + 'x vs its ' +
+     sketchRatio.toFixed(2) + ':1 section; rectangle ' +
+     secSquare.corner.toFixed(2) + 'x vs ' +
+     (secSquare.wideMM/secSquare.thinMM).toFixed(2) + ':1');
+  ck('...and it does not taper to a point like the tapered brush',
+     secSketch.endOverMid > 0.9,
+     (secSketch.endOverMid*100).toFixed(0) + '% at the end');
+
+  /* GRIT AND BUILD-UP, measured off the framebuffer. A wall painted straight
+     on, scanned across the mark: the pencil should show many tone levels where
+     a pen shows one flat value, and should DARKEN as passes accumulate while
+     the pen cannot get darker than opaque. */
+  function pencilBand(brush18, passes18){
+    reset();
+    P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    P.VIEW.ortho = false; P.VIEW.focal = 50; P.VIEW.radius = 3.2;
+    P.VIEW.pivot.set(0,0,0); P.VIEW.pinned = true;
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true;
+    var prof18 = [];
+    for(var q18=0;q18<=16;q18++) prof18.push({x:CX-240+480*(q18/16), y:CY});
+    pen(prof18);
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = brush18; P.TOOL.sizeMM = 60; P.TOOL.opacity = 1;
+    P.TOOL.color.set('#2fbf55');
+    for(var k18=0;k18<passes18;k18++){
+      var col18 = [];
+      for(q18=0;q18<=10;q18++) col18.push({x:CX-160+q18*32, y:CY});
+      pen(col18);
+    }
+    P.Guides.setActive(null);
+    P.renderer.render(P.scene, P.cam());
+    var gl = P.renderer.getContext(), dpr = P.renderer.getPixelRatio();
+    var vpP = P.viewport(), buf18 = new W.Uint8Array(4*700);
+    gl.readPixels(120, Math.round((vpP.h - CY)*dpr), 700, 1,
+                  gl.RGBA, gl.UNSIGNED_BYTE, buf18);
+    /* the unpainted ground, read from the edge of the same scanline */
+    var bg18 = buf18[1];
+    var seen18 = {}, n18 = 0, sum18 = 0;
+    for(var t18=0;t18<700;t18++){
+      var r18 = buf18[t18*4], g18 = buf18[t18*4+1], b18 = buf18[t18*4+2];
+      if(g18 > r18+12 && b18 < 200){
+        seen18[g18] = 1; n18++; sum18 += Math.abs(g18 - bg18);
+      }
+    }
+    /* HOW FAR THE MARK HAS MOVED FROM THE GROUND, not the raw channel. Paint
+       laid on a dark ground raises the green channel and on a light one lowers
+       it, so a test that assumed a direction passed or failed on the theme
+       rather than on the brush. */
+    return { painted:n18, tones:Object.keys(seen18).length,
+             strength: sum18/(n18 || 1) };
+  }
+  var gritty18 = pencilBand('sketch', 1), plain18 = pencilBand('pen', 1);
+  ck('the pencil lays down a gritty tone, where the pen lays a flat one',
+     gritty18.painted > 200 && plain18.painted > 200 &&
+     gritty18.tones >= 4 && gritty18.tones > plain18.tones,
+     gritty18.tones + ' tone levels against the pen\'s ' + plain18.tones);
+
+  var p1 = pencilBand('sketch', 1).strength,
+      p2 = pencilBand('sketch', 2).strength,
+      p4 = pencilBand('sketch', 4).strength;
+  var q1 = pencilBand('pen', 1).strength, q4 = pencilBand('pen', 4).strength;
+  ck('going over the pencil again darkens it',
+     p2 > p1 + 2 && p4 > p2 + 2,
+     'strength ' + p1.toFixed(1) + ' -> ' + p2.toFixed(1) + ' -> ' + p4.toFixed(1) +
+     ' over 1, 2 and 4 passes');
+  ck('...while an opaque brush cannot get darker than it already is',
+     Math.abs(q4 - q1) < 1.5,
+     'pen ' + q1.toFixed(1) + ' -> ' + q4.toFixed(1));
+
+  /* PRESSURE drives tone for this brush and nothing else - but only when the
+     pressure toggle is on, exactly like every other brush. */
+  function targetFor(on18, chosen18){
+    reset();
+    P.TOOL.brush = 'sketch'; P.TOOL.pressureOn = on18;
+    P.TOOL.pressureTarget = chosen18;
+    pen([{x:CX-100,y:CY},{x:CX,y:CY},{x:CX+100,y:CY}]);
+    return P.Strokes.list[0] && P.Strokes.list[0].pressureTarget;
+  }
+  ck('the pencil takes pressure as tone, whatever else is selected',
+     targetFor(true, 'size') === 'opacity' && targetFor(true, 'both') === 'opacity',
+     'with size chosen -> ' + targetFor(true, 'size'));
+  ck('...and ignores pressure entirely when the toggle is off',
+     targetFor(false, 'size') === 'none',
+     'toggle off -> ' + targetFor(false, 'size'));
+  /* a brush WITHOUT an opinion still follows the global choice */
+  (function(){
+    reset();
+    P.TOOL.brush = 'pen'; P.TOOL.pressureOn = true; P.TOOL.pressureTarget = 'size';
+    pen([{x:CX-100,y:CY},{x:CX,y:CY},{x:CX+100,y:CY}]);
+    ck('...and other brushes still follow whatever you picked',
+       P.Strokes.list[0].pressureTarget === 'size',
+       'pen -> ' + P.Strokes.list[0].pressureTarget);
+  })();
+
+  /* the retired `pencil` name still means the old round nib, not this */
+  ck('the old "pencil" name still resolves to the pen, not the sketch pencil',
+     P.brushName('pencil') === 'pen', 'pencil -> ' + P.brushName('pencil'));
+
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
+  reset();
+
+  /* ---- how a nib sits ON a guide, which is what the section is for ----
+     A wall: a profile drawn from above extrudes downwards into a vertical
+     curtain, so the surface normal is horizontal and nothing about the view
+     coincides with it. */
+  function paintOnWall(brush, mm, tiltX, tiltY){
+    reset();
+    P.VIEW.theta = 0; P.VIEW.phi = 0.02; P.applyCamera();
+    P.TOOL.autoGuide = true; P.TOOL.stableOn = false; P.TOOL.pressureOn = false;
+    var prof9 = [];
+    for(var q=0;q<=16;q++) prof9.push({x:CX-220+440*(q/16), y:CY});
+    pen(prof9);
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.applyCamera();
+    P.TOOL.autoGuide = false;
+    P.TOOL.brush = brush; P.TOOL.sizeMM = mm;
+    var col9 = [];
+    for(q=0;q<=12;q++) col9.push({x:CX, y:CY-120+q*20});
+    penTilt(col9, tiltX || 0, tiltY || 0);
+    var st9 = P.Strokes.list[0];
+    if(!st9) return null;
+    var mid9 = Math.floor(st9.pts.length/2), pt9 = st9.pts[mid9];
+    var u9 = wideAxisAt(st9, mid9), n9 = pt9.nrm.clone();
+    var seg9 = P.Strokes.segOf(st9), pos9 = st9.mesh.geometry.attributes.position;
+    var uLo = 1e9, uHi = -1e9, nLo = 1e9, nHi = -1e9, d9 = new THREE.Vector3();
+    for(var k9=0;k9<seg9;k9++){
+      var o9 = 2 + mid9*seg9 + k9;
+      d9.set(pos9.getX(o9), pos9.getY(o9), pos9.getZ(o9)).sub(pt9.p);
+      uLo = Math.min(uLo, d9.dot(u9)); uHi = Math.max(uHi, d9.dot(u9));
+      nLo = Math.min(nLo, d9.dot(n9)); nHi = Math.max(nHi, d9.dot(n9));
+    }
+    return { acrossMM:(uHi-uLo)/P.MM, outMM:(nHi-nLo)/P.MM,
+             sinksMM:-nLo/P.MM, standsMM:nHi/P.MM };
+  }
+
+  var wallWide = paintOnWall('wide', 100, 0, 0);
+  ck('the wide brush lies flat on the guide it is painted on',
+     wallWide.acrossMM / wallWide.outMM > 8,
+     wallWide.acrossMM.toFixed(0) + 'mm across the surface, ' +
+     wallWide.outMM.toFixed(0) + 'mm out of it');
+
+  /* the bug this replaced: the pen's tilt azimuth was rotating the section
+     about the tangent, so a ribbon painted with a naturally-held pen stood on
+     edge — measured 213mm out of the surface instead of 34mm. */
+  var wallTilted = paintOnWall('wide', 100, -34, 22);
+  ck('...and a tilted pen does not stand it on edge',
+     Math.abs(wallTilted.outMM - wallWide.outMM) < 2,
+     wallTilted.outMM.toFixed(0) + 'mm out of the surface with the pen tilted, ' +
+     wallWide.outMM.toFixed(0) + 'mm flat');
+
+  /* the cube is an EXTRUSION FROM the surface, its length the size slider */
+  var cube100 = paintOnWall('cube', 100), cube40 = paintOnWall('cube', 40);
+  ck('the cube stands on the surface rather than sinking into it',
+     cube100.sinksMM < 1, cube100.sinksMM.toFixed(1) + 'mm below the stroke');
+  ck('...extruding out of it by the size on the slider',
+     Math.abs(cube100.standsMM - 100) < 6 && Math.abs(cube40.standsMM - 40) < 4,
+     '100mm -> ' + cube100.standsMM.toFixed(0) + 'mm out, 40mm -> ' +
+     cube40.standsMM.toFixed(0) + 'mm out');
+  var wallSquare = paintOnWall('rectangle', 100);
+  ck('...while the square tip still straddles the surface as a nib should',
+     wallSquare.sinksMM > wallSquare.standsMM * 0.8,
+     wallSquare.sinksMM.toFixed(0) + 'mm in, ' + wallSquare.standsMM.toFixed(0) + 'mm out');
+  P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 14; P.TOOL.pressureOn = true;
+  reset();
+
+  /* a sketch drawn with a retired brush must reopen as the nearest nib, not
+     silently as the default */
+  var aliasBad = [];
+  ['round','pencil','ink','flat','marker','chisel','ribbon'].forEach(function(oldName){
+    var got = P.brushName(oldName);
+    if(!P.BRUSH[got]) aliasBad.push(oldName + '->' + got);
+  });
+  ck('retired brush names still resolve', aliasBad.length === 0,
+     aliasBad.join(', ') || 'round/pencil/ink/flat/marker/chisel/ribbon all map to a real nib');
+  ck('...and a curve saved as one loads as its replacement', (function(){
+    P.Strokes.clear();
+    P.TOOL.brush = 'pen';
+    pen([{x:CX-60,y:CY},{x:CX+60,y:CY}]);
+    var doc2 = P.Doc.serialize();
+    doc2.strokes[0].brush = 'chisel';                 // as an older build wrote it
+    P.Doc.restore(doc2);
+    return P.Strokes.list.length === 1 &&
+           P.Strokes.list[0].brush === P.BRUSH_ALIAS.chisel && !!P.Strokes.list[0].mesh;
+  })(), P.Strokes.list[0] && P.Strokes.list[0].brush);
+  reset();
   var uiBrushes = [];
   var btns = DD.querySelectorAll('#brushGrid button');
   for(i=0;i<btns.length;i++) uiBrushes.push(btns[i].dataset.brush);
@@ -941,7 +3862,7 @@ function run(W){
   ck('glow is additive and unshaded (C.5)',
      P.Strokes.list[0].mesh.material.blending === THREE.AdditiveBlending &&
      P.Strokes.list[0].mesh.material.uniforms.uGlow.value === 1);
-  P.Strokes.clear(); P.TOOL.brush = 'round';
+  P.Strokes.clear(); P.TOOL.brush = 'pen';
   pen([{x:CX-60,y:CY},{x:CX,y:CY},{x:CX+60,y:CY}]);
   ck('other brushes stay on normal blending',
      P.Strokes.list[0].mesh.material.blending === THREE.NormalBlending);
@@ -958,8 +3879,8 @@ function run(W){
     return (hi1-lo1)/((hi2-lo2)||1e-9);
   }
   ck('a square nib really changes the cross-section',
-     Math.abs(ringAspect('chisel') - ringAspect('round')) > 0.05);
-  P.TOOL.brush = 'round';
+     Math.abs(ringAspect('wide') - ringAspect('pen')) > 0.05);
+  P.TOOL.brush = 'pen';
 
   /* ================= lasso ================= */
   group('Lasso select');
@@ -1016,24 +3937,137 @@ function run(W){
   P.History.undo();
   ck('duplicate is undoable', P.Strokes.list.length === 2);
 
+  /* ---- the grouping panel ----
+     Rebuilt to match Feather's: every curve is in a named group, drawing goes
+     into the active one, and the panel is where you move things between them.
+     FACT (C.8): undo covers add/delete group. */
+  reset();
+  ck('a sketch always has a group to draw into',
+     P.Strokes.groups.length === 1 && !!P.Strokes.findGroup(P.Strokes.activeGroup));
+  pen([{x:CX-60,y:CY-40},{x:CX,y:CY-40},{x:CX+60,y:CY-40}]);
+  pen([{x:CX-60,y:CY+40},{x:CX,y:CY+40},{x:CX+60,y:CY+40}]);
+  ck('a new curve joins the active group',
+     P.Strokes.list[0].group === P.Strokes.activeGroup &&
+     P.Strokes.list[1].group === P.Strokes.activeGroup);
+
+  var gA = P.Strokes.groups[0];
+  var gB = P.Tools.newGroup('Interior backface');
+  ck('a new group is added and becomes active',
+     P.Strokes.groups.length === 2 && P.Strokes.activeGroup === gB.id);
+  ck('...and it is undoable', (function(){
+    P.History.undo();
+    var gone = P.Strokes.groups.length === 1 && P.Strokes.activeGroup === gA.id;
+    P.History.redo();
+    return gone && P.Strokes.groups.length === 2;
+  })());
+
+  /* THE ARROW: selected curves move into the group whose arrow you tap */
+  P.Strokes.setSelected(P.Strokes.list[0], true);
+  var moved = P.Tools.assignSelection(gB.id);
+  ck('the arrow moves the selection into that group', moved === 1 &&
+     P.Strokes.list[0].group === gB.id && P.Strokes.list[1].group === gA.id);
+  ck('...and nothing else follows it', P.Strokes.membersOf(gB.id).length === 1);
+  P.History.undo();
+  ck('...and that is undoable too', P.Strokes.list[0].group === gA.id);
+  P.History.redo();
+
+  /* LONG PRESS: select everything in a group */
   P.Strokes.clearSelection();
-  P.Strokes.list.forEach(function(st){ P.Strokes.setSelected(st, true); });
-  P.Tools.groupSelection();
-  ck('grouping tags the members', !!P.Strokes.list[0].group &&
-     P.Strokes.list[0].group === P.Strokes.list[1].group);
-  P.Strokes.clearSelection();
-  P.Tools.selectWithGroup(P.Strokes.list[0]);
-  ck('picking one member selects the group', P.Strokes.selection.length === 2);
+  P.Strokes.setSelected(P.Strokes.list[1], true);
+  var picked = P.Tools.selectGroup(gA.id);
+  ck('selecting a group takes exactly its members', picked === 1 &&
+     P.Strokes.selection.length === 1 && P.Strokes.selection[0] === P.Strokes.list[1]);
+
+  /* THE EYE */
+  P.Tools.setGroupVisible(gB.id, false);
+  ck('hiding a group hides its curves',
+     P.Strokes.list[0].mesh.visible === false && P.Strokes.list[1].mesh.visible === true);
+  ck('...and a hidden curve cannot be selected by tapping it', (function(){
+    var mid = ts(P.Strokes.list[0].pts[1].p);
+    return P.Strokes.hitTest(mid.x, mid.y) === null;
+  })());
+  ck('...nor erased', (function(){
+    var mid = ts(P.Strokes.list[0].pts[1].p);
+    var before = P.Strokes.list.length;
+    P.setTool('erase'); P.TOOL.eraserMM = 120;
+    pen([{x:mid.x,y:mid.y},{x:mid.x+1,y:mid.y}]);
+    P.setTool('draw'); P.TOOL.eraserMM = 20;
+    return P.Strokes.list.length === before;
+  })());
+  P.Tools.setGroupVisible(gB.id, true);
+  ck('showing it again brings the curves back',
+     P.Strokes.list[0].mesh.visible === true);
+
+  /* renaming */
+  P.Tools.renameGroup(gB.id, 'Rough sketch');
+  ck('a group can be renamed', P.Strokes.findGroup(gB.id).name === 'Rough sketch');
+  P.History.undo();
+  ck('...and the old name comes back', P.Strokes.findGroup(gB.id).name === 'Interior backface');
+  P.History.redo();
+
+  /* duplicate and delete */
+  var dup = P.Tools.duplicateGroup(gB.id);
+  ck('duplicating a group copies its curves too',
+     P.Strokes.groups.length === 3 && P.Strokes.membersOf(dup.id).length === 1 &&
+     P.Strokes.list.length === 3);
+  P.History.undo();
+  ck('...undoably', P.Strokes.groups.length === 2 && P.Strokes.list.length === 2);
+
+  var beforeDel = P.Strokes.list.length;
+  P.Tools.deleteGroup(gB.id);
+  ck('deleting a group takes its curves with it',
+     P.Strokes.groups.length === 1 && P.Strokes.list.length === beforeDel - 1);
+  P.History.undo();
+  ck('...and undo brings both back',
+     P.Strokes.groups.length === 2 && P.Strokes.list.length === beforeDel);
+  ck('the last group cannot be deleted out from under you', (function(){
+    P.Tools.deleteGroup(gB.id);
+    return P.Tools.deleteGroup(P.Strokes.groups[0].id) === false &&
+           P.Strokes.groups.length === 1;
+  })());
+
+  ck('a hidden group is left out of select all', (function(){
+    reset();
+    pen([{x:CX-120,y:CY-40},{x:CX+120,y:CY-40}]);
+    var g5 = P.Tools.newGroup('Hidden');
+    pen([{x:CX-120,y:CY+40},{x:CX+120,y:CY+40}]);
+    P.Tools.setGroupVisible(g5.id, false);
+    W.document.getElementById('btnSelAll').click();
+    var n5 = P.Strokes.selection.length;
+    P.Strokes.clearSelection();
+    return n5 === 1;
+  })());
+  ck('...and out of an export, because it is not on screen', (function(){
+    var parts5 = P.Export.collect();
+    var all5 = P.Export.collect({strokes: P.Strokes.list});
+    return parts5.length === 1 && all5.length === 2;
+  })());
+  reset();
+
+  /* round trip, and reading a v1 file that has no group list at all */
+  P.Tools.newGroup('Sub drawing');
+  P.Tools.setGroupVisible(P.Strokes.groups[0].id, false);
   var gjson = JSON.stringify(P.Doc.serialize());
   P.Doc.clear();
   P.Doc.restore(JSON.parse(gjson));
   ck('groups survive a save/load round trip',
-     !!P.Strokes.list[0].group && P.Strokes.list[0].group === P.Strokes.list[1].group);
-  P.Strokes.list.forEach(function(st){ P.Strokes.setSelected(st, true); });
-  P.Tools.ungroupSelection();
-  ck('ungroup clears the tag', !P.Strokes.list[0].group);
-  P.History.undo();
-  ck('ungroup is undoable', !!P.Strokes.list[0].group);
+     P.Strokes.groups.length === 2 &&
+     P.Strokes.groups.map(function(g){ return g.name; }).indexOf('Sub drawing') >= 0);
+  ck('...including which of them are hidden',
+     P.Strokes.groups[0].visible === false);
+  ck('...and which one is active', !!P.Strokes.findGroup(P.Strokes.activeGroup));
+
+  ck('a v1 file with no group list still opens', (function(){
+    var v1 = JSON.parse(gjson);
+    v1.version = 1;
+    delete v1.groups;
+    v1.strokes.forEach(function(st, i){ st.group = i === 0 ? 7 : null; });
+    if(!P.Doc.restore(v1)) return false;
+    /* one invented group per id that was used, plus a home for the ungrouped */
+    return P.Strokes.groups.length >= 1 &&
+           P.Strokes.list.every(function(st){ return !!P.Strokes.findGroup(st.group); });
+  })(), P.Strokes.groups.map(function(g){ return g.name; }).join(', '));
+  reset();
 
   /* ================= render correctness ==================
      These render and read the framebuffer, because the bug they guard against
@@ -1088,7 +4122,7 @@ function run(W){
     reset();
     P.VIEW.theta = 0.4; P.VIEW.phi = 1.2; P.applyCamera();
     P.TOOL.pressureOn = false; P.TOOL.pressureTarget = 'none'; P.TOOL.stableOn = false;
-    P.TOOL.brush = brush || 'round'; P.TOOL.sizeMM = 36;
+    P.TOOL.brush = brush || 'pen'; P.TOOL.sizeMM = 36;
     P.TOOL.color.set('#ffffff'); P.TOOL.opacity = op;
     P.ENV.bg.set('#000000'); P.applyEnv();
   }
@@ -1128,7 +4162,7 @@ function run(W){
 
   /* a reflection reverses handedness, which is exactly what breaks culling */
   inkSetup(1.0);
-  P.TOOL.brush = 'round'; P.TOOL.mirror = 'x';
+  P.TOOL.brush = 'pen'; P.TOOL.mirror = 'x';
   pen([{x:CX+70,y:CY-40},{x:CX+130,y:CY},{x:CX+190,y:CY+40}]);
   var shotM = shoot();
   ck('mirror produced both halves', P.Strokes.list.length === 2);
@@ -1266,7 +4300,7 @@ function run(W){
   });
   ck('no brush has a jagged silhouette', worstJag < 2,
      'worst ' + worstName + ' at ' + worstJag.toFixed(2) + '% (pencil grain was 9.90%)');
-  P.TOOL.brush = 'round'; P.TOOL.stableOn = true;
+  P.TOOL.brush = 'pen'; P.TOOL.stableOn = true;
   P.TOOL.pressureOn = true; P.TOOL.pressureTarget = 'size';
 
   /* ================= imported references (C.1) ================= */
@@ -1381,6 +4415,104 @@ function run(W){
     ck('a stroke running off the edge is truncated at the boundary',
        mx <= isz.x/2 + 1e-4, 'max |x| ' + mx.toFixed(3) + ' of ' + (isz.x/2).toFixed(3));
   }
+
+  /* ---- a reference brings its own layer, and can be thrown away ----
+     Importing used to make the picture active but list it nowhere, so there
+     was nothing to name it by, hide it by or delete it by; and everything you
+     traced piled into whatever group happened to be open. */
+  (function referenceLayers(){
+    function addRef(name){
+      var g = P.Guides.fromImage(iurl, 64, 32, name);
+      P.Tools.addReference(g);
+      return g;
+    }
+    reset();
+    P.VIEW.theta = 0; P.VIEW.phi = Math.PI/2; P.VIEW.radius = 14; P.applyCamera();
+    P.TOOL.stableOn = false;
+
+    var r1 = addRef('cat-photo');
+    ck('an imported reference joins the resource list',
+       P.Guides.resources.length === 1 && P.Guides.resources[0] === r1);
+    ck('...and is the guide you are drawing on', P.Guides.active === r1);
+    ck('...and its row reads as showing, not hidden', r1.visible === true);
+    var lay = P.Strokes.findGroup(P.Strokes.activeGroup);
+    ck('a reference opens a layer named after it', !!lay && lay.name === 'cat-photo',
+       lay ? lay.name : 'none');
+
+    var rbox = new THREE.Box3().setFromObject(r1.mesh);
+    var rc = P.worldToScreen(rbox.getCenter(new THREE.Vector3()), {});
+    pen([{x:rc.x-30,y:rc.y},{x:rc.x,y:rc.y},{x:rc.x+30,y:rc.y}]);
+    ck('what you trace lands in that layer',
+       P.Strokes.list.length === 1 && P.Strokes.list[0].group === lay.id);
+
+    /* one undo takes the picture and its empty layer together */
+    reset();
+    addRef('sketch-ref');
+    P.History.undo();
+    ck('undoing the import takes the reference and its layer together',
+       P.Guides.resources.length === 0 && !P.Guides.active &&
+       !P.Strokes.groups.some(function(g){ return g.name === 'sketch-ref'; }));
+    P.History.redo();
+    ck('redo brings both back',
+       P.Guides.resources.length === 1 &&
+       P.Strokes.groups.some(function(g){ return g.name === 'sketch-ref'; }));
+
+    /* deleting takes the picture, never the drawing */
+    reset();
+    var r3 = addRef('to-delete');
+    var g3 = P.Strokes.findGroup(P.Strokes.activeGroup);
+    var b3 = new THREE.Box3().setFromObject(r3.mesh);
+    var c3 = P.worldToScreen(b3.getCenter(new THREE.Vector3()), {});
+    pen([{x:c3.x-30,y:c3.y},{x:c3.x,y:c3.y},{x:c3.x+30,y:c3.y}]);
+    pen([{x:c3.x-30,y:c3.y+14},{x:c3.x,y:c3.y+14},{x:c3.x+30,y:c3.y+14}]);
+    var drawn = P.Strokes.list.length;
+    ck('a reference can be deleted', P.Tools.deleteResource(r3) === true);
+    ck('...and it really goes', P.Guides.resources.length === 0 &&
+       P.Guides.active !== r3 && !r3.obj.parent);
+    ck('...but the drawing traced onto it stays, layer and all',
+       P.Strokes.list.length === drawn && !!P.Strokes.findGroup(g3.id),
+       drawn + ' curves kept');
+    P.History.undo();
+    ck('and deleting a reference is undoable',
+       P.Guides.resources.length === 1 && P.Guides.active === r3);
+
+    /* two references keep their work apart */
+    reset();
+    var ra = addRef('ref-a'), ga = P.Strokes.activeGroup;
+    var ba = new THREE.Box3().setFromObject(ra.mesh);
+    var ca = P.worldToScreen(ba.getCenter(new THREE.Vector3()), {});
+    pen([{x:ca.x-30,y:ca.y},{x:ca.x,y:ca.y},{x:ca.x+30,y:ca.y}]);
+    var rb = addRef('ref-b'), gb = P.Strokes.activeGroup;
+    pen([{x:ca.x-30,y:ca.y+14},{x:ca.x,y:ca.y+14},{x:ca.x+30,y:ca.y+14}]);
+    ck('a second reference opens its own layer', ga !== gb);
+    ck('and each one keeps its own curves',
+       P.Strokes.list.filter(function(q){ return q.group === ga; }).length === 1 &&
+       P.Strokes.list.filter(function(q){ return q.group === gb; }).length === 1);
+    P.Tools.deleteResource(ra);
+    ck('deleting one reference leaves the other alone',
+       P.Guides.resources.length === 1 && P.Guides.resources[0] === rb);
+
+    /* the list really shows a row with a delete on it */
+    reset();
+    addRef('panel-check');
+    LD.getElementById('stagePanel').classList.remove('hidden');
+    LD.querySelector('#stageTabs [data-tab="res"]').click();
+    P.UI.refresh();
+    var rows = LD.querySelectorAll('#resList .listItem');
+    ck('the reference appears as a row in the Import tab', rows.length === 1,
+       rows.length + ' row(s)');
+    if(rows.length){
+      ck('the row is labelled with the file name, not a generic one',
+         rows[0].textContent.indexOf('panel-check') >= 0,
+         rows[0].textContent.trim());
+      var btns = rows[0].querySelectorAll('button');
+      ck('the row carries a delete button', btns.length >= 2, btns.length + ' buttons');
+      btns[btns.length-1].click();
+      ck('and tapping it deletes the reference', P.Guides.resources.length === 0);
+    }
+    LD.getElementById('stagePanel').classList.add('hidden');
+    reset();
+  })();
 
   /* the mid-air fallback must survive only where it belongs */
   P.Guides.setActive(null);
@@ -1534,6 +4666,55 @@ function run(W){
        .distanceTo(lBefore) > 0.02);
   P.setTool('draw'); P.TOOL.stableOn = true;
 
+  /* THE DEFORM MUST RUN THE WAY THE STROKE RUNS. It used to pick the mesh's
+     longest bbox axis and always run it low-to-high, which is meaningless for
+     a cube or a sphere: the deform went along local +X whatever was drawn, and
+     the guide swept away from the pen. Measured by projecting every deformed
+     vertex onto the drawn chord — the mesh should span it, 0 to 1, not sit
+     behind the start at a negative t. */
+  function deformSpan(kind, dx, dy){
+    reset();
+    P.Guides.setActive(P.Guides.primitive(kind, 24, 1));
+    var g4 = P.Guides.active;
+    var cs = P.worldToScreen(P.Guides.centreOf(g4), {});
+    P.setTool('bend'); P.TOOL.stableOn = false;
+    pen([{x:cs.x-dx/2, y:cs.y-dy/2},
+         {x:cs.x,      y:cs.y},
+         {x:cs.x+dx/2, y:cs.y+dy/2}]);
+    P.TOOL.stableOn = true;
+    var bp = g4.bendPath;
+    if(!bp) return null;
+    var A4 = bp[0].clone(), B4 = bp[bp.length-1].clone();
+    var dir4 = B4.clone().sub(A4), L4 = dir4.length();
+    if(L4 < 1e-6) return null;
+    dir4.divideScalar(L4);
+    var attr4 = g4.mesh.geometry.attributes.position, v4 = new THREE.Vector3();
+    g4.mesh.updateMatrixWorld(true);
+    var lo4 = Infinity, hi4 = -Infinity, sum4 = 0;
+    for(var q4=0;q4<attr4.count;q4++){
+      v4.set(attr4.getX(q4), attr4.getY(q4), attr4.getZ(q4))
+        .applyMatrix4(g4.mesh.matrixWorld).sub(A4);
+      var t4 = v4.dot(dir4)/L4;
+      lo4 = Math.min(lo4, t4); hi4 = Math.max(hi4, t4); sum4 += t4;
+    }
+    return { lo:lo4, hi:hi4, mean:sum4/attr4.count };
+  }
+  var deformBad = [];
+  [['cube',240,0], ['sphere',240,0], ['tube',240,0], ['pyramid',240,0],
+   ['cube',-240,0], ['tube',0,240], ['sphere',-170,-170]].forEach(function(c){
+    var sp = deformSpan(c[0], c[1], c[2]);
+    if(!sp) { deformBad.push(c[0]+' not deformed'); return; }
+    if(sp.mean < 0.3 || sp.mean > 0.7)
+      deformBad.push(c[0]+'('+c[1]+','+c[2]+') mean t=' + sp.mean.toFixed(2));
+  });
+  ck('a deform bend follows the stroke, whatever the shape or direction',
+     deformBad.length === 0, deformBad.join('; ') || '7 cases, all centred on the stroke');
+  var sp1 = deformSpan('cube', 240, 0);
+  ck('...spanning it end to end rather than hanging off one end',
+     sp1 && sp1.lo > -0.15 && sp1.hi < 1.15,
+     sp1 ? 't ' + sp1.lo.toFixed(2) + '–' + sp1.hi.toFixed(2) : 'no span');
+  reset();
+
   /* ================= several guides on screen ================= */
   group('A.5  A saved guide stays visible while another is active');
   reset();
@@ -1616,6 +4797,64 @@ function run(W){
   })(), P.TOOL.sizeMM + 'mm');
   P.TOOL.sizeMM = 14; P.UI.refresh();
 
+  /* ---- size and opacity are dragged, not just typed ----
+     FACT (brush panel docs): size and opacity are each "adjusted by sliding up
+     or down"; size runs 1-300mm. */
+  function dragOn(id, dy){
+    var el2 = rid(id), r2 = el2.getBoundingClientRect();
+    var x2 = r2.left + r2.width/2, y2 = r2.top + r2.height/2;
+    function pe(t, yy, btn){
+      el2.dispatchEvent(new W.PointerEvent(t, {pointerId:77, pointerType:'touch',
+        clientX:x2, clientY:yy, buttons:btn, bubbles:true, cancelable:true}));
+    }
+    pe('pointerdown', y2, 1);
+    pe('pointermove', y2 - dy/2, 1);
+    pe('pointermove', y2 - dy, 1);
+    pe('pointerup',   y2 - dy, 0);
+    el2.dispatchEvent(new W.MouseEvent('click', {bubbles:true, cancelable:true}));
+  }
+  reset(); P.UI.applyMode(); P.UI.closePopovers();
+  P.TOOL.sizeMM = 20; P.TOOL.opacity = 1; P.UI.refresh();
+  dragOn('sizeVal', 90);
+  var sizeUp = P.TOOL.sizeMM;
+  ck('dragging the size readout up makes the brush bigger', sizeUp > 22,
+     '20mm -> ' + sizeUp.toFixed(0) + 'mm');
+  ck('...and the drag is not also read as a tap', !rshown('keypad'));
+  dragOn('sizeVal', -90);
+  ck('dragging down makes it smaller again',
+     Math.abs(P.TOOL.sizeMM - 20) < 1.5, P.TOOL.sizeMM.toFixed(1) + 'mm');
+
+  P.TOOL.sizeMM = 290; P.UI.refresh();
+  dragOn('sizeVal', 200);
+  ck('the drag still respects the documented 1-300mm range',
+     P.TOOL.sizeMM === P.TUNE.brushMaxMM && P.TUNE.brushMaxMM === 300,
+     P.TOOL.sizeMM + 'mm');
+  P.TOOL.sizeMM = 14; P.UI.refresh();
+
+  dragOn('opacityVal', -120);
+  ck('dragging the opacity readout down makes it more transparent',
+     P.TOOL.opacity < 0.85, Math.round(P.TOOL.opacity*100) + '%');
+  dragOn('opacityVal', 400);
+  ck('...and it cannot be dragged past solid', P.TOOL.opacity === 1);
+
+  /* a still tap on the same control still types an exact value */
+  rid('sizeVal').click();
+  ck('a tap on the readout still opens the keypad', rshown('keypad'));
+  P.UI.closePopovers();
+
+  /* the eraser carries its own size, so the readout follows the tool in hand */
+  P.TOOL.sizeMM = 14; P.TOOL.eraserMM = 20;
+  P.setTool('erase'); P.UI.refresh();
+  ck('with the eraser in hand the readout shows the eraser',
+     rid('sizeVal').textContent === '20mm', rid('sizeVal').textContent);
+  dragOn('sizeVal', 90);
+  ck('...and dragging it resizes the eraser, not the brush',
+     P.TOOL.eraserMM > 22 && P.TOOL.sizeMM === 14,
+     'eraser ' + P.TOOL.eraserMM.toFixed(0) + 'mm, brush ' + P.TOOL.sizeMM + 'mm');
+  P.setTool('draw'); P.TOOL.eraserMM = 20; P.UI.refresh();
+  ck('and it hands the readout back to the brush',
+     rid('sizeVal').textContent === '14mm', rid('sizeVal').textContent);
+
   /* colour wheel */
   rid('brushColor').click();
   ck('the colour card opens from the rail swatch', rshown('colorCard'));
@@ -1668,15 +4907,21 @@ function run(W){
   ck('all three axis arcs are drawn',
      !!dX0 && !!rid('arcY').getAttribute('d') && !!rid('arcZ').getAttribute('d'));
   P.VIEW.theta += 1.1; P.applyCamera(); P.onViewChange();
-  ck('the arcs re-aim as the camera orbits', rid('arcX').getAttribute('d') !== dX0);
+  ck('the arcs hold their place as the camera orbits',
+     rid('arcX').getAttribute('d') === dX0,
+     'arcX unchanged through a 63 degree orbit');
 
-  /* where does an axis sit on the pad right now? */
-  function arcSpot(axisVec){
+  /* Where an axis HANDLE sits (fixed, a third of the ring apart) and which way
+     that axis runs ON SCREEN (which does follow the camera). The two used to be
+     the same angle; separating them is the whole change. */
+  var FIXED_ANG = { x: Math.PI/6, y: -Math.PI/2, z: Math.PI*5/6 };
+  function arcSpot(key, axisVec){
     var c = P.Tools.transformCentre();
     var a = P.worldToScreen(c, {});
     var b = P.worldToScreen(c.clone().add(axisVec), {});
-    var ang = Math.atan2(b.y-a.y, b.x-a.x);
-    return {x:54 + Math.cos(ang)*35, y:54 + Math.sin(ang)*35, ang:ang};
+    var at = FIXED_ANG[key];
+    return { x: 54 + Math.cos(at)*35, y: 54 + Math.sin(at)*35,
+             ang: Math.atan2(b.y-a.y, b.x-a.x) };
   }
   function padDrag(spot, dx, dy){
     var pad = rid('joyPad'), r = pad.getBoundingClientRect();
@@ -1690,7 +4935,7 @@ function run(W){
   }
 
   var pStart = jst.pts[0].p.clone();
-  var sx1 = arcSpot(new THREE.Vector3(1,0,0));
+  var sx1 = arcSpot('x', new THREE.Vector3(1,0,0));
   padDrag(sx1, Math.cos(sx1.ang)*60, Math.sin(sx1.ang)*60);
   var dv = jst.pts[0].p.clone().sub(pStart);
   ck('grabbing the X arc moves along world X only',
@@ -1699,7 +4944,7 @@ function run(W){
   P.History.undo();
 
   pStart = jst.pts[0].p.clone();
-  var sy1 = arcSpot(new THREE.Vector3(0,1,0));
+  var sy1 = arcSpot('y', new THREE.Vector3(0,1,0));
   padDrag(sy1, Math.cos(sy1.ang)*60, Math.sin(sy1.ang)*60);
   dv = jst.pts[0].p.clone().sub(pStart);
   ck('grabbing the Y arc moves along world Y only',
@@ -1717,7 +4962,7 @@ function run(W){
 
   rid('joyMode').querySelector('[data-joy="rotate"]').click();
   var rBefore = jst.pts.map(function(q){ return q.p.clone(); });
-  var sz1 = arcSpot(new THREE.Vector3(0,0,1));
+  var sz1 = arcSpot('z', new THREE.Vector3(0,0,1));
   padDrag(sz1, -Math.sin(sz1.ang)*50, Math.cos(sz1.ang)*50);
   ck('sweeping round an arc rotates about that axis',
      jst.pts.some(function(q,k){ return q.p.distanceTo(rBefore[k]) > 1e-4; }));
@@ -1862,6 +5107,77 @@ function run(W){
     ck('a stroke drawn without pausing still just auto-fits',
        P.Strokes.list.length === 1 && P.Tools.isAdjustingShape() === false);
 
+    /* ---- a bare press, with no travel at all ----
+       FACT (C.9): "press-hold-drag to size a circle". There is no input to
+       auto-correct, so the press seeds a circle where it landed and the drag
+       out of it becomes the radius. */
+    reset(); P.TOOL.stableOn = false; P.TOOL.shapeHold = true;
+    P.setTool('shape');
+    penRaw('pointerdown', CX, CY, 1);
+    return wait(620);
+  }).then(function(){
+    function meanR(s){
+      var u = s.pts.slice();
+      if(u.length>1 && u[0].p.distanceTo(u[u.length-1].p) < 1e-9) u.pop();
+      var c = new THREE.Vector3();
+      u.forEach(function(q){ c.add(q.p); });
+      c.multiplyScalar(1/u.length);
+      var r = 0;
+      u.forEach(function(q){ r += q.p.distanceTo(c); });
+      return r/u.length;
+    }
+    ck('a press that never moves snaps to a circle on its own',
+       P.Tools.isAdjustingShape() === true);
+    var stp = liveStroke();
+    penRaw('pointermove', CX+60, CY, 1);
+    var r60 = meanR(stp);
+    penRaw('pointermove', CX+180, CY, 1);
+    var r180 = meanR(stp);
+    ck('dragging out of that press sizes it', r180 > r60*2.5,
+       r60.toFixed(3) + ' -> ' + r180.toFixed(3));
+    /* the radius IS the drag distance, so tripling the drag triples it */
+    ck('and the radius tracks the drag one-for-one',
+       Math.abs((r180/r60)/3 - 1) < 0.02,
+       'x' + ((r180/r60)/3).toFixed(4));
+    penRaw('pointerup', CX+180, CY, 0);
+    ck('the pressed circle commits once', P.Strokes.list.length === 1);
+    P.History.undo();
+    ck('and the whole press-drag is one undo step', P.Strokes.list.length === 0);
+
+    /* A pen resting on glass wanders a pixel or two and MIN_PX lets anything
+       past 2px through as travel. Those samples must not keep resetting the
+       hold clock, or "hold still" never fires for an unsteady hand. */
+    reset(); P.TOOL.stableOn = false; P.TOOL.shapeHold = true;
+    P.setTool('shape');
+    penRaw('pointerdown', CX, CY, 1);
+    var jitter = 0;
+    function tremor(){
+      if(jitter >= 6) return wait(140);
+      penRaw('pointermove', CX + (jitter%2 ? 3 : -3), CY + (jitter%3 ? 2 : -2), 1);
+      jitter++;
+      return wait(90).then(tremor);
+    }
+    return tremor();
+  }).then(function(){
+    ck('a few pixels of hand tremor still counts as holding still',
+       P.Tools.isAdjustingShape() === true);
+    penRaw('pointerup', CX, CY, 0);
+
+    /* Pausing to steady your hand before a normal stroke is ordinary, and
+       turning that into a circle would wreck it. The bare press is the Shape
+       tool's gesture only. */
+    reset(); P.TOOL.stableOn = false; P.TOOL.shapeHold = true;
+    P.TOOL.autoGuide = false; P.setTool('draw');
+    penRaw('pointerdown', CX-100, CY-60, 1);
+    return wait(620);
+  }).then(function(){
+    ck('a steadying pause in the DRAW tool is not turned into a circle',
+       P.Tools.isAdjustingShape() === false);
+    penRaw('pointermove', CX-40, CY-40, 1);
+    penRaw('pointermove', CX+20, CY-20, 1);
+    penRaw('pointerup',   CX+20, CY-20, 0);
+    ck('and that stroke draws normally', P.Strokes.list.length === 1);
+
     /* ---- hold-to-shape while drawing normally, and on guides (C.9) ---- */
     group('C.9  Hold to shape — brushes, guides and bends');
 
@@ -1956,7 +5272,54 @@ function run(W){
       P.TOOL.stableOn = true;
       P.setTool('draw');
       reset(); P.killSpin();
-      flush();
+
+      /* ---- holding a group row selects its curves ---- */
+      group('Grouping panel — hold to select');
+      var GD = W.document;
+      P.TOOL.autoGuide = false; P.TOOL.stableOn = false;
+      pen([{x:CX-140,y:CY-50},{x:CX,y:CY-30},{x:CX+140,y:CY-60}]);
+      pen([{x:CX-140,y:CY+50},{x:CX,y:CY+70},{x:CX+140,y:CY+40}]);
+      var hg = P.Tools.newGroup('Plate window');
+      pen([{x:CX-100,y:CY},{x:CX+100,y:CY}]);        // one curve in the new group
+      if(GD.getElementById('stagePanel').classList.contains('hidden')){
+        GD.getElementById('btnStage').click();
+      }
+      P.UI.refresh();
+      var gRows = GD.querySelectorAll('#groupList .grpRow');
+      ck('the panel lists one row per group', gRows.length === 2,
+         gRows.length + ' rows for ' + P.Strokes.groups.length + ' groups');
+      ck('the active group is the highlighted one',
+         gRows[0].classList.contains('on') &&
+         String(gRows[0].dataset.id) === String(P.Strokes.activeGroup));
+      ck('each row shows how many curves it holds',
+         gRows[0].querySelector('.grpCount').textContent === '1' &&
+         gRows[1].querySelector('.grpCount').textContent === '2');
+
+      P.Strokes.clearSelection(); P.onSceneChange();
+      function rowPress(row, type){
+        row.dispatchEvent(new W.PointerEvent(type, {pointerId:42, pointerType:'touch',
+          clientX:0, clientY:0, bubbles:true, cancelable:true}));
+      }
+      var secondRow = GD.querySelectorAll('#groupList .grpRow')[1];
+      rowPress(secondRow, 'pointerdown');
+      return wait(620).then(function(){
+        ck('holding a row selects everything in that group',
+           P.Strokes.selection.length === 2,
+           P.Strokes.selection.length + ' selected');
+        rowPress(secondRow, 'pointerup');
+
+        /* and a plain tap just makes it the group you draw into */
+        var rows2 = GD.querySelectorAll('#groupList .grpRow');
+        var target = P.Strokes.groups[1].id;
+        rowPress(rows2[1], 'pointerdown');
+        rowPress(rows2[1], 'pointerup');
+        ck('a tap on a row makes it active instead',
+           P.Strokes.activeGroup === target);
+        P.Strokes.clearSelection();
+        GD.getElementById('btnStage').click();
+        reset(); P.killSpin();
+        flush();
+      });
     });
   });
 }

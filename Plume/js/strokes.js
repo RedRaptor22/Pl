@@ -48,26 +48,68 @@ var VERT = [
   'attribute vec4 vcolor;',
   'varying vec4 vCol;',
   'varying vec3 vN;',
+  'varying vec3 vPos;',
   'void main(){',
   '  vCol = vcolor;',
   '  vN = normalize(normalMatrix * normal);',
+  /* stroke geometry is written in world coordinates, so object space IS world
+     space and the grain can be anchored to the sketch rather than to the nib */
+  '  vPos = position;',
   '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);',
   '}'
 ].join('\n');
 
 var FRAG = [
+  /* the grain samples position in MILLIMETRES, which runs to a few thousand
+     across a sketch - mediump would alias the hash into bands */
+  'precision highp float;',
   'uniform float uSelect;',
   'uniform float uShade;',
   'uniform float uGlow;',
+  'uniform float uGrit;',
+  'uniform vec3  uLightDir;',
+  'uniform vec3  uLightCol;',
+  'uniform float uLightInt;',
+  'uniform float uAmbient;',
+  'uniform float uToon;',
+  'uniform float uToonStep;',
   'varying vec4 vCol;',
   'varying vec3 vN;',
+  'varying vec3 vPos;',
+  /* ---- paper tooth ----
+     Value noise, two octaves, sampled in world millimetres so the grain is a
+     property of the PAPER and not of the nib: it stays the same size whatever
+     the brush size, and two strokes crossing agree about where the tooth is,
+     which is what makes overlapping pencil read as one surface being shaded
+     rather than as two marks. */
+  'float gHash(vec3 p){',
+  '  return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);',
+  '}',
+  'float gNoise(vec3 p){',
+  '  vec3 i = floor(p), f = fract(p);',
+  '  f = f*f*(3.0 - 2.0*f);',
+  '  return mix(mix(mix(gHash(i), gHash(i+vec3(1,0,0)), f.x),',
+  '                 mix(gHash(i+vec3(0,1,0)), gHash(i+vec3(1,1,0)), f.x), f.y),',
+  '             mix(mix(gHash(i+vec3(0,0,1)), gHash(i+vec3(1,0,1)), f.x),',
+  '                 mix(gHash(i+vec3(0,1,1)), gHash(i+vec3(1,1,1)), f.x), f.y), f.z);',
+  '}',
   'void main(){',
   '  vec3 n = normalize(vN);',
   '  if(!gl_FrontFacing) n = -n;',
-  '  float d = dot(n, normalize(vec3(0.32,0.62,0.72)));',
-  '  float shade = mix(1.0, 0.66 + 0.34*(d*0.5+0.5), uShade);',
+  /* HALF-LAMBERT, so a curved stroke keeps some shape on its dark side rather
+     than falling off a cliff at the terminator - the sketchbook read Feather
+     has, and what the hardcoded term did before there was a light to aim. */
+  '  float hl = dot(n, uLightDir) * 0.5 + 0.5;',
+  /* TOON bands the same term instead of replacing it, so toggling it changes
+     how the light falls off and not where the light is. */
+  '  if(uToon > 0.5){',
+  '    float steps = max(2.0, uToonStep);',
+  '    hl = clamp(floor(hl * steps) / (steps - 1.0), 0.0, 1.0);',
+  '  }',
+  '  float lit = uAmbient + (1.0 - uAmbient) * hl * uLightInt;',
+  '  float shade = mix(1.0, lit, uShade);',
   '  if(vCol.a < 0.004) discard;',
-  '  vec3 rgb = vCol.rgb * shade;',
+  '  vec3 rgb = vCol.rgb * shade * mix(vec3(1.0), uLightCol, uShade);',
   /* glow: emissive core that falls off at grazing angles, so the tube reads
      as a light source rather than a flat additive smear */
   '  if(uGlow > 0.5){',
@@ -75,18 +117,40 @@ var FRAG = [
   '    rgb = vCol.rgb * (0.55 + 1.15*rim);',
   '  }',
   '  rgb = mix(rgb, vec3(0.36,0.62,1.0), uSelect*0.55);',
-  '  gl_FragColor = vec4(rgb, vCol.a);',
+  '  float a = vCol.a;',
+  /* GRIT eats into the tone rather than into the outline. The silhouette is
+     left exactly as the sweep built it - the retired `grain` parameter jittered
+     the radius instead and was the only source of visibly jagged geometry in
+     the brush set. */
+  '  if(uGrit > 0.5){',
+  '    vec3 mm = vPos * 1000.0;',
+  '    float tooth = gNoise(mm * 0.75) * 0.65 + gNoise(mm * 2.4) * 0.35;',
+  '    a *= clamp(0.32 + 1.15 * tooth, 0.0, 1.0);',
+  '    if(a < 0.012) discard;',
+  '  }',
+  '  gl_FragColor = vec4(rgb, a);',
   '}'
 ].join('\n');
 
 function makeMaterial(stroke, needsAlpha){
-  var cfg = BRUSH[stroke.brush] || BRUSH.round;
+  var cfg = cfgOf(stroke);
   var glow = cfg.glow ? 1 : 0;
   return new THREE.ShaderMaterial({
     uniforms: {
       uSelect:{value:0},
       uShade:{value: (P.ENV.shaded && !glow) ? 1 : 0},
-      uGlow:{value: glow}
+      uGlow:{value: glow},
+      uGrit:{value: cfg.grit ? 1 : 0},
+      /* SHARED references, not copies: changing the light updates every
+         stroke at once instead of walking the whole sketch per frame of a
+         drag. three.js assigns the uniforms object through rather than
+         cloning it, so these stay the very objects applyLight writes to. */
+      uLightDir: P.LIGHT_UNIFORMS.uLightDir,
+      uLightCol: P.LIGHT_UNIFORMS.uLightCol,
+      uLightInt: P.LIGHT_UNIFORMS.uLightInt,
+      uAmbient : P.LIGHT_UNIFORMS.uAmbient,
+      uToon    : P.LIGHT_UNIFORMS.uToon,
+      uToonStep: P.LIGHT_UNIFORMS.uToonStep
     },
     vertexShader: VERT, fragmentShader: FRAG,
     /* FRONT FACES ONLY. A stroke is a closed tube, so its far wall is never
@@ -97,8 +161,8 @@ function makeMaterial(stroke, needsAlpha){
        faces measures 0.487. Every brush is capped (below) so the tube really
        is closed and nothing can be seen through an open end. */
     side: THREE.FrontSide,
-    transparent: !!needsAlpha || !!glow,
-    depthWrite: glow ? false : !needsAlpha,
+    transparent: !!needsAlpha || !!glow || !!cfg.grit,
+    depthWrite: (glow || cfg.grit) ? false : !needsAlpha,
     /* FACT (C.5): "a Glow material enables glowing lines" — additive blending
        is what makes overlapping strokes bloom instead of just stacking */
     blending: glow ? THREE.AdditiveBlending : THREE.NormalBlending
@@ -106,18 +170,42 @@ function makeMaterial(stroke, needsAlpha){
 }
 
 /* ---- brush profiles ------------------------------------------------------
-   FACT/PARTIAL: the docs never enumerate the brush list, beyond a round nib, a
-   tilt-sensitive flat nib, tapered ends, the v1.5 "Wide Brush to paint larger
-   areas faster", and a Glow material. The rest of these are built from the
-   same handful of cross-section parameters rather than invented wholesale:
+   The set follows the four brush behaviours Feather describes, plus the plain
+   round pen and the documented Glow material. Each one is built from the same
+   handful of cross-section parameters rather than being a special case:
 
-     seg    cross-section resolution
      flat   ellipse ratio — 1 round, ->0 a blade
-     square 0 = ellipse, 1 = hard rectangular nib (marker/chisel)
-     taper  ends thin out over taperLength()
+     square 0 = ellipse, 1 = a hard rectangular nib
+     taper  length of the taper at each end, in nib radii (0 = none)
+     tip    radius the taper narrows to, as a fraction of the nib
      wide   size multiplier
      glow   additive, unshaded
      caps   closed ends
+
+   What each is for, and how the numbers follow from it:
+
+     Tapered / pointy tip .. a sharp tapering end profile, for clean linework
+                             and organic detail — fins, hair, strands. Round
+                             section, and a LONG taper down to 4% of the nib,
+                             which is a point rather than the blunt 15% stub
+                             the old shared taper produced.
+     Square tip / flat ..... a blocky, uniform profile for structural and hard
+                             surfaces and blocked-out silhouettes. A true
+                             square section (equal sides, hard corners) that
+                             does not taper, at 1.6x so it covers ground.
+     Cube .................. the same square section kept narrow, for tightly
+                             defined geometric lines drawn densely — the ones
+                             you intend to deform afterwards.
+     Wide / ribbon ......... a broad flat ribbon for filling volume fast:
+                             blocking out cloth, planar surfaces, large areas
+                             in few strokes. Rectangular and 34:1 wide-to-thin.
+
+   Glow is not one of the four — it is a MATERIAL, documented separately
+   (C.5: "a Glow material enables glowing lines") — so it stays.
+
+   Every brush is CAPPED. Open ends were a nicer silhouette on the tapered
+   brushes, but back-face culling needs a closed manifold, and a taper's caps
+   are far too small to see.
 
    There was also a `grain` parameter that jittered radius and alpha per point
    to fake a dry pencil tooth. It was measurably the only source of jagged
@@ -125,31 +213,119 @@ function makeMaterial(stroke, needsAlpha){
    =<0.8% for every other brush — so it is gone. Media texture belongs in a
    shader or a stamp, not in the tube's silhouette.
 
-   Every brush is CAPPED. Open ends were a nicer silhouette on the tapered
-   brushes, but back-face culling needs a closed manifold — and since a taper
-   shrinks to 15% of the nib anyway, its caps are far too small to see.
+   Cross-section RESOLUTION is not a per-brush constant; see segOf().
    ========================================================================== */
 var BRUSH = P.BRUSH = {
-  round:  { seg:12, flat:1.00, square:0.00, taper:0, caps:true, wide:1.0, glow:0 },
-  flat:   { seg:12, flat:0.22, square:0.35, taper:0, caps:true, wide:1.0, glow:0 },
-  taper:  { seg:12, flat:1.00, square:0.00, taper:1, caps:true, wide:1.0, glow:0 },
-  wide:   { seg:10, flat:0.14, square:0.50, taper:0, caps:true, wide:3.2, glow:0 },
-  marker: { seg:10, flat:0.42, square:0.85, taper:0, caps:true, wide:1.8, glow:0 },
-  ink:    { seg:12, flat:0.85, square:0.00, taper:1, caps:true, wide:0.9, glow:0 },
-  /* a fine, slightly flattened nib — distinct from round by size and section,
-     not by noise */
-  pencil: { seg:10, flat:0.72, square:0.15, taper:0, caps:true, wide:0.7, glow:0 },
-  chisel: { seg:8,  flat:0.16, square:1.00, taper:0, caps:true, wide:1.6, glow:0 },
-  ribbon: { seg:8,  flat:0.05, square:1.00, taper:0, caps:true, wide:2.6, glow:0 },
-  glow:   { seg:12, flat:1.00, square:0.00, taper:1, caps:true, wide:1.3, glow:1 }
+  /* the default: a plain round nib, crisp at both ends. Unchanged. */
+  pen:    { flat:1.00, square:0.00, taper:0, tip:0,    caps:true, wide:1.00, glow:0 },
+  /* sketch pencil: a chisel edge lying along the surface, laid down at part
+     strength through a paper tooth. Roughly 3:1 across the surface to off it,
+     so it reads as a slanted pencil rather than a rod; ELLIPTICAL, because a
+     pencil edge wears round rather than square. It shades from the surface
+     like the other area brushes, so scribbling over the same ground reads as
+     one surface being darkened instead of a heap of separate marks. */
+  sketch: { flat:0.34, square:0.00, taper:0, tip:0, caps:true, wide:1.15, glow:0,
+            paint:1, grit:1, tone:0.5, pressure:'opacity' },
+  /* tapered / pointy tip */
+  taper:  { flat:1.00, square:0.00, taper:9, tip:0.04, caps:true, wide:1.00, glow:0 },
+  /* square tip / flat: blocky and uniform, for structure. `paint` for the same
+     reason the ribbon has it — see the note below. */
+  rectangle: { flat:1.00, square:1.00, taper:0, tip:0, caps:true, wide:1.60, glow:0,
+               halfWidthMM:11.2, paint:1 },
+  /* cube: an EXTRUSION FROM the surface. Same hard square section, but it
+     stands on the stroke rather than straddling it (rise), and the size slider
+     is the length it stands off by — geometry to deform later, not a line. */
+  cube:   { flat:1.00, square:1.00, taper:0, tip:0,    caps:true, wide:1.00, glow:0,
+            rise:1, paint:1 },
+  /* flat: the ribbon whose thinness scales with its width, so it is a SHEET at
+     every size — 0.04 puts a 100mm nib at 13mm thick and a 20mm nib at 3mm. */
+  flat:   { flat:0.04, square:1.00, taper:0, tip:0,    caps:true, wide:3.40, glow:0,
+            paint:1 },
+  /* FACT: the "Wide Brush ... paint larger areas faster" (1.5), as a ribbon.
+     `paint` shades it by the surface it lies on instead of by its own facets —
+     see writeRing. Same section as `flat`, but always 2mm thick however wide
+     it gets: a skin over the guide rather than a slab that fattens with the
+     slider. */
+  wide:   { flat:0.04, square:1.00, taper:0, tip:0,    caps:true, wide:3.40, glow:0,
+            paint:1, thickMM:2 },
+  /* FACT (C.5): "a Glow material enables glowing lines" */
+  glow:   { flat:1.00, square:0.00, taper:6, tip:0.10, caps:true, wide:1.30, glow:1 }
 };
+
+/* Retired names -> the nearest surviving nib. Documents outlive brush sets;
+   a sketch drawn with `chisel` should reopen as the hard nib it was, not
+   silently as the default round one. */
+P.BRUSH_ALIAS = {
+  round:  'pen',      // identical
+  pencil: 'pen',      // was round at 0.7x
+  ink:    'taper',    // was round with tapered ends
+  /* NOTE: `flat` used to alias the rectangle, on the strength of Feather
+     naming that brush "square tip / flat". It is a brush in its own right now
+     - the ribbon whose thinness scales - so the alias is gone and a sketch
+     saved with the retired name opens as the ribbon rather than the hard nib
+     it was drawn with. Nothing in a document distinguishes the two. */
+  marker: 'rectangle',  // hard nib, 1.7x -> hard square nib, 1.6x
+  chisel: 'rectangle',  // hard blade -> the blocky nib
+  square: 'rectangle',  // renamed: its section is no longer a square
+  ribbon: 'wide'      // flat tape -> the flat ribbon
+};
+P.brushName = function(name){
+  if(BRUSH[name]) return name;
+  var alias = P.BRUSH_ALIAS[name];
+  return BRUSH[alias] ? alias : 'pen';
+};
+
+/* Every read of a stroke's profile goes through here, so a retired name from
+   an old document, a saved preset or a test fixture resolves instead of
+   throwing halfway through building geometry. */
+function cfgOf(stroke){
+  return BRUSH[stroke.brush] || BRUSH[P.BRUSH_ALIAS[stroke.brush]] || BRUSH.pen;
+}
+S.cfgOf = cfgOf;
+
+/* CROSS-SECTION RESOLUTION FOLLOWS THE NIB SIZE.
+   A fixed segment count per brush is wrong at both ends of a 1mm-300mm range:
+   12 segments is wasteful on a 1mm pen and visibly faceted on a 90mm one. The
+   facet error of an n-gon is (1 - cos(pi/n))*r, so solving that for a fixed
+   error in millimetres gives a count that keeps the silhouette equally smooth
+   at any size. 0.3mm is about a screen pixel at a normal working zoom.
+   A HARD SECTION IS ROUNDED UP TO A MULTIPLE OF EIGHT, a soft one to four.
+   The corners of a squared-off nib sit at 45 degrees, so only a count divisible
+   by eight puts vertices ON them; at 20 segments the corner falls between two
+   samples and gets sliced off, which is a bevel rather than a square — measured
+   as a corner standing 1.24x out from the flats where a square stands 1.41x.
+   Clamped at both ends so a huge brush cannot run away with memory: the ceiling
+   is what a 200mm nib needs, and past that the guarantee becomes a relative one
+   — a 48-gon is within 0.21% of its circle at any radius. */
+var SEG_ERR_MM = 0.3, SEG_MIN = 8, SEG_MAX = 48;
+function segOf(stroke){
+  var cfg = cfgOf(stroke);
+  var rmm = Math.max(0.25, stroke.baseRadius * cfg.wide / P.MM);
+  /* Only the ROUND part of a section needs facets. The sagitta rule below is
+     about approximating a circle, and a section is only a circle at square 0;
+     at square 1 it is a rectangle, whose sides are already exact at any size
+     and whose corners are corners. Feeding it the full radius asked for 92
+     segments on a 300mm wide brush - clamped to the 48 cap, of which 40 were
+     extra vertices strung along four flat sides, on every ring of every
+     stroke. The nib rebuild during a Smooth drag was 4.8ms a move because of
+     it. What still needs facets is the corner radius, which shrinks to
+     nothing as the section squares off. */
+  var curved = rmm * (1 - P.clamp(cfg.square, 0, 1));
+  var n = curved > SEG_ERR_MM
+        ? Math.ceil(Math.PI / Math.sqrt(2 * SEG_ERR_MM / curved))
+        : 0;
+  var step = cfg.square > 0.5 ? 8 : 4;
+  return P.clamp(Math.ceil(n/step)*step, SEG_MIN, SEG_MAX);
+}
+S.segOf = segOf;
 
 /* Taper is measured in ARC LENGTH from each end, not as a fraction of the
    point count. A fraction would re-shade the whole stroke on every new sample
    (nothing could be appended incrementally), and it made the taper depend on
    how long the stroke happened to end up rather than on the nib. */
 function taperLength(stroke){
-  return stroke.baseRadius * 6;                  // GUESS: ~6 nib radii
+  var cfg = cfgOf(stroke);
+  return stroke.baseRadius * cfg.wide * (cfg.taper || 0);
 }
 
 /* cumulative arc length, used by the taper and by nothing else */
@@ -165,7 +341,7 @@ function shadeAt(stroke, i, arc){
   var pt = stroke.pts[i];
   var pr = P.clamp(pt.pressure, 0.02, 1);
   var mode = stroke.pressureTarget;
-  var cfg = BRUSH[stroke.brush];
+  var cfg = cfgOf(stroke);
   var rMul = cfg.wide, alpha = stroke.opacity, lift = 0;
 
   if(mode === 'size'    || mode === 'both') rMul *= 0.25 + 0.75*pr;
@@ -176,9 +352,15 @@ function shadeAt(stroke, i, arc){
     var total = arc[arc.length-1], L = taperLength(stroke);
     if(L > EPS && total > EPS){
       var fromEnd = Math.min(arc[i], total - arc[i]);
-      rMul *= 0.15 + 0.85*Math.min(1, fromEnd/L);
+      var tip = cfg.tip === undefined ? 0.15 : cfg.tip;
+      rMul *= tip + (1-tip)*Math.min(1, fromEnd/L);
     }
   }
+  /* A BRUSH THAT BUILDS UP cannot lay full strength in one pass, or a second
+     pass over the same ground would have nowhere to go. `tone` is how much of
+     the chosen opacity a single pass deposits; the rest arrives by going over
+     it again, which is how shading with a pencil actually works. */
+  if(cfg.tone !== undefined) alpha *= cfg.tone;
   return { radius: stroke.baseRadius*rMul, alpha: alpha, lift: lift };
 }
 
@@ -197,6 +379,34 @@ var WHITE = new THREE.Color(1,1,1), _c = new THREE.Color();
    Dividing by max(|cos|,|sin|) pushes the unit circle out onto the unit
    square, so `square` morphs continuously between a round nib and a hard
    rectangular one. Writes into out = {x,y}. */
+/* HOW WIDE THE NIB IS ACROSS THE SURFACE.
+   For most brushes that is just the shaded radius, so the size slider scales
+   the whole section and the nib grows in every direction at once. A brush with
+   halfWidthMM set holds its width instead, and the slider drives only the
+   height standing off the surface - it is a RECTANGLE whose proportions change
+   with size, rather than a square that is uniformly bigger.
+   Everything that needs the across-surface measurement asks here: the ring
+   itself, and the boundary trim, which scales the same axis and would cut in
+   the wrong place if it went on using the radius. */
+function nibHalfWidth(stroke, shadeRadius){
+  var w = cfgOf(stroke).halfWidthMM;
+  return w ? w * P.MM : shadeRadius;
+}
+S.nibHalfWidth = nibHalfWidth;
+
+/* AND HOW THICK IT IS, off the surface.
+   Normally that is the shaded radius times the section's flatness, so a wider
+   nib is a proportionally thicker one. A brush with thickMM set holds its
+   thickness instead: the ribbon stays a 2mm skin over the guide however far
+   the slider is pushed, where the same section left to scale becomes a slab
+   13mm thick at a 100mm nib. Everything that needs the off-surface
+   measurement asks here — the ring, and the hover preview. */
+function nibHalfThick(stroke, shadeRadius){
+  var cfg = cfgOf(stroke);
+  return cfg.thickMM ? cfg.thickMM * P.MM * 0.5 : shadeRadius * cfg.flat;
+}
+S.nibHalfThick = nibHalfThick;
+
 function sectionPoint(ang, square, out){
   var c = Math.cos(ang), s = Math.sin(ang);
   if(square <= 0){ out.x = c; out.y = s; return out; }
@@ -207,14 +417,16 @@ function sectionPoint(ang, square, out){
   return out;
 }
 
+S.sectionPoint = sectionPoint;   // exported so tests can measure the real outline
+
 var _p0 = {x:0,y:0}, _p1 = {x:0,y:0};
 var DANG = 1e-3;
 
 function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
   var sh = shadeAt(stroke, i, arc);
-  var cfg = BRUSH[stroke.brush];
-  var rx = Math.max(sh.radius, 1e-5);
-  var ry = Math.max(sh.radius * cfg.flat, 1e-5);
+  var cfg = cfgOf(stroke);
+  var rx = Math.max(nibHalfWidth(stroke, sh.radius), 1e-5);
+  var ry = Math.max(nibHalfThick(stroke, sh.radius), 1e-5);
   var pt = stroke.pts[i];
   var sq = cfg.square || 0;
 
@@ -226,10 +438,27 @@ function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
   _u.copy(R).multiplyScalar(ca).addScaledVector(_b, sa);
   _v.crossVectors(T, _u);
 
+  /* A RISEN SECTION STANDS ON THE SURFACE RATHER THAN STRADDLING IT.
+     _v comes out along -n for a surface-aligned nib, so shifting the centre
+     by -ry*_v puts the section's near face on the stroke and its far face one
+     full section-height out along the normal. That is what makes the cube
+     brush an extrusion FROM the surface instead of a rod half sunk into it. */
+  var paintN = (cfg.paint && pt.nrm && pt.nrm.lengthSq() > EPS) ? pt.nrm : null;
+
+  var riseX = 0, riseY = 0, riseZ = 0;
+  if(cfg.rise){
+    riseX = -_v.x*ry*cfg.rise; riseY = -_v.y*ry*cfg.rise; riseZ = -_v.z*ry*cfg.rise;
+  }
+
+  var fitL = pt.fitL === undefined ? 1 : pt.fitL,
+      fitR = pt.fitR === undefined ? 1 : pt.fitR;
+
   for(var k=0;k<seg;k++){
     var ang = k/seg * Math.PI*2;
     sectionPoint(ang, sq, _p0);
-    var ax = _p0.x*rx, ay = _p0.y*ry;
+    /* the two halves of the section are scaled independently, so a nib beside
+       an edge keeps everything it has room for and loses only the overhang */
+    var ax = _p0.x*rx*(_p0.x >= 0 ? fitR : fitL), ay = _p0.y*ry;
     _dir.copy(_u).multiplyScalar(ax).addScaledVector(_v, ay);
 
     /* Normal from the actual outline: differentiate the cross-section and
@@ -244,40 +473,131 @@ function writeRing(stroke, i, T, R, arc, pos, nor, col, seg){
     _nrm.copy(_u).multiplyScalar(nx/nl).addScaledVector(_v, ny/nl);
     if(_nrm.lengthSq() < EPS) _nrm.copy(_u); else _nrm.normalize();
 
+    /* PAINT SHADES AS THE SURFACE, NOT AS ITSELF.
+       A brush meant to fill an area leaves a sheet lying on a guide, and the
+       thing that gives away every overlap is that the sheet's SIDES are lit
+       differently from its top: a one-pixel dark line at every seam, however
+       thin the sheet gets. Measured on a wall of fourteen overlapping ribbons,
+       sampled across 450 pixels that should all be one colour: 28 visible
+       steps and a 58-level spread as shipped; 26 steps at a tenth the
+       thickness; ONE step when the sides are lit as the surface; and zero of
+       either with both. So a paint brush hands the shader the surface normal
+       for every vertex, and a wall reads as a wall no matter how many times
+       you go over it.
+
+       Only the brushes that are FOR filling do this. A pen is a tube and
+       should still look like one where two of them cross. */
+    /* `paint:1` hands EVERY vertex the surface normal, which is right for a
+       sheet: a ribbon's sides are a couple of millimetres of nothing and were
+       measurably the source of the dark line at every seam.
+
+       `paint:'top'` hands it only to the faces that already look the same way
+       the surface does, leaving the sides to light themselves.
+
+       For a brush that STANDS OFF the surface the two are a real trade, and
+       measured on eighteen overlapping strokes it goes one way: 'top' keeps
+       the cube's form but brings the seams back - 18 shades and 21 visible
+       steps against a flat 1 and 0 - because where extrusions overlap it is
+       precisely their SIDES you are looking at. The seams and the form are the
+       same shading. Flat wins here since a cube is laid down to block out
+       mass; 'top' is a word away for anyone who would rather keep the depth. */
+    if(paintN && (cfg.paint !== 'top' || _nrm.dot(paintN) > 0.5)) _nrm.copy(paintN);
+
     var o = 2 + i*seg + k;
-    pos[o*3]   = pt.p.x + _dir.x;
-    pos[o*3+1] = pt.p.y + _dir.y;
-    pos[o*3+2] = pt.p.z + _dir.z;
+    pos[o*3]   = pt.p.x + _dir.x + riseX;
+    pos[o*3+1] = pt.p.y + _dir.y + riseY;
+    pos[o*3+2] = pt.p.z + _dir.z + riseZ;
     nor[o*3]   = _nrm.x; nor[o*3+1] = _nrm.y; nor[o*3+2] = _nrm.z;
     col[o*4]   = _c.r; col[o*4+1] = _c.g; col[o*4+2] = _c.b; col[o*4+3] = sh.alpha;
   }
   return sh.alpha;
 }
 
-function writeCaps(stroke, n, T, arc, pos, nor, col){
+/* Where the section's centre sits, which is the point itself unless the brush
+   rises off the surface. Its own scratch, because writeRing is mid-flight with
+   the shared vectors when this is called from there. */
+var _cu = new THREE.Vector3(), _cv = new THREE.Vector3(), _cb = new THREE.Vector3();
+function sectionCentre(stroke, i, T, R, arc, out){
+  var pt = stroke.pts[i];
+  out.copy(pt.p);
+  var cfg = cfgOf(stroke);
+  if(!cfg.rise) return out;
+  var sh = shadeAt(stroke, i, arc);
+  var ry = Math.max(sh.radius * cfg.flat, 1e-5);
+  var ca = Math.cos(pt.roll||0), sa = Math.sin(pt.roll||0);
+  _cb.crossVectors(T, R);
+  _cu.copy(R).multiplyScalar(ca).addScaledVector(_cb, sa);
+  _cv.crossVectors(T, _cu);
+  return out.addScaledVector(_cv, -ry*cfg.rise);
+}
+
+function writeCaps(stroke, n, T, R, arc, pos, nor, col){
   var e0 = shadeAt(stroke, 0, arc), e1 = shadeAt(stroke, n-1, arc);
   var c0 = stroke.color.clone().lerp(WHITE, e0.lift),
       c1 = stroke.color.clone().lerp(WHITE, e1.lift);
-  var p0 = stroke.pts[0].p, p1 = stroke.pts[n-1].p;
+  var p0 = sectionCentre(stroke, 0,   T[0],   R[0],   arc, new THREE.Vector3());
+  var p1 = sectionCentre(stroke, n-1, T[n-1], R[n-1], arc, new THREE.Vector3());
   pos[0]=p0.x; pos[1]=p0.y; pos[2]=p0.z;
   pos[3]=p1.x; pos[4]=p1.y; pos[5]=p1.z;
-  nor[0]=-T[0].x; nor[1]=-T[0].y; nor[2]=-T[0].z;
-  nor[3]= T[n-1].x; nor[4]= T[n-1].y; nor[5]= T[n-1].z;
+  var capCfg = cfgOf(stroke);
+  var pn0 = (capCfg.paint && stroke.pts[0].nrm) ? stroke.pts[0].nrm : null;
+  var pn1 = (capCfg.paint && stroke.pts[n-1].nrm) ? stroke.pts[n-1].nrm : null;
+  if(pn0){ nor[0]=pn0.x; nor[1]=pn0.y; nor[2]=pn0.z; }
+  else   { nor[0]=-T[0].x; nor[1]=-T[0].y; nor[2]=-T[0].z; }
+  if(pn1){ nor[3]=pn1.x; nor[4]=pn1.y; nor[5]=pn1.z; }
+  else   { nor[3]= T[n-1].x; nor[4]= T[n-1].y; nor[5]= T[n-1].z; }
   col[0]=c0.r; col[1]=c0.g; col[2]=c0.b; col[3]=e0.alpha;
   col[4]=c1.r; col[5]=c1.g; col[6]=c1.b; col[7]=e1.alpha;
 }
 
-/* quad indices joining ring i to ring i+1 */
-function quadIndices(idx, at, i, seg){
+/* Quad indices joining ring i to ring i+1.
+
+   WOUND OUTWARD, and it has to be measured rather than eyeballed. These two
+   triangles used to be (a,c,b) and (b,c,d), which is the tube inside out: the
+   wall's geometric normals pointed at the axis while writeRing's shading
+   normals pointed away from it, and the caps — wound the other way — did not
+   agree with the wall either. Visible consequences were small but real, since
+   the material culls back faces: what you saw of an opaque stroke was the FAR
+   wall lit by the near wall's normals, depth was written at the back of the
+   tube rather than the front, and an exported solid was inside out and not
+   consistently oriented, which is a mesh error in any slicer.
+   Measured on a straight round stroke (40mm nib, 650mm long): 48 of 48 wall
+   triangles faced inward before and 0 of 48 after, and the signed volume went
+   from an inconsistent -260000 mm^3 to +779999.94 — against 780000.00 for the
+   12-gon prism 3r^2*L the tube is supposed to be. */
+/* A stroke whose last point IS its first is a ring, not a tube that happens to
+   end where it began. Built as a tube it gets two cap discs stacked on the one
+   point, tilted apart by a full angular step, and the wedge between them is the
+   slit you see at the top of every snapped circle.
+
+   Read off the geometry rather than carried as a flag, so it survives save and
+   reload, undo, the joystick and every other thing that rewrites points — and
+   so it covers every route that makes a circle, not just the one that was
+   remembered to set a flag. */
+function loopsClosed(pts){
+  var n = pts.length;
+  if(n < 8) return false;
+  var gap  = pts[0].p.distanceTo(pts[n-1].p);
+  var step = pts[n-2].p.distanceTo(pts[n-1].p);
+  return step > 0 && gap <= step * 1e-3;
+}
+S.loopsClosed = loopsClosed;
+
+/* one band of quads between two rings; `j` is normally i+1, but a closed loop
+   wraps its last band back onto ring 0 */
+function bandIndices(idx, at, i, j, seg){
   for(var k=0;k<seg;k++){
     var a = 2 + i*seg + k,
         b = 2 + i*seg + (k+1)%seg,
-        c = 2 + (i+1)*seg + k,
-        d = 2 + (i+1)*seg + (k+1)%seg;
-    idx[at++]=a; idx[at++]=c; idx[at++]=b;
-    idx[at++]=b; idx[at++]=c; idx[at++]=d;
+        c = 2 + j*seg + k,
+        d = 2 + j*seg + (k+1)%seg;
+    idx[at++]=a; idx[at++]=b; idx[at++]=c;
+    idx[at++]=b; idx[at++]=d; idx[at++]=c;
   }
   return at;
+}
+function quadIndices(idx, at, i, seg){
+  return bandIndices(idx, at, i, i+1, seg);
 }
 function startFan(idx, at, seg){
   for(var k=0;k<seg;k++){ idx[at++]=0; idx[at++]=2+(k+1)%seg; idx[at++]=2+k; }
@@ -296,7 +616,7 @@ function buildGeometry(stroke){
   var pts = stroke.pts, n = pts.length;
   if(n === 0) return null;
 
-  var cfg = BRUSH[stroke.brush], seg = cfg.seg;
+  var cfg = cfgOf(stroke), seg = segOf(stroke);
 
   if(n === 1){
     var s0 = shadeAt(stroke, 0, null);
@@ -311,35 +631,45 @@ function buildGeometry(stroke){
     return { geom:g, needsAlpha: s0.alpha < 0.995 };
   }
 
+  var closed = loopsClosed(pts);
+
   /* frozen frames if committed, transported frames while still live */
   var T, R, i;
   if(pts[0].ref && pts[n-1].ref && pts[n-1].tan){
     T = pts.map(function(p){ return p.tan; });
     R = pts.map(function(p){ return p.ref; });
   } else {
-    var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef);
+    var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef, closed);
     T = fr.T; R = fr.R;
   }
 
   var arc = arcOf(pts);
-  var vCount = 2 + n*seg;
+  /* A closed loop's last point is its first, so it needs no ring of its own —
+     the final band wraps onto ring 0 instead, which welds the tube shut rather
+     than leaving two coincident rims and a pair of caps jammed between them. */
+  var rings = closed ? n-1 : n;
+  var caps  = cfg.caps && !closed;
+
+  var vCount = 2 + rings*seg;
   var pos = new Float32Array(vCount*3),
       nor = new Float32Array(vCount*3),
       col = new Float32Array(vCount*4);
   var needsAlpha = false;
 
-  for(i=0;i<n;i++){
+  for(i=0;i<rings;i++){
     if(writeRing(stroke, i, T[i], R[i], arc, pos, nor, col, seg) < 0.995) needsAlpha = true;
   }
-  if(cfg.caps) writeCaps(stroke, n, T, arc, pos, nor, col);
+  if(caps) writeCaps(stroke, rings, T, R, arc, pos, nor, col);
 
-  var quads = (n-1)*seg*6, fans = cfg.caps ? seg*6 : 0;
+  var bands = closed ? rings : rings-1;
+  var quads = bands*seg*6, fans = caps ? seg*6 : 0;
   var IndexArray = vCount < 65536 ? Uint16Array : Uint32Array;
   var idx = new IndexArray(quads + fans);
   var at = 0;
-  if(cfg.caps) at = startFan(idx, at, seg);
-  for(i=0;i<n-1;i++) at = quadIndices(idx, at, i, seg);
-  if(cfg.caps) at = endFan(idx, at, n-1, seg);
+  if(caps) at = startFan(idx, at, seg);
+  for(i=0;i<rings-1;i++) at = quadIndices(idx, at, i, seg);
+  if(closed) at = bandIndices(idx, at, rings-1, 0, seg);
+  if(caps) at = endFan(idx, at, rings-1, seg);
 
   var geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
@@ -351,20 +681,53 @@ function buildGeometry(stroke){
 }
 S.buildGeometry = buildGeometry;
 
+/* Everything about a material that decides how it is BUILT — the blend mode,
+   the depth write, the transparency. Colour, opacity and shading are not in it:
+   colour rides in the vertex buffer and the other two are uniforms that
+   setShaded and the style code write straight onto the live material. */
+function materialKey(stroke, needsAlpha){
+  var cfg = cfgOf(stroke);
+  return (cfg.glow ? 1:0) + '|' + (cfg.grit ? 1:0) + '|' + (needsAlpha ? 1:0);
+}
+
+/* REUSE THE MATERIAL WHEN ONLY THE GEOMETRY CHANGED. Disposing a ShaderMaterial
+   drops the last reference to its GL program and three.js deletes it, so the
+   next frame compiles and links the whole thing again. Rebuilding the material
+   on every rebuild therefore cost one full compile per pointermove — measured
+   at 90 links and 180 compiles across a 90-move sizing drag. A desktop driver
+   swallows that; a phone GPU stalls tens to hundreds of milliseconds on every
+   link, which is the multi-second freeze while sizing a circle. */
 S.rebuild = function(stroke){
   var built = buildGeometry(stroke);
-  if(stroke.mesh){
-    group.remove(stroke.mesh);
-    stroke.mesh.geometry.dispose();
-    stroke.mesh.material.dispose();
-    stroke.mesh = null;
+  if(!built){
+    if(stroke.mesh){
+      group.remove(stroke.mesh);
+      stroke.mesh.geometry.dispose();
+      stroke.mesh.material.dispose();
+      stroke.mesh = null;
+    }
+    return;
   }
-  if(!built) return;
-  stroke.mesh = new THREE.Mesh(built.geom, makeMaterial(stroke, built.needsAlpha));
-  stroke.mesh.userData.stroke = stroke;
+  var key = materialKey(stroke, built.needsAlpha);
+
+  if(stroke.mesh && stroke.mesh.material.userData.matKey === key){
+    stroke.mesh.geometry.dispose();          // the buffers go, the program stays
+    stroke.mesh.geometry = built.geom;
+  } else {
+    if(stroke.mesh){
+      group.remove(stroke.mesh);
+      stroke.mesh.geometry.dispose();
+      stroke.mesh.material.dispose();
+    }
+    var mat = makeMaterial(stroke, built.needsAlpha);
+    mat.userData.matKey = key;
+    stroke.mesh = new THREE.Mesh(built.geom, mat);
+    stroke.mesh.userData.stroke = stroke;
+    group.add(stroke.mesh);
+  }
   stroke.mesh.material.uniforms.uSelect.value = stroke.selected ? 1 : 0;
   stroke.mesh.frustumCulled = true;
-  group.add(stroke.mesh);
+  stroke.mesh.visible = S.visible(stroke);
 };
 
 /* ==========================================================================
@@ -410,7 +773,7 @@ function ensureCapacity(L, needed){
 }
 
 LIVE.begin = function(stroke){
-  var cfg = BRUSH[stroke.brush], seg = cfg.seg;
+  var cfg = cfgOf(stroke), seg = segOf(stroke);
   var L = {
     seg: seg, caps: cfg.caps, capacity: 0, n: 0,
     pos: new Float32Array(0), nor: new Float32Array(0), col: new Float32Array(0),
@@ -486,17 +849,20 @@ LIVE.append = function(stroke){
 
   /* --- which rings can this sample have changed? --- */
   var first = Math.max(0, n-2);
-  if(BRUSH[stroke.brush].taper > 0){
+  if(cfgOf(stroke).taper > 0){
     var reach = taperLength(stroke), total = L.arc[n-1];
     while(first > 0 && (total - L.arc[first]) < reach) first--;
     /* the head taper is arc-length based and therefore already final */
   }
   for(i=first;i<n;i++){
+    /* the same roll and fit the commit will freeze, so nothing shifts on pen-up */
+    pts[i].roll = rollOf(pts[i], L.T[i], L.R[i]);
+    fitAt(pts[i], L.T[i], nibHalfWidth(stroke, shadeAt(stroke, i, L.arc).radius));
     if(writeRing(stroke, i, L.T[i], L.R[i], L.arc, L.pos, L.nor, L.col, seg) < 0.995){
       L.needsAlpha = true;
     }
   }
-  if(L.caps && n >= 1) writeCaps(stroke, n, L.T, L.arc, L.pos, L.nor, L.col);
+  if(L.caps && n >= 1) writeCaps(stroke, n, L.T, L.R, L.arc, L.pos, L.nor, L.col);
 
   /* --- indices: append the new quad band, move the end fan --- */
   var at = 0;
@@ -568,24 +934,355 @@ LIVE.discard = function(stroke){
   }
 };
 
+/* ==========================================================================
+   Nib orientation — THE NIB LIES IN THE SURFACE, NOT IN THE SCREEN
+   --------------------------------------------------------------------------
+   A flat nib has a direction, and something has to decide it. It used to be
+   the camera: the cross-section's wide axis was built from the view basis at
+   the moment of drawing, so every blade brush was angled to wherever you
+   happened to be standing. Draw the same line on the same guide from two
+   viewpoints and you got two different strokes; orbit afterwards and the nib
+   stayed pointing at where the camera used to be.
+
+   The surface is what the nib should follow. Every sample already carries the
+   normal of whatever it landed on (guide, image, imported mesh, or the pivot
+   plane when nothing is active), so the wide axis is t x n — perpendicular to
+   the stroke, lying IN the surface — and the thin axis comes out along the
+   normal. A blade then reads as a blade held flat against the guide, which is
+   what it is.
+
+   NOTHING ROLLS THE NIB. An earlier pass mapped the pen's tilt azimuth onto a
+   rotation about the stroke's tangent, on the reading that C.3's "tilt turns
+   the nib" should survive the move to surface alignment. It cannot: ANY
+   rotation about the tangent lifts a blade off the surface, and a pen held at
+   a natural angle reports azimuths right across the range, so a ribbon painted
+   on a wall stood at whatever angle the hand happened to hold. Tilt is still
+   recorded per point; it no longer turns the section.
+
+   With no guide the pivot plane faces the camera, so its normal IS the view
+   direction and free-space strokes look exactly as they did.
+   ========================================================================== */
+var _axisT = new THREE.Vector3(), _projT = new THREE.Vector3(),
+    _sT = new THREE.Vector3();
+
+function nibAxis(pt, t, out){
+  var n = pt.nrm;
+  if(n && n.lengthSq() > EPS){
+    out.crossVectors(t, n);
+    if(out.lengthSq() > EPS) return out.normalize();
+  }
+  /* no surface to lie in: the camera-plane axis the sample was taken with */
+  return out.copy(pt.axis || pt.ref || t);
+}
+
+/* HOW MUCH OF THE NIB FITS.
+   The nib is wide across the stroke, so near a guide's edge part of it would
+   land off the surface. Each point records what fraction of its half-width
+   the surface can actually take on each side — 1 in open ground, less as the
+   edge closes in, and asymmetric so painting along an edge keeps full width on
+   the inside instead of collapsing to nothing. Points with no surface frame
+   (free space, closed guides, an off-surface clamp) keep the full nib. */
+var FIT_MIN = 0.02;          // never let a section collapse to zero area
+function fitAt(pt, t, halfWidth){
+  var f = pt.surf;
+  /* KEEP A TRIM WE CANNOT RE-MEASURE.
+     `surf` is spent by the first freeze, so every later one — smooth,
+     liquify, bend, the joystick, an undo — arrives without it. Resetting
+     the fit to 1 here threw the boundary trim away and the paint sprang
+     back out over the edge of the guide it was painted on, measured at
+     116mm past a wall the stroke had been clamped to. A tool that nudges
+     a point by a fraction of a millimetre has not changed how much room
+     that section has, so the measured value stands until something can
+     measure it again. */
+  if(!f || !(halfWidth > EPS)){
+    if(pt.fitL === undefined) pt.fitL = 1;
+    if(pt.fitR === undefined) pt.fitR = 1;
+    return;
+  }
+  pt.fitL = pt.fitR = 1;
+  nibAxis(pt, t, _axisT);
+  var reach = P.Guides.reachAlong(f, _axisT);
+  pt.fitR = P.clamp(reach.pos / halfWidth, FIT_MIN, 1);
+  pt.fitL = P.clamp(reach.neg / halfWidth, FIT_MIN, 1);
+}
+S.fitAt = fitAt;
+
+/* The trim is measured per point, and per-point measurements of anything jitter
+   — the arc-length position is read from whichever cell of the surface grid the
+   sample landed in, and the nib's direction wanders by a fraction of a degree
+   between samples. Left alone that came out as a ragged edge where the paint
+   meets the boundary, measured at 11% of the nib's width along a stroke that
+   runs dead straight beside it. Two passes of a three-tap average take it out
+   without moving where the edge actually is. */
+function smoothFit(pts){
+  var n = pts.length, i, pass;
+  if(n < 3) return;
+  /* the measured limit, kept aside: averaging is allowed to pull a section IN
+     but never to push one back out past what was measured for it, or a column
+     painted along a boundary creeps over the edge again wherever its
+     neighbours happen to have more room */
+  var capL = new Array(n), capR = new Array(n);
+  for(i=0;i<n;i++){ capL[i] = pts[i].fitL; capR[i] = pts[i].fitR; }
+  for(pass=0; pass<2; pass++){
+    var L = new Array(n), R = new Array(n);
+    for(i=0;i<n;i++){
+      var a = pts[Math.max(0,i-1)], b = pts[i], c = pts[Math.min(n-1,i+1)];
+      L[i] = (a.fitL + 2*b.fitL + c.fitL) / 4;
+      R[i] = (a.fitR + 2*b.fitR + c.fitR) / 4;
+    }
+    for(i=0;i<n;i++){
+      pts[i].fitL = Math.min(L[i], capL[i]);
+      pts[i].fitR = Math.min(R[i], capR[i]);
+    }
+  }
+}
+
+/* The stored cross-section angle, measured in the transported frame. */
+function rollOf(pt, t, r){
+  _sT.crossVectors(t, r);
+  nibAxis(pt, t, _axisT);
+  _projT.copy(_axisT).addScaledVector(t, -_axisT.dot(t));
+  return (_projT.lengthSq() < EPS) ? 0
+       : Math.atan2(_projT.dot(_sT), _projT.dot(r));
+}
+S.rollOf = rollOf;
+
+/* NO TWO POINTS IN THE SAME PLACE.
+   A guide that clamps several samples to the same nearest position, or a
+   densified path whose inserted samples fall on top of a real one, leaves
+   duplicate consecutive points. They cost a whole ring each, they force
+   computeTangents down its fallback path, and every triangle between the two
+   coincident rings has zero area — which is invisible on screen and a HOLE in
+   an exported solid, because the exporter drops degenerate faces. Measured on
+   a cube stroke drawn across a guide: 22 zero-area triangles, 12 boundary
+   edges in the STL. Cheaper to never make them. */
+S.dedupe = function(stroke){
+  var pts = stroke.pts, out = [pts[0]], i;
+  if(!pts.length) return 0;
+  for(i=1;i<pts.length;i++){
+    if(pts[i].p.distanceToSquared(out[out.length-1].p) > 1e-10) out.push(pts[i]);
+  }
+
+  /* AND NO SPURS EITHER.
+     Clamping onto a guide does not only bunch samples, it can fold them: a
+     stroke painted across a narrow guide came back with steps of 1.72mm,
+     0.75mm and 0.40mm where the chord straight PAST the middle one measured
+     0.35mm - shorter than either step beside it, so the path doubles back
+     inside one sample. Consecutive tangents then point opposite ways, the ring
+     between them is built inside out, and a wide nib turns that into a plate
+     of paint standing off the surface at a wild angle.
+
+     A point is a spur when the path REVERSES through it - the step in and the
+     step out point opposite ways - and cutting it out moves the path less
+     than this brush could draw anyway, a wiggle far finer than the nib being
+     something the sweep cannot render in any case. That second clause is what
+     keeps a deliberate sharp corner: the tip of a real V stands most of an arm
+     away from the line joining its ends, whatever the brush.
+
+     The excursion has to be measured to the SEGMENT and not to its infinite
+     line. These folds are very nearly straight backtracks, so the tip sits on
+     the line but well outside the span, and a line distance would call a 0.35mm
+     step back zero. */
+  var half = Math.abs(stroke.baseRadius * cfgOf(stroke).wide);
+  var flat = Math.max(0.25 * P.MM, half * 0.01);
+  var ac = new THREE.Vector3(), ab = new THREE.Vector3(), bc = new THREE.Vector3();
+  var changed = true;
+  while(changed && out.length > 2){
+    changed = false;
+    var keep = [out[0]];
+    for(i=1;i<out.length-1;i++){
+      var a = keep[keep.length-1].p, b = out[i].p, c = out[i+1].p;
+      ab.subVectors(b, a); bc.subVectors(c, b);
+      if(ab.dot(bc) < 0){
+        ac.subVectors(c, a);
+        var len2 = ac.lengthSq();
+        var t = len2 > EPS ? P.clamp(ab.dot(ac)/len2, 0, 1) : 0;
+        var off = ab.addScaledVector(ac, -t).length();
+        if(off <= flat){ changed = true; continue; }
+      }
+      keep.push(out[i]);
+    }
+    keep.push(out[out.length-1]);
+    out = keep;
+  }
+
+  var dropped = pts.length - out.length;
+  if(dropped) stroke.pts = out;
+  return dropped;
+};
+
 /* Freeze frames into point data. This is the step that makes orientation
    persistent rather than re-derived, and it is what erase, bend and the
    joystick transform all read back. */
 S.freezeFrames = function(stroke){
   var pts = stroke.pts;
   if(pts.length === 0) return;
-  var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef);
-  var s = new THREE.Vector3(), proj = new THREE.Vector3();
+  var fr = P.transportFrames(pts.map(function(p){ return p.p; }), stroke.seedRef,
+                             loopsClosed(pts));
+  var arc = arcOf(pts);
   for(var i=0;i<pts.length;i++){
     var t = fr.T[i], r = fr.R[i], pt = pts[i];
-    s.crossVectors(t, r);
-    var axis = pt.axis || r;
-    proj.copy(axis).addScaledVector(t, -axis.dot(t));
-    pt.roll = (proj.lengthSq() < EPS) ? 0 : Math.atan2(proj.dot(s), proj.dot(r));
+    pt.roll = rollOf(pt, t, r);
+    fitAt(pt, t, nibHalfWidth(stroke, shadeAt(stroke, i, arc).radius));
     pt.tan = t.clone();
     pt.ref = r.clone();
     if(pt.axis) delete pt.axis;
+    if(pt.surf) delete pt.surf;          // transient: the frame is spent here
   }
+  smoothFit(pts);
+};
+
+/* ==========================================================================
+   Restyling a selection
+   --------------------------------------------------------------------------
+   The brush panel is the tool, but with curves selected it also edits THEM:
+   pick a colour and the selection recolours, drag the size and the selection
+   rescales. Everything here works on a list of strokes and a plain description
+   of the change, so the panel does not have to know how a stroke is built.
+
+   Size is PROPORTIONAL. A selection is rarely all one width, and setting them
+   all to the slider's number would flatten in one drag whatever thick-and-thin
+   the drawing had. Scaling by a factor keeps the relationships and still lets
+   the slider mean what it says, because the factor is measured against what
+   the slider read when the drag began.
+   ========================================================================== */
+S.styleSnapshot = function(strokes){
+  return strokes.map(function(st){
+    return { brush: st.brush, color: st.color.clone(),
+             opacity: st.opacity, baseRadius: st.baseRadius };
+  });
+};
+
+S.styleRestore = function(strokes, snap){
+  for(var i=0;i<strokes.length && i<snap.length;i++){
+    var st = strokes[i], was = snap[i];
+    st.brush = was.brush;
+    st.color.copy(was.color);
+    st.opacity = was.opacity;
+    st.baseRadius = was.baseRadius;
+    S.rebuild(st);
+  }
+};
+
+/* `base` is the snapshot a scale is measured from, so dragging a slider back
+   and forth cannot compound: every frame of the drag scales the ORIGINAL
+   radius, not the one the previous frame left behind. */
+S.restyle = function(strokes, changes, base){
+  var minR = P.TUNE.brushMinMM * P.MM * 0.5,
+      maxR = P.TUNE.brushMaxMM * P.MM * 0.5;
+  for(var i=0;i<strokes.length;i++){
+    var st = strokes[i];
+    if(changes.brush)                 st.brush = P.brushName(changes.brush);
+    if(changes.color)                 st.color.copy(changes.color);
+    if(changes.opacity !== undefined) st.opacity = changes.opacity;
+    if(changes.scale !== undefined){
+      var from = (base && base[i]) ? base[i].baseRadius : st.baseRadius;
+      st.baseRadius = P.clamp(from * changes.scale, minR, maxR);
+    }
+    S.rebuild(st);
+  }
+};
+
+/* What the panel should READ while a selection is up: a property the whole
+   selection agrees on, or null where it does not. Size is averaged instead,
+   since a spread of widths still has a meaningful middle to scale about. */
+S.styleOf = function(strokes){
+  if(!strokes.length) return null;
+  var brush = strokes[0].brush, hex = strokes[0].color.getHex(),
+      opacity = strokes[0].opacity, sum = 0;
+  for(var i=0;i<strokes.length;i++){
+    var st = strokes[i];
+    if(st.brush !== brush)             brush = null;
+    if(st.color.getHex() !== hex)      hex = null;
+    if(st.opacity !== opacity)         opacity = null;
+    sum += st.baseRadius;
+  }
+  return { brush: brush, hex: hex, opacity: opacity,
+           sizeMM: (sum/strokes.length) * 2 / P.MM };
+};
+
+/* ==========================================================================
+   Groups
+   --------------------------------------------------------------------------
+   FACT (C.8): undo covers "add/delete group", so a group is part of the
+   document, not a listing the panel invents.
+
+   Modelled on Feather's own panel: a flat, ordered list of NAMED groups, each
+   with its own visibility, one of them active. Every curve belongs to exactly
+   one — drawing puts it in the active group — which is what makes the panel a
+   place you organise a sketch from rather than a scrolling inventory of every
+   line you have ever drawn.
+
+   The previous model was the other way round: `group` was null until you
+   selected two curves and pressed Group, groups had no names and no
+   visibility, and the panel listed curves individually. Tapping any curve then
+   selected its whole group, which is reasonable for ad-hoc grouping and wrong
+   once everything is grouped by default — so that rule moves to a long press
+   on the group row, where it is asked for rather than assumed.
+   ========================================================================== */
+S.groups = [];                  // ordered, first = top of the panel
+S.activeGroup = 0;              // id that new curves join
+
+function findGroup(id){
+  for(var i=0;i<S.groups.length;i++) if(S.groups[i].id === id) return S.groups[i];
+  return null;
+}
+S.findGroup = findGroup;
+
+S.groupOf = function(stroke){ return findGroup(stroke.group); };
+S.membersOf = function(id){
+  return S.list.filter(function(st){ return st.group === id; });
+};
+
+/* A sketch always has somewhere to draw. */
+S.ensureGroup = function(){
+  if(!S.groups.length) S.addGroup('Group 1');
+  if(!findGroup(S.activeGroup)) S.activeGroup = S.groups[0].id;
+  return findGroup(S.activeGroup);
+};
+
+S.addGroup = function(name, at){
+  var g = { id: S.nextGroup++, name: name || ('Group ' + (S.groups.length+1)),
+            visible: true };
+  if(at === undefined || at < 0 || at > S.groups.length) S.groups.unshift(g);
+  else S.groups.splice(at, 0, g);
+  return g;
+};
+
+S.removeGroup = function(id){
+  for(var i=0;i<S.groups.length;i++){
+    if(S.groups[i].id === id){ S.groups.splice(i,1); return i; }
+  }
+  return -1;
+};
+
+S.insertGroup = function(g, at){
+  S.groups.splice(P.clamp(at, 0, S.groups.length), 0, g);
+  return g;
+};
+
+/* A curve is drawable, selectable, erasable and exportable only if its group
+   says so. The raycaster does NOT check .visible, so everything that reaches
+   into the scene has to ask this rather than assume. */
+S.visible = function(stroke){
+  var g = findGroup(stroke.group);
+  return !g || g.visible !== false;
+};
+
+S.applyVisibility = function(){
+  for(var i=0;i<S.list.length;i++){
+    var st = S.list[i];
+    if(st.mesh) st.mesh.visible = S.visible(st);
+    if(!S.visible(st) && st.selected) S.setSelected(st, false);
+  }
+};
+
+S.setGroupVisible = function(id, on){
+  var g = findGroup(id);
+  if(!g) return false;
+  g.visible = !!on;
+  S.applyVisibility();
+  return true;
 };
 
 /* ==========================================================================
@@ -596,6 +1293,7 @@ S.add = function(stroke){
   S.list.push(stroke);
   if(!stroke.mesh) S.rebuild(stroke);
   else if(stroke.mesh.parent !== group) group.add(stroke.mesh);
+  if(stroke.mesh) stroke.mesh.visible = S.visible(stroke);
 };
 
 S.remove = function(stroke){
@@ -639,6 +1337,7 @@ S.hitTest = function(x, y){
   var ray = P.rayFrom(x, y);
   var hits = ray.intersectObjects(group.children, false);
   for(var i=0;i<hits.length;i++){
+    if(hits[i].object.visible === false) continue;      // hidden group
     if(P.Guides.isMasked(hits[i].point)) continue;
     return {stroke: hits[i].object.userData.stroke, point: hits[i].point};
   }
@@ -660,7 +1359,9 @@ S.hitTest = function(x, y){
 function eraseRuns(split){
   var removed = [], added = [], i, k;
   for(i=S.list.length-1; i>=0; i--){
-    var st = S.list[i], runs = split(st);
+    var st = S.list[i];
+    if(!S.visible(st)) continue;                        // hidden group
+    var runs = split(st);
     if(!runs) continue;
     removed.push(st);
     for(k=0;k<runs.length;k++){
@@ -714,6 +1415,7 @@ function lerpPoint(a, b, t){
     tan: near.tan ? near.tan.clone() : null,
     ref: near.ref ? near.ref.clone() : null,
     roll: near.roll,
+    fitL: near.fitL, fitR: near.fitR,
     pressure: a.pressure + (b.pressure - a.pressure)*t,
     tiltAz: near.tiltAz, tiltAlt: near.tiltAlt
   };
@@ -735,6 +1437,11 @@ function farFromDisc(st, x, y, radiusPx){
   var dx = _s.x - x, dy = _s.y - y;
   return (dx*dx + dy*dy) > rPx*rPx;
 }
+/* Smooth and Liquify sweep a disc over the scene exactly as the eraser does,
+   and paid the same price for not rejecting first. The padding above covers
+   a stroke whose points have moved since its mesh was last rebuilt: a frame
+   of pen travel is small beside a whole brush radius. */
+S.farFromDisc = farFromDisc;
 
 /* Screen-space eraser. The disc is clipped against the centreline as a
    CONTINUOUS polyline, not against its sample points: where it crosses a
@@ -811,7 +1518,8 @@ function cloneWithPoints(src, pts){
     pts: pts.map(function(p){
       return { p:p.p.clone(), tan:p.tan?p.tan.clone():null, ref:p.ref?p.ref.clone():null,
                nrm:p.nrm?p.nrm.clone():null,
-               roll:p.roll, pressure:p.pressure, tiltAz:p.tiltAz, tiltAlt:p.tiltAlt };
+               roll:p.roll, fitL:p.fitL, fitR:p.fitR,
+               pressure:p.pressure, tiltAz:p.tiltAz, tiltAlt:p.tiltAlt };
     }),
     mesh: null, selected: false
   };
@@ -824,6 +1532,7 @@ S.vacuumAt = function(x, y){
   var ray = P.rayFrom(x, y);
   var hits = ray.intersectObjects(group.children, false), killed = [];
   for(var i=0;i<hits.length;i++){
+    if(hits[i].object.visible === false) continue;      // hidden group
     if(P.Guides.isMasked(hits[i].point)) continue;
     var st = hits[i].object.userData.stroke;
     if(st && killed.indexOf(st) < 0) killed.push(st);
@@ -854,6 +1563,11 @@ S.transform = function(strokes, matrix){
         if(pt.ref.lengthSq()>EPS) pt.ref.normalize();
         else P.perpTo(pt.tan || new THREE.Vector3(0,0,1), pt.ref);
       }
+      /* the surface normal is what the nib is squared to, so it rotates too */
+      if(pt.nrm){
+        pt.nrm.applyMatrix3(rot);
+        if(pt.nrm.lengthSq()>EPS) pt.nrm.normalize();
+      }
     }
     st.baseRadius *= uniform;
     S.rebuild(st);
@@ -869,9 +1583,43 @@ S.mirrorMatrix = function(axis){
   return m;
 };
 S.mirroredCopy = function(stroke, axis){
+  return S.transformedCopy(stroke, S.mirrorMatrix(axis));
+};
+
+S.transformedCopy = function(stroke, m){
   var copy = cloneWithPoints(stroke, stroke.pts);
-  S.transform([copy], S.mirrorMatrix(axis));
+  S.transform([copy], m);
   return copy;
+};
+
+/* ---- symmetry ------------------------------------------------------------
+   Every copy the current symmetry owes a stroke, as a list of transforms of
+   the original. Mirror reflects across a world plane; radial turns about the
+   vertical axis through the origin — the same axis the grid is drawn around,
+   so the centre is somewhere you can see rather than somewhere you have to
+   remember.
+
+   They compose. With both on, each of the n sectors carries the stroke AND its
+   reflection, which is what makes a rosette rather than a pinwheel: the copy is
+   mirrored first, then turned into its sector.
+
+   The identity is never in the list — that is the stroke you actually drew. So
+   mirror alone returns 1, radial n alone returns n-1, and the two together
+   return 2n-1, for 2n marks on the page. */
+S.symmetryMatrices = function(mirror, radial){
+  var n = Math.max(1, Math.round(radial || 1)), out = [], i;
+  var mm = mirror ? S.mirrorMatrix(mirror) : null;
+  for(i=0;i<n;i++){
+    var rot = new THREE.Matrix4().makeRotationY(i * Math.PI * 2 / n);
+    if(i > 0) out.push(rot);
+    if(mm) out.push(new THREE.Matrix4().multiplyMatrices(rot, mm));
+  }
+  return out;
+};
+
+/* what the live preview and the commit both ask for */
+S.symmetryOf = function(TOOLREF){
+  return S.symmetryMatrices(TOOLREF.mirror, TOOLREF.radial);
 };
 
 S.setShaded = function(on){

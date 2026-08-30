@@ -61,8 +61,21 @@
   #stage{position:fixed;inset:0;width:100%;height:100%;touch-action:none;display:block;}
 
   #overlay{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:4;}
-  #lassoPath{fill:rgba(91,157,255,.14);stroke:var(--blue);stroke-width:1.5;
-    stroke-dasharray:6 4;display:none;}
+  /* the loop has to read at arm's length on a tablet, so it is drawn a little
+     heavier than a desktop hairline and carries a soft fill to show the AREA
+     it will take, not just the path the hand took */
+  /* the light pad: a little sky you drag the sun around in */
+  .lightRow{align-items:stretch;gap:10px;}
+  #lightPad{position:relative;width:84px;height:84px;flex:0 0 auto;border-radius:12px;
+    background:linear-gradient(180deg,var(--panel3),var(--panel2));
+    border:1px solid var(--line);touch-action:none;cursor:grab;overflow:hidden;}
+  #lightPad:active{cursor:grabbing;}
+  #lightDot{position:absolute;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;
+    background:#ffd36b;box-shadow:0 0 0 2px rgba(0,0,0,.18), 0 0 12px 3px rgba(255,211,107,.7);
+    pointer-events:none;}
+
+  #lassoPath{fill:rgba(91,157,255,.18);stroke:var(--blue);stroke-width:2.5;
+    stroke-dasharray:8 5;stroke-linejoin:round;display:none;}
 
   /* 4 overlay · 5 chrome · 20 sheets · 28 docked · 30 modal · 40 walkthrough
      50 toast · 60 tooltip */
@@ -93,6 +106,9 @@
   /* icon buttons — square, icon-only, tooltip carries the name */
   .ico{width:38px;height:38px;padding:0;display:inline-flex;align-items:center;
     justify-content:center;border-radius:12px;}
+  /* the brush-type button mirrors the grid's icon, which is drawn in a wider
+     box than the 24-square the other rail icons use */
+  #brushType svg{width:24px;height:17px;}
   .ico svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.5;
     stroke-linecap:round;stroke-linejoin:round;}
   .ico.sm{width:32px;height:32px;border-radius:10px;}
@@ -122,8 +138,9 @@
     height:2px;background:var(--ink);border-radius:2px;}
 
   /* a grid of option icons, 4 across */
-  .igrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+  .igrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;}
   .igrid button{width:100%;height:40px;border-radius:12px;background:var(--panel2);}
+  .igrid.three{grid-template-columns:repeat(3,minmax(0,1fr));}
   .igrid button:hover{background:var(--panel3);}
   .igrid button.on{background:var(--active);color:var(--onActive);}
 
@@ -143,11 +160,15 @@
   input[type=range]::-moz-range-track{height:4px;background:var(--panel3);border-radius:3px;}
   input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;border:0;
     background:var(--panel);box-shadow:0 1px 4px rgba(0,0,0,.28);}
+  /* the ring lives on the input, not on ::-webkit-color-swatch: the input's own
+     overflow:hidden clips an outset shadow drawn inside it, and a swatch holding
+     the panel's own colour then has no edge at all. */
   input[type=color]{width:30px;height:30px;padding:0;border:0;border-radius:50%;
-    background:transparent;cursor:pointer;flex:0 0 auto;overflow:hidden;}
+    background:transparent;cursor:pointer;flex:0 0 auto;overflow:hidden;
+    box-shadow:0 0 0 2px var(--dim);}
   input[type=color]::-webkit-color-swatch-wrapper{padding:0;}
-  input[type=color]::-webkit-color-swatch{border:0;border-radius:50%;
-    box-shadow:0 0 0 1px var(--line);}
+  input[type=color]::-webkit-color-swatch{border:0;border-radius:50%;}
+  input[type=color]::-moz-color-swatch{border:0;border-radius:50%;}
 
   .sw{width:19px;height:19px;border-radius:50%;border:0;cursor:pointer;padding:0;
     min-height:0;flex:0 0 auto;box-shadow:0 0 0 1px var(--line);}
@@ -212,6 +233,14 @@
   .vslider input[type=range]{width:74px;transform:rotate(-90deg);flex:0 0 auto;min-width:0;}
 
   /* brush-type popover, anchored to the rail */
+  /* a readout you can drag: Feather adjusts size and opacity by sliding up
+     or down on the value itself, so it needs to look and behave like a
+     control rather than a label — and never scroll the panel under a touch. */
+  .val.dragv{touch-action:none;cursor:ns-resize;user-select:none;
+    padding:2px 4px;border-radius:8px;background:var(--panel2);
+    align-self:stretch;text-align:center;box-sizing:border-box;}
+  .val.dragv:hover{background:var(--panel3);}
+
   #brushGrid{position:fixed;left:78px;top:50%;transform:translateY(-50%);
     background:var(--panel);border-radius:var(--rCard);box-shadow:var(--shadowLg);
     padding:8px;display:grid;grid-template-columns:repeat(2,1fr);gap:6px;z-index:26;}
@@ -281,12 +310,55 @@
     max-height:calc(100vh - 90px);overflow:auto;display:flex;flex-direction:column;
     gap:12px;z-index:28;box-shadow:var(--shadowLg);}
   .list{display:flex;flex-direction:column;gap:4px;max-height:190px;overflow:auto;}
+  #groupList{max-height:268px;}
+  /* ---- group rows ------------------------------------------------------
+     Feather's grouping panel: one row per group, the name on the left, then
+     the "move selection in here" arrow and the visibility eye. The active
+     group is the highlighted one. */
+  /* ---- liquify ----
+     A strip above the context bar rather than a card at the right: liquify
+     always has a selection, and a selection always has the joystick, which
+     lives on the right. */
+  #liquifyPanel{left:50%;transform:translateX(-50%);bottom:70px;padding:8px 10px;
+    display:flex;align-items:center;gap:10px;z-index:22;max-width:calc(100vw - 24px);}
+  #lqHead{display:flex;align-items:center;gap:6px;}
+  #lqModes{display:flex;gap:4px;grid-template-columns:none;}
+  #lqModes button{width:40px;height:34px;}
+  #lqModes svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.5;}
+  .lqRow{display:flex;align-items:center;gap:5px;}
+  .lqRow .lab{color:var(--dim);font-size:11px;}
+  #btnLqApply{display:flex;align-items:center;justify-content:center;gap:5px;}
+  #btnLqApply svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;}
+  body.compact #liquifyPanel{bottom:64px;gap:6px;padding:6px 8px;}
+  body.compact #lqHead h4{display:none;}
+
+  #grpHead{align-items:center;gap:6px;}
+  .ico.danger{color:var(--bad,#d2413f);}
+  .grpRow{display:flex;align-items:center;gap:2px;padding:5px 4px 5px 8px;
+    border-radius:12px;background:var(--panel2);border:1.5px solid transparent;
+    touch-action:none;}
+  .grpRow:hover{background:var(--panel3);}
+  .grpRow.on{border-color:var(--ink);background:var(--panel3);}
+  .grpRow.hidden-group .grpName,.grpRow.hidden-group .grpCount{opacity:.45;}
+  .grpName{flex:1 1 auto;min-width:0;text-align:left;background:transparent;
+    padding:3px 2px;border-radius:7px;font-size:13px;color:var(--ink);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:0;}
+  .grpName:hover{background:var(--panel);}
+  .grpNameEdit{flex:1 1 auto;min-width:0;font:inherit;font-size:13px;
+    color:var(--ink);background:var(--panel);border:0;border-radius:7px;
+    padding:3px 4px;outline:1.5px solid var(--ink);}
+  .grpCount{flex:0 0 auto;color:var(--dim2);font-size:10px;padding:0 2px;}
+  .grpRow .ico.sm{flex:0 0 auto;width:28px;height:28px;}
+  .grpRow .ico.sm.off{color:var(--dim2);}
   .listItem{display:flex;gap:8px;align-items:center;padding:7px 9px;border-radius:12px;
     font-size:12px;cursor:pointer;background:var(--panel2);}
   .listItem:hover{background:var(--panel3);}
   .listItem .tag{color:var(--dim2);font-size:10px;margin-left:auto;}
   .listItem.sel{background:var(--active);color:var(--onActive);}
   .listItem.sel .tag{color:var(--onActive);opacity:.7;}
+  /* the row inverts when it is the active one, and its buttons have to come
+     with it — a ghost button keeps its own colour and vanishes otherwise */
+  .listItem.sel .ghost{color:var(--onActive);}
   .empty{color:var(--dim2);font-size:11px;padding:3px 1px;line-height:1.55;}
 
   #diag{top:62px;right:12px;padding:10px 12px;width:184px;
@@ -465,6 +537,8 @@
   <symbol id="i-select" viewBox="0 0 24 24"><path d="M5.5 4.5 19 11l-5.8 1.8L11 19z"/></symbol>
   <symbol id="i-lasso" viewBox="0 0 24 24"><ellipse cx="12" cy="10" rx="8" ry="6"/><path d="M8.5 15.4c-.4 2 .6 3.4 2.2 3.9"/></symbol>
   <symbol id="i-smooth" viewBox="0 0 24 24"><path d="M3 14c3-7 6 7 9 0s6-7 9 0"/></symbol>
+  <symbol id="i-flatguide" viewBox="0 0 24 24"><path d="M4.5 8.5c2-3 6-4.5 9-3.5s5.5 4 5.5 7-2 5.5-5 6-7-.5-8.5-3-3-3.5-1-6.5z"/><path d="M8 11.5c1.5-1 3.5-1 5 0"/></symbol>
+  <symbol id="i-fill" viewBox="0 0 24 24"><path d="M4.5 12.5 11 6l6.5 6.5-6.5 6.5z"/><path d="M4.5 12.5h13"/><path d="M20 14.5c1.2 1.6 1.8 2.7 1.8 3.4a1.8 1.8 0 0 1-3.6 0c0-.7.6-1.8 1.8-3.4z"/></symbol>
   <symbol id="i-erase" viewBox="0 0 24 24"><path d="M8 18 4.5 14.5 13 6l6.5 6.5-5.5 5.5z"/><path d="M4 20h16"/></symbol>
   <symbol id="i-vacuum" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><path d="M6.5 6.5 17.5 17.5"/></symbol>
   <symbol id="i-mirror" viewBox="0 0 24 24"><path d="M12 3v18"/><path d="M8.5 7.5 4.5 12l4 4.5"/><path d="M15.5 7.5 19.5 12l-4 4.5"/></symbol>
@@ -472,6 +546,13 @@
   <symbol id="i-pick" viewBox="0 0 24 24"><path d="M18.5 3.6a2.3 2.3 0 0 0-3.3 0l-1.4 1.4 3.2 3.2 1.5-1.4a2.3 2.3 0 0 0 0-3.2z"/><path d="M13.2 6.3 5 14.5V19h4.5l8.2-8.2"/></symbol>
   <symbol id="i-inject" viewBox="0 0 24 24"><path d="M14 4l6 6"/><path d="M17.5 6.5 8 16v3h3l9.5-9.5z" transform="translate(-2,-1)"/><path d="M5 19l-1.5 1.5"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5"/></symbol>
+  <symbol id="i-liquify" viewBox="0 0 24 24"><path d="M4 15c3-6 6 4 9-1s4-6 7-4"/><path d="M4 19c3-6 6 4 9-1"/><path d="M9 7c1.5-2.5 4-2.5 5.5 0"/></symbol>
+  <symbol id="i-lq-push" viewBox="0 0 24 24"><path d="M4 12h11"/><path d="M11.5 8.5 15 12l-3.5 3.5"/><path d="M19 5v14"/></symbol>
+  <symbol id="i-lq-pinch" viewBox="0 0 24 24"><path d="M3 12h6"/><path d="M21 12h-6"/><path d="M6.5 8.5 3 12l3.5 3.5"/><path d="M17.5 8.5 21 12l-3.5 3.5"/></symbol>
+  <symbol id="i-lq-comb" viewBox="0 0 24 24"><path d="M3 8h18"/><path d="M6 8v8M10 8v8M14 8v8M18 8v8"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12.5 5 5L20 6.5"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M3 10.5S6.5 16 12 16s9-5.5 9-5.5"/><path d="M5.5 13.4 3.6 16"/><path d="M18.5 13.4 20.4 16"/><path d="M12 16v3"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.6"/></symbol>
   <symbol id="i-brush" viewBox="0 0 24 24"><path d="M4 20s1-4 3.5-4S11 18 11 19s-3 2-7 1z"/><path d="M9.5 16.5 19 7a2 2 0 0 0-2.8-2.8L6.7 13.7"/></symbol>
   <symbol id="i-dup" viewBox="0 0 24 24"><path d="M4 4h11v11H4z"/><path d="M8.5 19.5h11v-11"/></symbol>
@@ -491,7 +572,7 @@
 <!-- ============================ top left ============================ -->
 <div id="topleft" class="panel">
   <button class="ico" id="btnHome" data-tip="Reset view<br><i>F — or press-and-hold empty space</i>"><svg><use href="#i-grid"/></svg></button>
-  <button class="ico" id="btnExportTop" data-tip="Export — PNG or .plume file"><svg><use href="#i-export"/></svg></button>
+  <button class="ico" id="btnExportTop" data-tip="Export — PNG, glTF/OBJ/STL or .plume file"><svg><use href="#i-export"/></svg></button>
   <button class="ico" id="btnMenu" data-tip="Settings"><svg><use href="#i-menu"/></svg></button>
 </div>
 <div id="helpBtn" class="panel">
@@ -505,6 +586,7 @@
   <button class="ico" data-tool="select"    data-tip="Select — tap again for Lasso<br><i>S</i>"><svg><use href="#i-select"/></svg></button>
   <button class="ico alt" data-tool="lasso" data-tip="Lasso — drag a loop<br><i>L</i>"><svg><use href="#i-lasso"/></svg></button>
   <button class="ico" data-tool="smooth"    data-tip="Smooth — drag over a shaky curve<br><i>M</i>"><svg><use href="#i-smooth"/></svg></button>
+  <button class="ico" data-tool="fill"      data-tip="Fill — coats the whole guide in the current brush and colour<br><i>K</i>"><svg><use href="#i-fill"/></svg></button>
   <button class="ico" data-tool="erase"     data-tip="Eraser — tap again for Vacuum<br><i>E</i>"><svg><use href="#i-erase"/></svg></button>
   <button class="ico alt" data-tool="vacuum" data-tip="Vacuum — deletes whole curves<br><i>V</i>"><svg><use href="#i-vacuum"/></svg></button>
   <div class="div"></div>
@@ -522,9 +604,9 @@
     <button class="ico" id="brushType" data-tip="Brush type"><svg><use href="#i-brush"/></svg></button>
     <button id="brushColor" data-tip="Colour"></button>
     <div class="sep" style="width:100%"></div>
-    <button class="ico" id="btnSize" data-tip="Brush size — tap to type an exact value"><svg><use href="#i-size"/></svg></button>
+    <button class="ico" id="btnSize" data-tip="Brush size — drag up or down, or tap the value to type one"><svg><use href="#i-size"/></svg></button>
     <span class="val" id="sizeVal">14mm</span>
-    <button class="ico" id="btnOpacity" data-tip="Opacity"><svg><use href="#i-opacity"/></svg></button>
+    <button class="ico" id="btnOpacity" data-tip="Opacity — drag up or down, or tap the value to type one"><svg><use href="#i-opacity"/></svg></button>
     <span class="val" id="opacityVal">100%</span>
     <div class="sep" style="width:100%"></div>
     <button class="ico sm" id="btnPressure" data-tip="Pressure sensitivity"><svg><use href="#i-brush"/></svg></button>
@@ -541,7 +623,7 @@
 <!-- size / opacity slider popover, opened from the rail -->
 <div id="slidePop" class="panel hidden">
   <div class="row">
-    <input type="range" id="size" min="1" max="120" value="14">
+    <input type="range" id="size" min="1" max="300" value="14">
     <span class="val" id="sizeValPop">14mm</span>
   </div>
   <div class="row">
@@ -560,21 +642,20 @@
 
 <!-- brush-type popover -->
 <div id="brushGrid" class="hidden">
-  <button data-brush="round"  class="on" data-tip="Round"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="7" stroke-linecap="round"/></svg></button>
-  <button data-brush="flat"   data-tip="Flat — follows pen tilt"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="3.5" stroke-linecap="butt"/></svg></button>
-  <button data-brush="taper"  data-tip="Taper — thins at both ends"><svg viewBox="0 0 28 20"><path d="M3 10c6-4 16-4 22 0-6 4-16 4-22 0z" fill="currentColor" stroke="none"/></svg></button>
-  <button data-brush="ink"    data-tip="Ink — pressure-driven"><svg viewBox="0 0 28 20"><path d="M3 11c6-5 16 3 22-3" stroke-width="4" stroke-linecap="round"/></svg></button>
-  <button data-brush="pencil" data-tip="Pencil — fine, dry"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="2" stroke-linecap="round"/></svg></button>
-  <button data-brush="marker" data-tip="Marker — broad chisel"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="9" stroke-linecap="butt"/></svg></button>
-  <button data-brush="chisel" data-tip="Chisel — hard blade"><svg viewBox="0 0 28 20"><path d="M4 15 24 5" stroke-width="6" stroke-linecap="butt"/></svg></button>
-  <button data-brush="wide"   data-tip="Wide — large areas fast"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="13" stroke-linecap="butt"/></svg></button>
-  <button data-brush="ribbon" data-tip="Ribbon — flat tape"><svg viewBox="0 0 28 20"><path d="M3 7h22M3 13h22" stroke-width="2"/></svg></button>
-  <button data-brush="glow"   data-tip="Glow — emissive"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="4" stroke-linecap="round" opacity=".35"/><path d="M3 10h22" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+  <button data-brush="pen"    class="on" data-tip="Pen — round nib, crisp ends"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="6" stroke-linecap="round"/></svg></button>
+  <button data-brush="sketch" data-tip="Sketch Pencil — a gritty chisel edge that builds up as you go over it.<br><i>Shading, hatching, roughing a form in.</i>"><svg viewBox="0 0 28 20"><path d="M3 13.5c5-1.5 8 1 12-1s7-4.5 10-5.5" stroke-width="4.5" stroke-linecap="round" opacity=".5"/><path d="M4 15.5c5-1.5 8 1 12-1s6-4 9-5" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+  <button data-brush="taper"  data-tip="Tapered — sharp pointed ends.<br><i>Clean linework, hair, fins, organic detail.</i>"><svg viewBox="0 0 28 20"><path d="M2 10c7-5 17-5 24 0-7 5-17 5-24 0z" fill="currentColor" stroke="none"/></svg></button>
+  <button data-brush="rectangle" data-tip="Rectangle — blocky and uniform, and the size sets how far it stands off the surface.<br><i>Structural surfaces, hard surfaces, blocked-out silhouettes.</i>"><svg viewBox="0 0 28 20"><path d="M3 5.5h22v9H3z"/></svg></button>
+  <button data-brush="cube"   data-tip="Cube — narrow geometric lines.<br><i>Dense linework you mean to deform later.</i>"><svg viewBox="0 0 28 20"><path d="M9 7.5 14 5l5 2.5v5L14 15l-5-2.5z"/><path d="M9 7.5 14 10l5-2.5M14 10v5"/></svg></button>
+  <button data-brush="flat"   data-tip="Flat — a ribbon that stays a sheet at every size.<br><i>Its thinness scales with its width.</i>"><svg viewBox="0 0 28 20"><path d="M2 7.5h24v5H2z" fill="currentColor" stroke="none" opacity=".75"/></svg></button>
+  <button data-brush="wide"   data-tip="Wide — a broad flat ribbon.<br><i>Fills volume fast: cloth, planes, large areas.</i>"><svg viewBox="0 0 28 20"><path d="M3 4h22v12H3z" fill="currentColor" stroke="none" opacity=".9"/></svg></button>
+  <button data-brush="glow"   data-tip="Glow — emissive, adds where it overlaps"><svg viewBox="0 0 28 20"><path d="M3 10h22" stroke-width="5" stroke-linecap="round" opacity=".35"/><path d="M3 10h22" stroke-width="1.5" stroke-linecap="round"/></svg></button>
 </div>
 
 <!-- ==================== bottom context menu: guide tools ==================== -->
 <div id="ctx" class="panel">
   <button class="ico" data-tool="guide" data-tip="Draw 3D Guide — extrudes along the view direction<br><i>G</i>"><svg><use href="#i-guide"/></svg></button>
+  <button class="ico" data-tool="flatguide" data-tip="Flat Shape Guide — draw a closed outline and it fills in where you drew it, facing you<br><i>Sits at the depth of whatever is under the stroke.</i>"><svg><use href="#i-flatguide"/></svg></button>
   <button class="ico" data-tool="bend"  data-tip="Bend — redraw the sweep from another viewpoint<br><i>B</i>"><svg><use href="#i-bend"/></svg></button>
   <button class="ico" data-tool="loft"  data-tip="Loft — connect two or more curves"><svg><use href="#i-loft"/></svg></button>
   <button class="ico" data-tool="prim"  data-tip="Primitives — cube, pyramid, sphere, tube"><svg><use href="#i-solid"/></svg></button>
@@ -605,6 +686,7 @@
       <button class="small filled" data-prim="cube">Cube</button>
       <button class="small filled" data-prim="pyramid">Pyr</button>
       <button class="small filled" data-prim="sphere">Sph</button>
+      <button class="small filled" data-prim="torus">Torus</button>
       <button class="small filled" data-prim="tube">Tube</button>
     </span>
     <button class="small on" id="btnCtxDone">Done</button>
@@ -624,8 +706,8 @@
     <svg viewBox="0 0 108 108">
       <circle cx="54" cy="54" r="43" fill="none" stroke="var(--line)" stroke-width="1"/>
       <circle cx="54" cy="54" r="19" fill="none" stroke="var(--line)" stroke-width="1"/>
-      <!-- the three arcs are positioned in JS: each sits where its world axis
-           points on screen, so they rotate as the camera orbits -->
+      <!-- the three arcs are positioned in JS at fixed, equally spaced points
+           on the ring, so a handle stays where you last reached for it -->
       <path id="arcX" class="axisArc" stroke="#f2545b"></path>
       <path id="arcY" class="axisArc" stroke="#4cc38a"></path>
       <path id="arcZ" class="axisArc" stroke="#5b9dff"></path>
@@ -647,15 +729,18 @@
   </div>
 
   <div id="bodyGroup" class="col">
+    <div class="row" id="grpHead">
+      <button class="ico sm danger" id="btnGroupDel" data-tip="Delete this group and everything in it"><svg><use href="#i-trash"/></svg></button>
+      <button class="ico sm" id="btnGroupDup" data-tip="Duplicate this group and its curves"><svg><use href="#i-dup"/></svg></button>
+      <span class="grow"></span>
+      <button class="ico sm" id="btnGroupNew" data-tip="New group"><svg><use href="#i-plus"/></svg></button>
+    </div>
     <div class="list" id="groupList"></div>
+    <div class="empty" id="grpHint">Tap a row to draw into it, its name to rename · hold to select its curves · the arrow moves the selection in</div>
     <div class="row">
       <button class="small filled grow" id="btnSelAll">Select all</button>
-      <button class="small filled grow" id="btnDelSel">Delete</button>
-    </div>
-    <div class="row">
       <button class="small filled grow" id="btnDuplicate" data-tip="Copy the selection">Duplicate</button>
-      <button class="small filled grow" id="btnGroup">Group</button>
-      <button class="small filled grow" id="btnUngroup">Ungroup</button>
+      <button class="small filled grow" id="btnDelSel">Delete</button>
     </div>
   </div>
 
@@ -666,13 +751,42 @@
   </div>
 
   <div id="bodyEnv" class="col hidden">
-    <div class="row"><label class="lab grow">Background</label><input type="color" id="bgPick" value="#eceaf3"></div>
-    <div class="igrid">
+    <div class="row"><label class="lab grow">Background</label>
+      <input type="color" id="bgPick" value="#eceaf3" data-tip="Background colour — the fog and the ground follow it"></div>
+    <div class="igrid three">
       <button id="optGrid"   class="on" data-tip="Ground grid — one unit = 1000mm">Grid</button>
       <button id="optAxis"   data-tip="Global axis, RGB = XYZ">Axis</button>
       <button id="optFog"    data-tip="Fog follows the background">Fog</button>
       <button id="optShaded" class="on" data-tip="Shaded material">Shade</button>
+      <button id="optRender" data-tip="Render mode — shadows and effects show accurately here.<br><i>Drawing stays fast outside it.</i>">Render</button>
+      <button id="optShadow" class="on" data-tip="Ground shadow — the sketch casts onto the ground.<br><i>Render mode only.</i>">Shadow</button>
     </div>
+
+    <div class="row"><label class="lab grow">Lighting</label>
+      <button id="optToon" data-tip="Toon shading — bands instead of a gradient.<br><i>Shaded material only.</i>">Toon</button>
+    </div>
+    <div class="row lightRow">
+      <div id="lightPad" data-tip="Light direction — slide sideways to turn it, up and down to raise it"><div id="lightDot"></div></div>
+      <div class="col grow">
+        <div class="row"><label class="lab grow">Colour</label>
+          <input type="color" id="lightPick" value="#ffffff"></div>
+        <div class="row"><label class="lab grow">Intensity</label>
+          <span class="val" id="lightIntVal">100%</span></div>
+        <div class="row"><label class="lab grow">Ambient</label>
+          <span class="val" id="lightAmbVal">66%</span></div>
+      </div>
+    </div>
+
+    <div class="row"><label class="lab grow">Effects</label></div>
+    <div class="igrid">
+      <button id="optDof"   data-tip="Depth of field — what you orbit around stays sharp.<br><i>Render mode only.</i>">DOF</button>
+      <button id="optGrain" data-tip="Film grain over the image">Grain</button>
+      <button id="optPixel" data-tip="Pixelate the image">Pixel</button>
+    </div>
+    <div class="row"><label class="lab grow">F-stop</label><span class="val" id="fstopVal">f/5.6</span></div>
+    <div class="row"><label class="lab grow">Grain level</label><span class="val" id="grainVal">35%</span></div>
+    <div class="row"><label class="lab grow">Block size</label><span class="val" id="pixelVal">4px</span></div>
+
   </div>
 </div>
 
@@ -698,6 +812,11 @@
     <input type="range" id="stableAmt" min="0" max="95" value="45">
     <span class="val" id="stableVal">45</span>
     <button class="ico sm" id="optStable" data-tip="Stable Stroke — input stabiliser"><svg><use href="#i-smooth"/></svg></button>
+  </div>
+  <div class="pair" data-tip="Radial symmetry — every stroke is repeated around the upright axis.<br><i>Turn on Mirror as well for a rosette instead of a pinwheel.</i>">
+    <span style="min-width:78px">Radial</span>
+    <input type="range" id="radialAmt" min="1" max="16" value="1">
+    <span class="val" id="radialVal">Off</span>
   </div>
 
   <div class="sep"></div>
@@ -731,6 +850,9 @@
     <button class="small" id="btnImport" data-tip="Open a .plume.json sketch">Open</button>
     <button class="small" id="btnPNG">PNG</button>
     <button class="small" id="btnClear">Clear</button>
+    <button class="small" id="btnOBJ" data-tip="Export the geometry as .obj, with a .mtl for the colours.<br><i>Millimetres. Selection only, if anything is selected.</i>">OBJ</button>
+    <button class="small" id="btnSTL" data-tip="Export the geometry as binary .stl — for printing or CAD.<br><i>Millimetres, no colour.</i>">STL</button>
+    <button class="small" id="btnGLTF" data-tip="Export the geometry as .gltf, colours and transparency included.<br><i>One self-contained file. Metres, Y-up — what Blender and most 3D viewers want.</i>">glTF</button>
   </div>
   <div id="saveInfo" class="empty">Autosaves to this device.</div>
 </div>
@@ -781,7 +903,25 @@
 <div id="selBar" class="panel hidden">
   <button class="ico" id="btnSelDup" data-tip="Duplicate"><svg><use href="#i-dup"/></svg></button>
   <button class="ico" id="btnSelDupMir" data-tip="Duplicate symmetrically"><svg><use href="#i-dupmir"/></svg></button>
+  <button class="ico" id="btnSelLiquify" data-tip="Liquify — press and drag to deform the selection"><svg><use href="#i-liquify"/></svg></button>
   <button class="ico" id="btnSelDelete" data-tip="Delete"><svg><use href="#i-trash"/></svg></button>
+</div>
+
+<!-- ============ liquify ============
+     FACT: the panel carries size, range and strength — each adjusted by
+     sliding up or down — a mode you tap to change, and an Apply button. -->
+<div id="liquifyPanel" class="panel hidden">
+  <div id="lqHead"><h4>Liquify</h4>
+    <button class="ico sm" id="btnLqClose" data-tip="Close"><svg><use href="#i-close"/></svg></button></div>
+  <div class="igrid" id="lqModes">
+    <button class="small" data-lq="push"  data-tip="Push — distorts naturally, as if pushing or pulling with a finger"><svg><use href="#i-lq-push"/></svg></button>
+    <button class="small" data-lq="pinch" data-tip="Pinch — distorts sharply and precisely.<br><i>For extending or shrinking specific curves.</i>"><svg><use href="#i-lq-pinch"/></svg></button>
+    <button class="small" data-lq="comb"  data-tip="Comb — gently smooths and aligns.<br><i>Straightens wavy curves; works best with a rubbing motion.</i>"><svg><use href="#i-lq-comb"/></svg></button>
+  </div>
+  <div class="lqRow"><span class="lab">Size</span><span class="val" id="lqSizeVal">120</span></div>
+  <div class="lqRow"><span class="lab">Range</span><span class="val" id="lqRangeVal">60</span></div>
+  <div class="lqRow"><span class="lab">Strength</span><span class="val" id="lqStrengthVal">55</span></div>
+  <button class="small filled" id="btnLqApply"><svg><use href="#i-check"/></svg> Apply</button>
 </div>
 
 <!-- ============ numeric keypad ============ -->
@@ -824,6 +964,8 @@
 <script src="js/strokes.js"></script>
 <script src="js/guides.js"></script>
 <script src="js/import.js"></script>
+<script src="js/export.js"></script>
+<script src="js/fx.js"></script>
 <script src="js/doc.js"></script>
 <script src="js/tools.js"></script>
 <script src="js/app.js"></script>

@@ -248,15 +248,45 @@ function attachOrange(guide, pts){
 /* ==========================================================================
    4. Sweep evaluation
    ========================================================================== */
+/* WHICH WAY UP THE PROFILE SITS ON A NEW PATH.
+
+   The transported frames need a seed at index 0, and the obvious seed —
+   basisR, the profile's own right axis — fails in the most ordinary case
+   there is. transportFrames projects the seed perpendicular to the first
+   tangent, and when the path sets off ALONG basisR that projection is
+   degenerate, so it falls back to an arbitrary world-axis perpendicular. That
+   is precisely the common bend: draw a profile in the front view, orbit to the
+   top, drag sideways. Measured on a hooked profile, two bend paths 2.3 degrees
+   apart produced reference frames 178 degrees apart and surfaces 0.81 units
+   apart — the profile flipped end for end. Symmetric profiles hid it; a curved
+   stroke showed it every time, which is exactly how it was reported.
+
+   So carry the whole anchor frame onto the new tangent by the shortest
+   rotation instead. It reduces to basisR exactly when the path still runs
+   along basisT (guide creation, unchanged), it is continuous everywhere the
+   minimal rotation is, and it keeps the profile facing the way the user drew
+   it. A path doubling straight back along the extrusion axis is the one
+   antipodal case: rotate 180 degrees about basisR, which maps basisT to its
+   opposite and leaves basisR itself alone. */
+var _sq = new THREE.Quaternion(), _seedV = new THREE.Vector3();
+
+function sweepSeed(sweep, T0){
+  if(sweep.basisT.dot(T0) < -0.999999) return _seedV.copy(sweep.basisR);
+  _sq.setFromUnitVectors(sweep.basisT, T0);
+  return _seedV.copy(sweep.basisR).applyQuaternion(_sq);
+}
+
 function evalSweep(sweep){
   var path = sweep.path, local = sweep.local;
-  var fr = P.transportFrames(path, sweep.basisR);
+  var T0 = P.computeTangents(path)[0];
+  var fr = P.transportFrames(path, sweepSeed(sweep, T0));
   sweep.frames = fr;
 
   /* local[] was written in the anchor frame; because the frames are
-     transported from index 0 with basisR as the seed, the frame at the anchor
-     row is exactly (basisT, basisR, basisT x basisR) again — so the profile
-     can be laid down row by row with no re-derivation. */
+     transported from index 0 with the anchor frame carried onto the path, the
+     frame at the anchor row is (basisT, basisR, basisT x basisR) rotated onto
+     the path — so the profile can be laid down row by row with no
+     re-derivation. */
   var rows = [], j, i;
   var s = new THREE.Vector3();
   for(j=0;j<path.length;j++){
@@ -331,6 +361,119 @@ G.createFromStroke = function(worldPts, viewDir, camRight, camUp){
   });
 };
 
+/* ==========================================================================
+   5b. A FLAT guide: the shape you drew, facing you
+   --------------------------------------------------------------------------
+   The ordinary guide takes your stroke as a PROFILE and extrudes it away along
+   the view, which is why a circle becomes a tube. This one takes the stroke as
+   an OUTLINE and fills it in place: what you drew is what you get, a flat sheet
+   sitting in the plane you drew it on, covering the area the loop encloses.
+
+   It is triangulated to the outline rather than built as a grid clipped to it,
+   so the edge is the curve you drew and not a staircase of cells. That costs
+   the (u,v) grid every other guide has, so the plane states its own extent and
+   carries its outline; frameOnTriangle reads both, reachAlong trims to the
+   outline, and Fill tests against it.
+   ========================================================================== */
+function planeBasisFrom(normal, camRight){
+  var n = normal.clone().normalize();
+  var r = camRight.clone().addScaledVector(n, -camRight.dot(n));
+  if(r.lengthSq() < EPS) P.perpTo(n, r);
+  r.normalize();
+  return { normal:n, right:r, up: new THREE.Vector3().crossVectors(n, r).normalize() };
+}
+
+G.createFlatFromStroke = function(worldPts, viewDir, camRight){
+  if(!worldPts || worldPts.length < 3) return null;
+  var basis = planeBasisFrom(viewDir, camRight);
+
+  /* the loop, in plane coordinates, closed */
+  var mid = new THREE.Vector3(), i;
+  for(i=0;i<worldPts.length;i++) mid.add(worldPts[i]);
+  mid.multiplyScalar(1/worldPts.length);
+
+  var d = new THREE.Vector3(), raw = [];
+  var minU = Infinity, minV = Infinity, maxU = -Infinity, maxV = -Infinity;
+  for(i=0;i<worldPts.length;i++){
+    d.subVectors(worldPts[i], mid);
+    var u = d.dot(basis.right), v = d.dot(basis.up);
+    if(raw.length){
+      var last = raw[raw.length-1];
+      if(Math.abs(u-last.u) < 1e-9 && Math.abs(v-last.v) < 1e-9) continue;
+    }
+    raw.push({u:u, v:v});
+    if(u<minU) minU=u; if(u>maxU) maxU=u;
+    if(v<minV) minV=v; if(v>maxV) maxV=v;
+  }
+  if(raw.length < 3) return null;
+  var Lu = maxU - minU, Lv = maxV - minV;
+  if(!(Lu > EPS) || !(Lv > EPS)) return null;
+
+  /* origin at the corner of the bounding box, so u and v run 0..Lu, 0..Lv and
+     read like the arc lengths every other guide hands out */
+  var origin = mid.clone()
+    .addScaledVector(basis.right, minU)
+    .addScaledVector(basis.up,    minV);
+  var outline = raw.map(function(q){ return { u:q.u-minU, v:q.v-minV }; });
+
+  var guide = newGuide('flat');
+  guide.plane = { origin: origin, right: basis.right.clone(), up: basis.up.clone(),
+                  normal: basis.normal.clone(), Lu: Lu, Lv: Lv, outline: outline };
+  rebuildFlat(guide);
+  return guide;
+};
+
+function rebuildFlat(guide){
+  var pl = guide.plane, outline = pl.outline;
+  var shape = new THREE.Shape();
+  shape.moveTo(outline[0].u, outline[0].v);
+  for(var i=1;i<outline.length;i++) shape.lineTo(outline[i].u, outline[i].v);
+  shape.closePath();
+
+  var flat = new THREE.ShapeGeometry(shape);
+  var src = flat.attributes.position, n = src.count;
+  var pos = new Float32Array(n*3), nor = new Float32Array(n*3), uvw = new Float32Array(n*2);
+  var p = new THREE.Vector3();
+  for(i=0;i<n;i++){
+    var u = src.getX(i), v = src.getY(i);
+    p.copy(pl.origin).addScaledVector(pl.right, u).addScaledVector(pl.up, v);
+    pos[i*3] = p.x; pos[i*3+1] = p.y; pos[i*3+2] = p.z;
+    nor[i*3] = pl.normal.x; nor[i*3+1] = pl.normal.y; nor[i*3+2] = pl.normal.z;
+    uvw[i*2] = u; uvw[i*2+1] = v;
+  }
+  var geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  geom.setAttribute('normal',   new THREE.BufferAttribute(nor,3));
+  geom.setAttribute('uvw',      new THREE.BufferAttribute(uvw,2));
+  var idx = flat.index ? Array.prototype.slice.call(flat.index.array) : null;
+  if(idx) geom.setIndex(new THREE.BufferAttribute(
+    n < 65536 ? new Uint16Array(idx) : new Uint32Array(idx), 1));
+  geom.computeBoundingSphere();
+  geom.userData.Lu = pl.Lu; geom.userData.Lv = pl.Lv;
+  geom.userData.outline = outline;
+  flat.dispose();
+  attachMesh(guide, geom, 0);
+}
+G.rebuildFlat = rebuildFlat;
+
+/* Rebuild a flat guide from stored plane data, so a reloaded one is identical
+   to a drawn one. */
+G.fromPlaneData = function(d){
+  var out = [];
+  for(var i=0;i+1<d.outline.length;i+=2) out.push({ u:d.outline[i], v:d.outline[i+1] });
+  if(out.length < 3) return null;
+  var guide = newGuide('flat');
+  guide.plane = {
+    origin: new THREE.Vector3(d.origin[0], d.origin[1], d.origin[2]),
+    right:  new THREE.Vector3(d.right[0],  d.right[1],  d.right[2]),
+    up:     new THREE.Vector3(d.up[0],     d.up[1],     d.up[2]),
+    normal: new THREE.Vector3(d.normal[0], d.normal[1], d.normal[2]),
+    Lu: d.Lu, Lv: d.Lv, outline: out
+  };
+  rebuildFlat(guide);
+  return guide;
+};
+
 /* Build a swept guide straight from sweep data. Creation and document restore
    both land here, so a reloaded guide is bit-identical to a drawn one and can
    be bent again exactly the same way. */
@@ -392,10 +535,23 @@ G.bend = function(guide, worldPath){
    6b. Bending a guide that has no sweep — lofts, primitives, imported models
    --------------------------------------------------------------------------
    A swept guide bends by replacing its path. A loft or a cube has no profile
-   and path to replace, so those guides bend as a curve DEFORM instead: the
-   mesh's longest axis is re-parameterised onto the drawn stroke, and each
-   vertex is carried along in the transported frame at its own position. Same
+   and path to replace, so those guides bend as a curve DEFORM instead: one
+   axis of the mesh is re-parameterised onto the drawn stroke, and each vertex
+   is carried along in the transported frame at its own position. Same
    gesture, same "follow the line I drew" result, on any geometry.
+
+   WHICH axis, and which way along it, is decided by the STROKE — not by the
+   mesh alone. Picking the longest axis and always running it low-to-high is
+   what made this bend backwards: a sphere or a cube has no meaningful longest
+   axis, so the deform ran along local +X whatever the user drew, and any
+   stroke heading the other way produced a guide sweeping away from the pen.
+   Measured against the drawn direction, before: cube 91 degrees off, tube 86,
+   pyramid 88, sphere a full 180. After: 0 for all four.
+
+   So: among the axes long enough to be worth routing, take the one closest to
+   the direction actually drawn, and orient it to point the same way. A rod
+   still bends along its length (its other axes are too short to qualify); a
+   cube bends whichever way the stroke goes.
 
    The undeformed vertices are kept, so repeated bends re-deform the original
    rather than compounding into mush — which matches how a swept bend replaces
@@ -417,6 +573,7 @@ G.unbendMesh = function(guide){
   guide.mesh.geometry.computeVertexNormals();
   guide.mesh.geometry.computeBoundingSphere();
   guide.mesh.geometry.computeBoundingBox();
+  G.invalidateMask();
   guide.bendPath = null;
 };
 
@@ -432,7 +589,6 @@ G.bendMesh = function(guide, worldPath){
   var local = worldPath.map(function(p){ return p.clone().applyMatrix4(toLocal); });
   local = P.resample(local, T.guidePathSeg + 1);
 
-  /* the longest axis of the undeformed mesh is the one we re-route */
   var lo = new THREE.Vector3( Infinity,  Infinity,  Infinity);
   var hi = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
   var i;
@@ -442,22 +598,54 @@ G.bendMesh = function(guide, worldPath){
     lo.z = Math.min(lo.z, orig[i+2]); hi.z = Math.max(hi.z, orig[i+2]);
   }
   var ext = [hi.x-lo.x, hi.y-lo.y, hi.z-lo.z];
-  var axis = 0;
-  if(ext[1] > ext[axis]) axis = 1;
-  if(ext[2] > ext[axis]) axis = 2;
+  var longest = Math.max(ext[0], ext[1], ext[2]);
+  if(longest < EPS) return false;
+
+  /* the direction the stroke actually goes, in the guide's own space. A closed
+     loop has no chord, so fall back to the sample furthest from the start —
+     for a circle that is the diameter, which is the axis a doughnut turns on */
+  var drawn = local[local.length-1].clone().sub(local[0]);
+  if(drawn.lengthSq() < EPS*EPS){
+    var far = 0, fd = -1;
+    for(i=1;i<local.length;i++){
+      var d2 = local[i].distanceToSquared(local[0]);
+      if(d2 > fd){ fd = d2; far = i; }
+    }
+    drawn.copy(local[far]).sub(local[0]);
+  }
+  if(drawn.lengthSq() < EPS*EPS) drawn.set(1,0,0);
+  drawn.normalize();
+
+  /* Among the axes within 25% of the longest — i.e. the ones a bend could
+     sensibly run along — take the one the stroke agrees with most. That keeps
+     a rod bending along its length while letting a cube or a sphere bend
+     whichever way the pen went. */
+  var axis = -1, best = -1;
+  var comp = [Math.abs(drawn.x), Math.abs(drawn.y), Math.abs(drawn.z)];
+  for(i=0;i<3;i++){
+    if(ext[i] < longest*0.75) continue;
+    if(comp[i] > best){ best = comp[i]; axis = i; }
+  }
+  if(axis < 0) axis = ext[0] >= ext[1] ? (ext[0] >= ext[2] ? 0 : 2) : (ext[1] >= ext[2] ? 1 : 2);
   var span = ext[axis];
   if(span < EPS) return false;
+
+  /* ...and run it the way the stroke runs, so the far end follows the pen
+     instead of retreating from it */
+  var forward = drawn.getComponent(axis) >= 0;
   var pa = (axis+1)%3, pb = (axis+2)%3;
   var loArr = [lo.x, lo.y, lo.z], hiArr = [hi.x, hi.y, hi.z];
   var mid = [ (loArr[0]+hiArr[0])/2, (loArr[1]+hiArr[1])/2, (loArr[2]+hiArr[2])/2 ];
+  var startVal = forward ? loArr[axis] : hiArr[axis];
 
-  /* start the path where the mesh starts, so the far end is what moves */
-  var origin = new THREE.Vector3();
-  origin.setComponent(axis, loArr[axis]);
-  origin.setComponent(pa, mid[pa]);
-  origin.setComponent(pb, mid[pb]);
-  var shift = origin.clone().sub(local[0]);
-  for(i=0;i<local.length;i++) local[i].add(shift);
+  /* THE STROKE IS WHERE THE GUIDE GOES. The path used to be translated onto
+     the mesh's own starting face, which is an invisible landmark on the far
+     side from the pen — so a cube bent by a stroke drawn to its right jumped
+     left and shrank onto the stroke's length, measured as a 1.6-unit leap for
+     a 0.55-unit stroke. A swept guide can translate to its anchor because the
+     orange line is visible and the user aims at it; a deform has no such mark,
+     so the honest answer is to leave the path exactly where it was drawn and
+     lay the mesh along it. */
 
   /* seed the frame with the first perpendicular axis, so an unbent straight
      path reproduces the mesh exactly */
@@ -471,7 +659,7 @@ G.bendMesh = function(guide, worldPath){
   var s = new THREE.Vector3(), out = new THREE.Vector3();
   var arr = attr.array;
   for(i=0;i<orig.length;i+=3){
-    var t = (orig[i+axis] - loArr[axis]) / span;      // 0..1 along the axis
+    var t = (orig[i+axis] - startVal) / (forward ? span : -span);   // 0..1 from the start end
     var target = t * total;
     /* locate the path sample for this arc position */
     var j = 0;
@@ -502,6 +690,8 @@ G.bendMesh = function(guide, worldPath){
   geom.computeBoundingSphere();
   geom.computeBoundingBox();
   delete geom.userData._adj;               // adjacency is unchanged, bounds are not
+  delete geom.userData._grid;              // but the vertex grid is keyed on them
+  G.invalidateMask();
   guide.bendPath = worldPath.map(function(p){ return p.clone(); });
   return true;
 };
@@ -573,7 +763,7 @@ G.loft = function(strokes, tension){
    8. Primitives  (A.8) — FACT: Cube, Pyramid, Sphere, Tube, always at (0,0,0),
    with a segment-count slider that turns a Tube into a cylinder or cone.
    ========================================================================== */
-G.PRIMITIVES = ['cube','pyramid','sphere','tube'];
+G.PRIMITIVES = ['cube','pyramid','sphere','torus','tube'];
 
 G.primitive = function(kind, segments, taper){
   var seg = Math.max(3, Math.round(segments || 24));
@@ -583,6 +773,14 @@ G.primitive = function(kind, segments, taper){
     case 'cube':    geom = new THREE.BoxGeometry(2,2,2, 1,1,1); break;
     case 'pyramid': geom = new THREE.ConeGeometry(1.5, 2.4, 4, 1); break;
     case 'sphere':  geom = new THREE.SphereGeometry(1.4, seg, Math.max(3, seg>>1)); break;
+    /* Feather offers a torus among its readymade guides, and it is the one
+       shape here you cannot get by bending a swept guide into a ring — the
+       tube of a torus closes on itself in both directions. Taper drives the
+       thickness of the ring rather than a cone, since a torus has no ends. */
+    case 'torus':   geom = new THREE.TorusGeometry(
+                      1.4, 0.42 * P.clamp(tp, 0.15, 1), Math.max(6, seg>>1), seg);
+                    geom.rotateX(Math.PI/2);      // lying flat, like the grid
+                    break;
     default:        geom = new THREE.CylinderGeometry(1.2*tp, 1.2, 2.6, seg, 1); break;
   }
   /* the surface shader reads uvw in swept mode only, but the attribute has to
@@ -686,6 +884,7 @@ function keepInScene(g){
 }
 
 G.setActive = function(guide){
+  G.invalidateMask();
   var prev = G.active;
   G.active = guide || null;
   /* the outgoing guide only leaves the scene if nothing else is holding it */
@@ -731,6 +930,38 @@ G.save = function(guide){
   refreshDisplay();
   if(P.onGuideChange) P.onGuideChange();
   return g;
+};
+
+/* ---- taking a reference out, and putting it back -------------------------
+   G.dispose destroys a guide for good, which is right when the document goes
+   away and wrong for anything a person did on purpose: deleting a reference
+   has to be undoable, so the object stays alive and only leaves the scene and
+   the resource list. */
+G.remove = function(guide){
+  if(!guide) return false;
+  var i = G.resources.indexOf(guide);
+  if(i >= 0) G.resources.splice(i, 1);
+  if(G.active === guide) G.active = null;
+  if(guide.obj.parent) guide.obj.parent.remove(guide.obj);
+  G.invalidateMask();
+  refreshDisplay();
+  if(P.onGuideChange) P.onGuideChange();
+  return true;
+};
+
+/* `at` below zero means it was never a saved resource — it was only ever the
+   active guide — so putting it back must not quietly add it to the list. */
+G.restore = function(guide, at, makeActive){
+  if(!guide) return false;
+  if(at >= 0 && G.resources.indexOf(guide) < 0){
+    G.resources.splice(P.clamp(at, 0, G.resources.length), 0, guide);
+  }
+  if(makeActive) G.active = guide;
+  if(guide.obj.parent !== root) root.add(guide.obj);
+  G.invalidateMask();
+  refreshDisplay();
+  if(P.onGuideChange) P.onGuideChange();
+  return true;
 };
 
 G.dispose = function(g){
@@ -801,6 +1032,222 @@ var _ray = new THREE.Raycaster();
 
 G.hasActive = function(){ return !!(G.active && G.active.mesh); };
 
+/* ==========================================================================
+   Where the edge is
+   --------------------------------------------------------------------------
+   A brush is wider than the line it follows, so a stroke whose CENTRE is on
+   the guide can still hang half its width off the side — you paint up to the
+   edge of a wall and the paint carries on into thin air. To stop that, a
+   stroke needs to know how far it is from the boundary in the direction its
+   nib is wide.
+
+   Swept and lofted surfaces are grids, and buildSurfaceGeometry already writes
+   each vertex's ARC LENGTH along u and v into the uvw attribute — so the
+   distance to an edge is a subtraction rather than a search. This reads that
+   frame straight off the face the ray hit: where the hit is in arc length,
+   which way u and v run in the world there, and how long the surface is.
+
+   Closed guides — primitives, imported models — have no boundary to fall off,
+   and return nothing. */
+var _fA = new THREE.Vector3(), _fB = new THREE.Vector3(), _fC = new THREE.Vector3(),
+    _fRel = new THREE.Vector3();
+
+/* THE FRAME AT A HIT, read exactly rather than reconstructed.
+
+   uvw holds arc length along u and v at every vertex, and it is linear across
+   each triangle, so the value at the hit and the direction it increases in are
+   both had from the triangle's own gradient — the standard linear-shape-function
+   formula. An earlier version worked back from the cell index instead and was
+   a whole cell out on some rows (measured: a 10mm step in a surface whose cells
+   are 10mm), which showed up as a ragged edge where paint met the boundary. */
+var _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3(), _fn = new THREE.Vector3(),
+    _g1 = new THREE.Vector3(), _g2 = new THREE.Vector3(), _gu = new THREE.Vector3(),
+    _gv = new THREE.Vector3(), _rel = new THREE.Vector3();
+
+function gradientOf(d1, d2, out){
+  /* grad = (d1 * (e2 x n) + d2 * (n x e1)) / |n|^2 , for a linear field whose
+     values rise by d1 along e1 and d2 along e2 */
+  _g1.crossVectors(_e2, _fn);
+  _g2.crossVectors(_fn, _e1);
+  var nn = _fn.lengthSq();
+  if(nn < EPS) return out.set(0,0,0);
+  return out.copy(_g1).multiplyScalar(d1/nn).addScaledVector(_g2, d2/nn);
+}
+
+function frameOnTriangle(mesh, ia, ib, ic, point){
+  var geom = mesh.geometry;
+  var nu = geom.userData.nu, nv = geom.userData.nv;
+  var uvw = geom.attributes.uvw, pos = geom.attributes.position;
+  if(!uvw) return null;
+  if((!nu || !nv) && geom.userData.Lu === undefined) return null;
+  var m = mesh.matrixWorld;
+  _fA.fromBufferAttribute(pos, ia).applyMatrix4(m);
+  _fB.fromBufferAttribute(pos, ib).applyMatrix4(m);
+  _fC.fromBufferAttribute(pos, ic).applyMatrix4(m);
+  _e1.subVectors(_fB, _fA);
+  _e2.subVectors(_fC, _fA);
+  _fn.crossVectors(_e1, _e2);
+  if(_fn.lengthSq() < EPS) return null;
+
+  var u0 = uvw.getX(ia), v0 = uvw.getY(ia);
+  gradientOf(uvw.getX(ib) - u0, uvw.getX(ic) - u0, _gu);
+  gradientOf(uvw.getY(ib) - v0, uvw.getY(ic) - v0, _gv);
+  if(_gu.lengthSq() < EPS || _gv.lengthSq() < EPS) return null;
+
+  /* How far the surface runs. A swept guide reads it off the last node of the
+     grid; a flat one is triangulated to an outline and has no grid to index,
+     so it states its own extent. The OUTLINE, where there is one, is what the
+     nib is actually trimmed against - see reachAlong. */
+  var Lu = geom.userData.Lu, Lv = geom.userData.Lv;
+  if(Lu === undefined) Lu = uvw.getX(nu-1);
+  if(Lv === undefined) Lv = uvw.getY((nv-1)*nu);
+
+  _rel.copy(point).sub(_fA);
+  return { su: u0 + _gu.dot(_rel), sv: v0 + _gv.dot(_rel),
+           Lu: Lu, Lv: Lv, outline: geom.userData.outline || null,
+           uDir: _gu.clone().normalize(), vDir: _gv.clone().normalize() };
+}
+
+function surfaceFrameAt(mesh, hit){
+  if(!hit.face) return null;
+  return frameOnTriangle(mesh, hit.face.a, hit.face.b, hit.face.c, hit.point);
+}
+
+/* ==========================================================================
+   The surface as the GRID it is built from
+   --------------------------------------------------------------------------
+   A swept guide is stored as an nu x nv grid of points, and `uvw` carries each
+   node's ARC LENGTH along both directions. That makes the surface addressable
+   in millimetres rather than in vertices: the two axes are separable, so u
+   depends only on the column and v only on the row, and a position anywhere
+   between nodes is one binary search and a bilinear blend away.
+
+   Fill needs this. Laying rows of paint a nib apart means putting them at
+   chosen DISTANCES across the surface, which grid lines do not fall on.
+   ========================================================================== */
+G.surfaceSpan = function(guide){
+  /* a flat guide has no grid: it IS a plane, and says so */
+  if(guide && guide.plane){
+    return { nu:0, nv:0, Lu:guide.plane.Lu, Lv:guide.plane.Lv,
+             outline:guide.plane.outline };
+  }
+  var geom = guide && guide.mesh && guide.mesh.geometry;
+  if(!geom) return null;
+  var nu = geom.userData.nu, nv = geom.userData.nv, uvw = geom.attributes.uvw;
+  if(!nu || !nv || !uvw || nu < 2 || nv < 2) return null;
+  return { nu:nu, nv:nv, Lu:uvw.getX(nu-1), Lv:uvw.getY((nv-1)*nu) };
+};
+
+/* which cell an arc length falls in, and how far across it */
+function spanAt(get, n, s){
+  if(!(s > get(0))) return { i:0, f:0 };
+  if(s >= get(n-1)) return { i:n-2, f:1 };
+  var lo = 0, hi = n-1;
+  while(hi - lo > 1){
+    var mid = (lo + hi) >> 1;
+    if(get(mid) <= s) lo = mid; else hi = mid;
+  }
+  var a = get(lo), b = get(lo+1);
+  return { i:lo, f: (b - a) > EPS ? (s - a)/(b - a) : 0 };
+}
+
+var _s00 = new THREE.Vector3(), _s10 = new THREE.Vector3(),
+    _s01 = new THREE.Vector3(), _s11 = new THREE.Vector3();
+
+/* A point on the guide at arc lengths (su, sv), with the normal and the same
+   kind of frame a drawn sample gets — built by the very code that painting
+   uses, so a filled row trims at a boundary exactly like a hand-drawn one. */
+G.sampleSurface = function(guide, su, sv){
+  if(guide && guide.plane){
+    var pl = guide.plane;
+    /* outside the drawn shape there is no surface, so Fill skips it */
+    if(!insideOutline(pl.outline, su, sv)) return null;
+    var pt = pl.origin.clone()
+      .addScaledVector(pl.right, su).addScaledVector(pl.up, sv);
+    return { point: pt, normal: pl.normal.clone(), onSurface: true,
+             frame: { su:su, sv:sv, Lu:pl.Lu, Lv:pl.Lv, outline:pl.outline,
+                      uDir: pl.right.clone(), vDir: pl.up.clone() } };
+  }
+  var span = G.surfaceSpan(guide);
+  if(!span) return null;
+  var mesh = guide.mesh, geom = mesh.geometry;
+  var uvw = geom.attributes.uvw, pos = geom.attributes.position,
+      nor = geom.attributes.normal, nu = span.nu, nv = span.nv;
+  mesh.updateMatrixWorld();
+  var m = mesh.matrixWorld;
+
+  var cu = spanAt(function(i){ return uvw.getX(i); }, nu, su);
+  var cv = spanAt(function(j){ return uvw.getY(j*nu); }, nv, sv);
+  var a = cv.i*nu + cu.i, b = a + 1, c = a + nu, d = c + 1;
+
+  function blend(attr, out){
+    _s00.fromBufferAttribute(attr, a); _s10.fromBufferAttribute(attr, b);
+    _s01.fromBufferAttribute(attr, c); _s11.fromBufferAttribute(attr, d);
+    _s00.lerp(_s10, cu.f); _s01.lerp(_s11, cu.f);
+    return out.copy(_s00).lerp(_s01, cv.f);
+  }
+  var point = blend(pos, new THREE.Vector3()).applyMatrix4(m);
+  var normal = blend(nor, new THREE.Vector3())
+    .applyMatrix3(new THREE.Matrix3().getNormalMatrix(m));
+  if(normal.lengthSq() < EPS) normal.set(0,0,1); else normal.normalize();
+
+  return { point:point, normal:normal,
+           frame: frameOnTriangle(mesh, a, b, c, point), onSurface:true };
+};
+
+/* How far the surface reaches from `frame` along +dir and -dir, in world
+   units. Infinity where the direction runs parallel to that pair of edges. */
+G.reachAlong = function(frame, dir){
+  var a = dir.dot(frame.uDir), b = dir.dot(frame.vDir);
+
+  /* AN OUTLINE IS THE REAL EDGE. A swept guide is a rectangle in (u,v) and the
+     box test below is exact for it. A flat guide is whatever shape was drawn,
+     so the distance to its edge is a ray-polygon intersection in the surface's
+     own coordinates - the same sum the box test does, over the shape's actual
+     sides rather than four implied ones. */
+  if(frame.outline && frame.outline.length > 2){
+    return { pos: outlineReach(frame, a, b, 1), neg: outlineReach(frame, a, b, -1) };
+  }
+  function side(sign){
+    var t = Infinity, aa = a*sign, bb = b*sign;
+    if(Math.abs(aa) > 1e-6) t = Math.min(t, aa > 0 ? (frame.Lu - frame.su)/aa : -frame.su/aa);
+    if(Math.abs(bb) > 1e-6) t = Math.min(t, bb > 0 ? (frame.Lv - frame.sv)/bb : -frame.sv/bb);
+    return Math.max(0, t);
+  }
+  return { pos: side(1), neg: side(-1) };
+};
+
+/* nearest crossing of the outline along (a,b) from (su,sv) */
+function outlineReach(frame, a, b, sign){
+  var du = a*sign, dv = b*sign;
+  if(Math.abs(du) < 1e-12 && Math.abs(dv) < 1e-12) return 0;
+  var poly = frame.outline, best = Infinity;
+  for(var i=0;i<poly.length;i++){
+    var p = poly[i], q = poly[(i+1) % poly.length];
+    var ex = q.u - p.u, ey = q.v - p.v;
+    var den = du*ey - dv*ex;
+    if(Math.abs(den) < 1e-12) continue;             // parallel to this side
+    var rx = p.u - frame.su, ry = p.v - frame.sv;
+    var t = (rx*ey - ry*ex) / den;                  // along the ray
+    var s2 = (rx*dv - ry*du) / den;                 // along the side
+    if(t >= 0 && s2 >= 0 && s2 <= 1) best = Math.min(best, t);
+  }
+  return best === Infinity ? 0 : best;
+}
+
+/* is (u,v) inside the outline? even-odd, which is what a self-crossing
+   freehand loop deserves */
+function insideOutline(poly, u, v){
+  var inside = false;
+  for(var i=0, j=poly.length-1; i<poly.length; j=i++){
+    var a = poly[i], b = poly[j];
+    if((a.v > v) !== (b.v > v) &&
+       u < (b.u - a.u) * (v - a.v) / (b.v - a.v) + a.u) inside = !inside;
+  }
+  return inside;
+}
+G.insideOutline = insideOutline;
+
 G.project = function(x, y){
   if(!G.hasActive()) return null;
   var r = P.rayFrom(x, y);
@@ -811,6 +1258,7 @@ G.project = function(x, y){
                 ? hits[0].face.normal.clone().applyMatrix3(
                     new THREE.Matrix3().getNormalMatrix(G.active.mesh.matrixWorld)).normalize()
                 : new THREE.Vector3(0,0,1),
+             frame: surfaceFrameAt(G.active.mesh, hits[0]),
              onSurface: true };
   }
   /* FACT (A.4): an imported image refuses strokes past its edge rather than
@@ -821,6 +1269,7 @@ G.project = function(x, y){
 
 /* ---- closest point on a triangle to a point (Ericson, Real-Time Collision
    Detection §5.1.5). Exact, branch-per-Voronoi-region, no iteration. ---- */
+var _triV = [0,0,0], _ncTmp = new THREE.Vector3();
 var _ab = new THREE.Vector3(), _ac = new THREE.Vector3(), _ap = new THREE.Vector3(),
     _bp = new THREE.Vector3(), _cp = new THREE.Vector3(), _bc = new THREE.Vector3();
 
@@ -875,6 +1324,209 @@ function adjacencyOf(geom){
   return adj;
 }
 
+/* ---- finding a guide again, and snapping a loose point back onto it -------
+   A curve drawn on a guide belongs to that surface, but Smooth averages a
+   point with its neighbours and Liquify shoves it bodily, and both of them
+   work in free space. Paint applied to a barrel came away from it: measured
+   at 6mm under Smooth and 48mm under Liquify, from a stroke that started
+   exactly on the surface at 0.00mm.
+
+   Putting it back needs a nearest-point-on-surface query per point per move,
+   and a brute-force sweep of ~6000 vertices x ~130 points x every pointermove
+   is why this was left undone. A uniform grid over the vertices, cached on the
+   geometry beside the adjacency table, turns each query into a look at one
+   cell and its neighbours. */
+G.byId = function(id){
+  if(id === null || id === undefined) return null;
+  if(G.active && G.active.id === id) return G.active;
+  for(var i=0;i<G.resources.length;i++){
+    if(G.resources[i].id === id) return G.resources[i];
+  }
+  return null;
+};
+
+/* A uniform grid over the guide's TRIANGLES, cached on the geometry beside the
+   adjacency table.
+
+   Indexing vertices instead was the obvious thing and it is wrong. A guide is a
+   coarse mesh — a swept surface here is 520 vertices carrying 896 triangles —
+   so a point can lie exactly ON a large triangle while the nearest vertex is
+   67mm away and belongs to a different one. Refining over the triangles that
+   touch the nearest vertex then lands the point somewhere else on the surface
+   entirely: still on the guide, but slid 21mm along it, which corrupts the
+   drawing rather than repairing it. Triangles are what the query is actually
+   about, so triangles are what the grid holds. */
+/* cell -> one integer. 2048 per axis is far more than any grid here needs and
+   keeps the product inside an exact float64 integer. */
+function KEY(x, y, z){
+  return (((x + 1024) * 2048) + (y + 1024)) * 2048 + (z + 1024);
+}
+
+function gridOf(geom){
+  if(geom.userData._grid) return geom.userData._grid;
+  var pos = geom.attributes.position, idx = geom.index;
+  var triCount = ((idx ? idx.count : pos.count) / 3) | 0;
+  var box = new THREE.Box3(), v = new THREE.Vector3(), i;
+  for(i=0;i<pos.count;i++) box.expandByPoint(v.fromBufferAttribute(pos, i));
+  var size = box.getSize(new THREE.Vector3());
+  var cells = P.clamp(Math.round(Math.cbrt(Math.max(triCount,1))), 2, 32);
+  var step = {
+    x: Math.max(size.x/cells, 1e-6),
+    y: Math.max(size.y/cells, 1e-6),
+    z: Math.max(size.z/cells, 1e-6)
+  };
+  function ix(val, lo, st){ return Math.floor((val - lo) / st); }
+  /* A Map on a packed integer key, not an object on a string one: a query
+     scans a few dozen cells per point and a stroke asks two hundred times a
+     move, so building "3_7_4" that many times is most of the cost. */
+  var map = new Map(), a = new THREE.Vector3(), b2 = new THREE.Vector3(),
+      c2 = new THREE.Vector3();
+  for(i=0;i<triCount;i++){
+    var t = i*3;
+    var ia = idx ? idx.getX(t)   : t,
+        ib = idx ? idx.getX(t+1) : t+1,
+        ic = idx ? idx.getX(t+2) : t+2;
+    a.fromBufferAttribute(pos, ia);
+    b2.fromBufferAttribute(pos, ib);
+    c2.fromBufferAttribute(pos, ic);
+    /* every cell the triangle's own bounding box touches, so a long triangle is
+       findable from anywhere along it rather than only near its corners */
+    var x0 = ix(Math.min(a.x,b2.x,c2.x), box.min.x, step.x),
+        x1 = ix(Math.max(a.x,b2.x,c2.x), box.min.x, step.x),
+        y0 = ix(Math.min(a.y,b2.y,c2.y), box.min.y, step.y),
+        y1 = ix(Math.max(a.y,b2.y,c2.y), box.min.y, step.y),
+        z0 = ix(Math.min(a.z,b2.z,c2.z), box.min.z, step.z),
+        z1 = ix(Math.max(a.z,b2.z,c2.z), box.min.z, step.z);
+    for(var gx=x0; gx<=x1; gx++)
+    for(var gy=y0; gy<=y1; gy++)
+    for(var gz=z0; gz<=z1; gz++){
+      var k = KEY(gx, gy, gz);
+      var bucket = map.get(k);
+      if(bucket) bucket.push(i); else map.set(k, [i]);
+    }
+  }
+  var g = {
+    map: map, step: step, min: box.min.clone(),
+    minStep: Math.min(step.x, step.y, step.z),
+    cells: cells,
+    /* a triangle straddling cells sits in several buckets; the stamp keeps the
+       search from testing it once per bucket */
+    seen: new Int32Array(triCount), stamp: 0,
+    cellOf: function(p, o){
+      o[0] = ix(p.x, box.min.x, step.x);
+      o[1] = ix(p.y, box.min.y, step.y);
+      o[2] = ix(p.z, box.min.z, step.z);
+      return o;
+    }
+  };
+  geom.userData._grid = g;
+  return g;
+}
+
+var _snapInv = new THREE.Matrix4();
+var _snapLocal = new THREE.Vector3(), _snapC = new THREE.Vector3(),
+    _snapBest = new THREE.Vector3(), _snapCell = [0,0,0];
+var _snapTri = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+
+/* Nearest point on a guide's surface to an arbitrary world point — exact, not
+   an approximation: the search radius grows until everything inside it has been
+   tested and the best hit is nearer than the radius itself, at which point
+   nothing outside can beat it. */
+G.snapToSurface = function(p, guide, out, ctx){
+  out = out || new THREE.Vector3();
+  var g = guide || G.active;
+  if(!g || !g.mesh || !g.mesh.geometry.attributes.position) return out.copy(p);
+  var geom = g.mesh.geometry, pos = geom.attributes.position, idx = geom.index;
+  /* Walking the parent chain and inverting the world matrix costs more than the
+     search does, and re-projecting a stroke asks for the same guide two hundred
+     times in a row. snapContext hoists both out of the loop. */
+  if(ctx && ctx.guide === g){
+    _snapLocal.copy(p).applyMatrix4(ctx.inv);
+  } else {
+    g.mesh.updateMatrixWorld();
+    _snapInv.copy(g.mesh.matrixWorld).invert();
+    _snapLocal.copy(p).applyMatrix4(_snapInv);
+  }
+
+  var grid = gridOf(geom);
+  var bestD = Infinity, found = false, gx, gy, gz, list, i, d;
+  var stamp = ++grid.stamp, seen = grid.seen;
+
+  /* The search grows by WORLD RADIUS, not by rings of cells.
+
+     Rings looked simpler and were wrong on a FLAT guide. A plane has no extent
+     in one axis, so that step collapses to the 1e-6 floor, a point 50mm off it
+     lands at cell index 50000, and clamping that back into the grid leaves an
+     empty range: the query scanned nothing, reported the point as already on
+     the surface, and reprojection quietly did nothing at all. Growing a radius
+     has no such failure — once everything within `radius` has been tested and
+     the best hit is nearer than `radius`, nothing outside it can be closer. */
+  var hiX = grid.min.x + grid.step.x * grid.cells,
+      hiY = grid.min.y + grid.step.y * grid.cells,
+      hiZ = grid.min.z + grid.step.z * grid.cells;
+  var ox = Math.max(0, grid.min.x - _snapLocal.x, _snapLocal.x - hiX),
+      oy = Math.max(0, grid.min.y - _snapLocal.y, _snapLocal.y - hiY),
+      oz = Math.max(0, grid.min.z - _snapLocal.z, _snapLocal.z - hiZ);
+  var outside = Math.sqrt(ox*ox + oy*oy + oz*oz);
+  var diag = Math.sqrt((hiX-grid.min.x)*(hiX-grid.min.x) +
+                       (hiY-grid.min.y)*(hiY-grid.min.y) +
+                       (hiZ-grid.min.z)*(hiZ-grid.min.z));
+  var limit = outside + diag + grid.minStep;
+  var radius = Math.max(grid.minStep, outside + grid.minStep);
+
+  function cellIx(v, lo, st){
+    return P.clamp(Math.floor((v - lo)/st), 0, grid.cells);
+  }
+
+  for(;;){
+    var xa = cellIx(_snapLocal.x - radius, grid.min.x, grid.step.x),
+        xb = cellIx(_snapLocal.x + radius, grid.min.x, grid.step.x),
+        ya = cellIx(_snapLocal.y - radius, grid.min.y, grid.step.y),
+        yb = cellIx(_snapLocal.y + radius, grid.min.y, grid.step.y),
+        za = cellIx(_snapLocal.z - radius, grid.min.z, grid.step.z),
+        zb = cellIx(_snapLocal.z + radius, grid.min.z, grid.step.z);
+
+    for(gx=xa; gx<=xb; gx++)
+    for(gy=ya; gy<=yb; gy++)
+    for(gz=za; gz<=zb; gz++){
+      list = grid.map.get(KEY(gx, gy, gz));
+      if(!list) continue;
+      for(i=0;i<list.length;i++){
+        /* straddles cells, and survives across doublings: test it once */
+        if(seen[list[i]] === stamp) continue;
+        seen[list[i]] = stamp;
+        var t = list[i]*3;
+        var ia = idx ? idx.getX(t)   : t,
+            ib = idx ? idx.getX(t+1) : t+1,
+            ic = idx ? idx.getX(t+2) : t+2;
+        _snapTri[0].fromBufferAttribute(pos, ia);
+        _snapTri[1].fromBufferAttribute(pos, ib);
+        _snapTri[2].fromBufferAttribute(pos, ic);
+        closestPtTriangle(_snapLocal, _snapTri[0], _snapTri[1], _snapTri[2], _snapC);
+        d = _snapC.distanceToSquared(_snapLocal);
+        if(d < bestD){ bestD = d; _snapBest.copy(_snapC); found = true; }
+      }
+    }
+    if(found && Math.sqrt(bestD) <= radius) break;
+    if(radius > limit) break;
+    radius *= 2;
+  }
+  if(!found) return out.copy(p);         // no geometry anywhere: leave it alone
+  return out.copy(_snapBest).applyMatrix4(ctx && ctx.guide === g ? ctx.world
+                                                                 : g.mesh.matrixWorld);
+};
+
+/* Prepared once per stroke, handed to every snapToSurface call for it. */
+G.snapContext = function(guide){
+  if(!guide || !guide.mesh) return null;
+  guide.mesh.updateMatrixWorld();
+  return {
+    guide: guide,
+    world: guide.mesh.matrixWorld.clone(),
+    inv: guide.mesh.matrixWorld.clone().invert()
+  };
+};
+
 /* Nearest point on the guide SURFACE to a ray — the clamp-to-silhouette
    fallback. Two stages: a brute-force sweep for the nearest vertex (~6k tests
    on a 96x65 grid, cheap), then a few refinement steps against the triangles
@@ -901,7 +1553,7 @@ function nearestOnGuide(ray){
   var result = vert.clone();
 
   var adj = adjacencyOf(geom);
-  var tris = adj[best];
+  var tris = adj[best], bestTri = null;
   if(tris && tris.length){
     var idx = geom.index;
     var target = new THREE.Vector3(), cand = new THREE.Vector3();
@@ -914,11 +1566,15 @@ function nearestOnGuide(ray){
         var t3 = tris[k]*3;
         for(var c=0;c<3;c++){
           var vi = idx ? idx.getX(t3+c) : (t3+c);
+          _triV[c] = vi;
           _tri[c].set(pos.getX(vi), pos.getY(vi), pos.getZ(vi)).applyMatrix4(m);
         }
         closestPtTriangle(target, _tri[0], _tri[1], _tri[2], cand);
         var dd = cand.distanceToSquared(target);
-        if(dd < localD){ localD = dd; localBest = cand.clone(); }
+        if(dd < localD){
+          localD = dd; localBest = cand.clone();
+          bestTri = [_triV[0], _triV[1], _triV[2]];
+        }
       }
       if(!localBest) break;
       result.copy(localBest);
@@ -926,9 +1582,32 @@ function nearestOnGuide(ray){
     }
   }
 
-  var n = new THREE.Vector3(nor.getX(best), nor.getY(best), nor.getZ(best))
-            .applyMatrix3(new THREE.Matrix3().getNormalMatrix(m)).normalize();
-  return { point:result, normal:n, onSurface:false };
+  /* THE SAME NORMAL A RAY HIT WOULD GIVE. G.project reports the FACE normal,
+     built from the winding; this used to report the stored VERTEX normal, and
+     on this surface the two point opposite ways. Every clamped sample was
+     therefore lit as if it faced away from the light, which painted a
+     distinctly darker band — measured at 136 against 181 — everywhere a stroke
+     ran off the edge and got clamped back. */
+  var n = null;
+  if(bestTri){
+    for(var c2=0;c2<3;c2++){
+      _tri[c2].set(pos.getX(bestTri[c2]), pos.getY(bestTri[c2]), pos.getZ(bestTri[c2]))
+              .applyMatrix4(m);
+    }
+    n = new THREE.Vector3().subVectors(_tri[1], _tri[0])
+          .cross(_ncTmp.subVectors(_tri[2], _tri[0]));
+    if(n.lengthSq() < EPS) n = null; else n.normalize();
+  }
+  if(!n){
+    n = new THREE.Vector3(nor.getX(best), nor.getY(best), nor.getZ(best))
+          .applyMatrix3(new THREE.Matrix3().getNormalMatrix(m)).normalize();
+  }
+  /* the clamp lands on a triangle, not a vertex, so its frame is read the same
+     exact way as a hit's — quantising it to the nearest vertex put the trim
+     out by up to half a cell and left the painted edge ragged */
+  var frame = bestTri ? frameOnTriangle(mesh, bestTri[0], bestTri[1], bestTri[2], result)
+                      : null;
+  return { point:result, normal:n, frame:frame, onSurface:false };
 }
 
 /* ==========================================================================
@@ -940,8 +1619,48 @@ function nearestOnGuide(ray){
    ========================================================================== */
 var _dir = new THREE.Vector3(), _org = new THREE.Vector3();
 
+/* THE SAME RAY, OVER AND OVER.
+   Three.js has no spatial index, so each test walks every triangle of the
+   guide: on a swept wall that is 4224 of them, about 0.2ms. Smooth and
+   Liquify ask once per point under the pen per pointer event, which timed
+   at 490ms of a 700ms drag — and on paint lying ON the guide every one of
+   those 2321 rays answered "not masked", because there is nothing between
+   the camera and a point on the surface.
+
+   The answer only changes when the camera or the guides do, so it is
+   cached against an epoch that both bump. Points MOVE while a tool drags
+   them, so the key is a rounded position rather than the point itself:
+   measured over a 40-move smooth of a painted wall, the hit rate climbs
+   with cell size and flattens at about 80% by a millimetre — 0.05mm hit
+   37%, 0.25mm 72%, 1mm 79%, and 5mm gained nothing further, because what
+   is left by then are genuinely distinct points. So a millimetre it is,
+   which is also the widest the answer may be wrong: only along the
+   guide's silhouette, where a point within a millimetre of the edge can
+   be judged by its neighbour cell. */
+var maskEpoch = 0, maskCache = null, maskCacheEpoch = -1;
+var MASK_Q = 1 * P.MM;                       // cache cell, in world units
+var MASK_CACHE_MAX = 1e5;                    // a drag that never moves the camera
+G.invalidateMask = function(){ maskEpoch++; };
+P.invalidateMask = G.invalidateMask;
+
 G.isMasked = function(worldPoint){
   if(!G.isolate || !G.hasActive()) return false;
+  if(maskCacheEpoch !== maskEpoch){
+    maskCache = new Map(); maskCacheEpoch = maskEpoch;
+  }
+  var key = Math.round(worldPoint.x/MASK_Q) + ',' +
+            Math.round(worldPoint.y/MASK_Q) + ',' +
+            Math.round(worldPoint.z/MASK_Q);
+  var hit = maskCache.get(key);
+  if(hit === undefined){
+    hit = maskRay(worldPoint);
+    if(maskCache.size >= MASK_CACHE_MAX) maskCache.clear();
+    maskCache.set(key, hit);
+  }
+  return hit;
+};
+
+function maskRay(worldPoint){
   var cam = P.cam(), dist;
   if(P.VIEW.ortho){
     cam.getWorldDirection(_dir);
@@ -959,7 +1678,7 @@ G.isMasked = function(worldPoint){
   _ray.far  = dist - 1e-3;
   var hits = _ray.intersectObject(G.active.mesh, false);
   return hits.length > 0;
-};
+}
 
 /* ==========================================================================
    12. Ray-pick a guide (Select tool long-press, A.5)
