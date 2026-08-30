@@ -560,6 +560,45 @@ function run(W){
        offBy(w.st, w.g).toFixed(3) + 'mm off, was 47.7mm before this was fixed');
     P.Strokes.clearSelection();
 
+    /* A FLAT guide is the case that broke the first search. A plane has no
+       extent in one axis, so that cell size collapses to the 1e-6 floor, a
+       point 50mm off it lands at cell index 50000, and clamping that back into
+       the grid left an empty range — the query scanned nothing, called the
+       point already-on-surface, and reprojection quietly did nothing. */
+    reset(); P.TOOL.stableOn = false;
+    P.setTool('flatguide');
+    pen([{x:CX-170,y:CY-110},{x:CX+170,y:CY-110},
+         {x:CX+170,y:CY+110},{x:CX-170,y:CY+110},{x:CX-170,y:CY-110}]);
+    var flatG = P.Guides.active;
+    ck('a flat shape guide is made for the test', !!flatG && !!flatG.mesh);
+    if(flatG && flatG.mesh){
+      flatG.mesh.updateMatrixWorld(true);
+      var fbox = new THREE.Box3().setFromObject(flatG.mesh);
+      var fmid = fbox.getCenter(new THREE.Vector3());
+      /* the plane's own normal, taken from the mesh rather than assumed */
+      var nAttr = flatG.mesh.geometry.attributes.normal;
+      var fnrm = new THREE.Vector3(nAttr.getX(0), nAttr.getY(0), nAttr.getZ(0))
+        .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(flatG.mesh.matrixWorld))
+        .normalize();
+      var fmidOn = P.Guides.snapToSurface(fmid, flatG, new THREE.Vector3());
+      var away = fmidOn.clone().addScaledVector(fnrm, 0.05);       // 50mm off
+
+      var back = P.Guides.snapToSurface(away, flatG, new THREE.Vector3());
+      ck('a point off a FLAT guide is pulled back onto it',
+         back.distanceTo(away) > 0.045,
+         'moved ' + (back.distanceTo(away)/P.MM).toFixed(1) + 'mm of the 50mm');
+
+      /* Assumption-free proof that it landed ON the surface: snapping a point
+         that is already on it must be a no-op, so a second pass moving nothing
+         means the first pass finished the job. */
+      var again = P.Guides.snapToSurface(back, flatG, new THREE.Vector3());
+      ck('...and the result really is on the surface', again.distanceTo(back) < 1e-9,
+         'a second snap moved it ' + (again.distanceTo(back)/P.MM).toExponential(1) + 'mm');
+
+      ck('a point already on a flat guide is not moved',
+         fmidOn.distanceTo(P.Guides.snapToSurface(fmidOn, flatG, new THREE.Vector3())) < 1e-9);
+    }
+
     /* a curve drawn in free space has no guide to be held to */
     reset(); P.TOOL.autoGuide = false; P.setTool('draw');
     pen([{x:CX-100,y:CY},{x:CX,y:CY-30},{x:CX+100,y:CY}]);

@@ -1408,8 +1408,7 @@ function gridOf(geom){
   var g = {
     map: map, step: step, min: box.min.clone(),
     minStep: Math.min(step.x, step.y, step.z),
-    rings: cells + 2,
-    lo: [0,0,0], hi: [cells, cells, cells],
+    cells: cells,
     /* a triangle straddling cells sits in several buckets; the stamp keeps the
        search from testing it once per bucket */
     seen: new Int32Array(triCount), stamp: 0,
@@ -1430,9 +1429,9 @@ var _snapLocal = new THREE.Vector3(), _snapC = new THREE.Vector3(),
 var _snapTri = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
 
 /* Nearest point on a guide's surface to an arbitrary world point — exact, not
-   an approximation: rings of cells are scanned outwards and the search only
-   stops once the best hit is closer than anything an unscanned cell could
-   still hold. */
+   an approximation: the search radius grows until everything inside it has been
+   tested and the best hit is nearer than the radius itself, at which point
+   nothing outside can beat it. */
 G.snapToSurface = function(p, guide, out, ctx){
   out = out || new THREE.Vector3();
   var g = guide || G.active;
@@ -1450,31 +1449,50 @@ G.snapToSurface = function(p, guide, out, ctx){
   }
 
   var grid = gridOf(geom);
-  grid.cellOf(_snapLocal, _snapCell);
-  var bestD = Infinity, found = false, r, gx, gy, gz, list, i, d;
+  var bestD = Infinity, found = false, gx, gy, gz, list, i, d;
   var stamp = ++grid.stamp, seen = grid.seen;
-  /* the ring never has to reach past the grid itself */
-  var reach = 0, ax;
-  for(ax=0; ax<3; ax++){
-    reach = Math.max(reach, Math.abs(_snapCell[ax] - grid.lo[ax]),
-                            Math.abs(_snapCell[ax] - grid.hi[ax]));
-  }
-  var maxR = Math.min(grid.rings, reach);
 
-  for(r=0; r<=maxR; r++){
-    var xa = Math.max(_snapCell[0]-r, grid.lo[0]), xb = Math.min(_snapCell[0]+r, grid.hi[0]);
-    var ya = Math.max(_snapCell[1]-r, grid.lo[1]), yb = Math.min(_snapCell[1]+r, grid.hi[1]);
-    var za = Math.max(_snapCell[2]-r, grid.lo[2]), zb = Math.min(_snapCell[2]+r, grid.hi[2]);
+  /* The search grows by WORLD RADIUS, not by rings of cells.
+
+     Rings looked simpler and were wrong on a FLAT guide. A plane has no extent
+     in one axis, so that step collapses to the 1e-6 floor, a point 50mm off it
+     lands at cell index 50000, and clamping that back into the grid leaves an
+     empty range: the query scanned nothing, reported the point as already on
+     the surface, and reprojection quietly did nothing at all. Growing a radius
+     has no such failure — once everything within `radius` has been tested and
+     the best hit is nearer than `radius`, nothing outside it can be closer. */
+  var hiX = grid.min.x + grid.step.x * grid.cells,
+      hiY = grid.min.y + grid.step.y * grid.cells,
+      hiZ = grid.min.z + grid.step.z * grid.cells;
+  var ox = Math.max(0, grid.min.x - _snapLocal.x, _snapLocal.x - hiX),
+      oy = Math.max(0, grid.min.y - _snapLocal.y, _snapLocal.y - hiY),
+      oz = Math.max(0, grid.min.z - _snapLocal.z, _snapLocal.z - hiZ);
+  var outside = Math.sqrt(ox*ox + oy*oy + oz*oz);
+  var diag = Math.sqrt((hiX-grid.min.x)*(hiX-grid.min.x) +
+                       (hiY-grid.min.y)*(hiY-grid.min.y) +
+                       (hiZ-grid.min.z)*(hiZ-grid.min.z));
+  var limit = outside + diag + grid.minStep;
+  var radius = Math.max(grid.minStep, outside + grid.minStep);
+
+  function cellIx(v, lo, st){
+    return P.clamp(Math.floor((v - lo)/st), 0, grid.cells);
+  }
+
+  for(;;){
+    var xa = cellIx(_snapLocal.x - radius, grid.min.x, grid.step.x),
+        xb = cellIx(_snapLocal.x + radius, grid.min.x, grid.step.x),
+        ya = cellIx(_snapLocal.y - radius, grid.min.y, grid.step.y),
+        yb = cellIx(_snapLocal.y + radius, grid.min.y, grid.step.y),
+        za = cellIx(_snapLocal.z - radius, grid.min.z, grid.step.z),
+        zb = cellIx(_snapLocal.z + radius, grid.min.z, grid.step.z);
+
     for(gx=xa; gx<=xb; gx++)
     for(gy=ya; gy<=yb; gy++)
     for(gz=za; gz<=zb; gz++){
-      /* only the shell: the inside was covered on an earlier ring */
-      if(r > 0 && Math.abs(gx-_snapCell[0]) < r &&
-                  Math.abs(gy-_snapCell[1]) < r &&
-                  Math.abs(gz-_snapCell[2]) < r) continue;
       list = grid.map.get(KEY(gx, gy, gz));
       if(!list) continue;
       for(i=0;i<list.length;i++){
+        /* straddles cells, and survives across doublings: test it once */
         if(seen[list[i]] === stamp) continue;
         seen[list[i]] = stamp;
         var t = list[i]*3;
@@ -1489,7 +1507,9 @@ G.snapToSurface = function(p, guide, out, ctx){
         if(d < bestD){ bestD = d; _snapBest.copy(_snapC); found = true; }
       }
     }
-    if(found && Math.sqrt(bestD) <= r * grid.minStep) break;
+    if(found && Math.sqrt(bestD) <= radius) break;
+    if(radius > limit) break;
+    radius *= 2;
   }
   if(!found) return out.copy(p);         // no geometry anywhere: leave it alone
   return out.copy(_snapBest).applyMatrix4(ctx && ctx.guide === g ? ctx.world
