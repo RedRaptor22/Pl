@@ -374,6 +374,135 @@ EX.saveBlob = function(blob, filename){
 
 /* Writes the file(s) and returns the stats, or null when there is nothing to
    write — the caller decides what to say about it. */
+/* ==========================================================================
+   glTF 2.0
+   --------------------------------------------------------------------------
+   The interchange format Feather names first, and the one a Blender importer
+   actually wants. Written as a single self-contained .gltf: the JSON carries
+   one embedded buffer as a data URI, so there is no sidecar to lose the way an
+   OBJ loses its .mtl.
+
+   Two conventions differ from the OBJ path on purpose. glTF is defined in
+   METRES, and a Plume world unit is already a metre (P.MM = 0.001, so 1 unit
+   is 1000mm), which is why this collects at scale 1 while OBJ and STL scale to
+   millimetres. And glTF is Y-up right-handed, which is Three's own basis, so
+   nothing is swapped.
+
+   Colour rides on the material rather than on COLOR_0: a stroke is one colour
+   throughout, and a baseColorFactor is what an importer will actually show.
+   ========================================================================== */
+function b64of(bytes){
+  /* chunked, because String.fromCharCode.apply blows the stack somewhere
+     around a hundred thousand arguments and a sketch easily passes that */
+  var CH = 0x8000, out = '', i;
+  for(i=0;i<bytes.length;i+=CH){
+    out += String.fromCharCode.apply(null, bytes.subarray(i, i+CH));
+  }
+  return btoa(out);
+}
+
+/* -> {gltf:String, name:String} */
+EX.gltfSource = function(parts, opts){
+  opts = opts || {};
+  var name = safeName(opts.name, 'plume');
+
+  var views = [], accessors = [], meshes = [], nodes = [], materials = [];
+  var matIndex = {}, blobs = [], offset = 0, i, j;
+
+  function pushView(arr, target){
+    var bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+    blobs.push(bytes);
+    var v = { buffer:0, byteOffset:offset, byteLength:arr.byteLength };
+    if(target) v.target = target;                 // 34962 array, 34963 element
+    views.push(v);
+    offset += arr.byteLength;
+    /* every accessor here is 4 bytes wide, so offsets stay aligned on their
+       own — but pad anyway rather than depend on that staying true */
+    while(offset % 4){ blobs.push(new Uint8Array([0])); offset++; }
+    return views.length - 1;
+  }
+
+  for(i=0;i<parts.length;i++){
+    var part = parts[i];
+    var n = part.pos.length/3;
+    if(!n || !part.tris.length) continue;
+
+    var lo = [Infinity,Infinity,Infinity], hi = [-Infinity,-Infinity,-Infinity];
+    for(j=0;j<part.pos.length;j+=3){
+      for(var k=0;k<3;k++){
+        var val = part.pos[j+k];
+        if(val < lo[k]) lo[k] = val;
+        if(val > hi[k]) hi[k] = val;
+      }
+    }
+
+    var vPos = pushView(part.pos, 34962);
+    var vNor = pushView(part.nor, 34962);
+    var idx  = (part.tris instanceof Uint32Array) ? part.tris
+                                                  : new Uint32Array(part.tris);
+    var vIdx = pushView(idx, 34963);
+
+    accessors.push({ bufferView:vPos, componentType:5126, count:n,
+                     type:'VEC3', min:lo, max:hi });
+    accessors.push({ bufferView:vNor, componentType:5126, count:n, type:'VEC3' });
+    accessors.push({ bufferView:vIdx, componentType:5125, count:idx.length,
+                     type:'SCALAR' });
+    var aPos = accessors.length-3, aNor = accessors.length-2, aIdx = accessors.length-1;
+
+    var key = materialKey(part);
+    if(matIndex[key] === undefined){
+      var hex = part.color.replace('#','');
+      var alpha = P.clamp(part.opacity === undefined ? 1 : part.opacity, 0, 1);
+      materials.push({
+        name: key,
+        pbrMetallicRoughness: {
+          baseColorFactor: [
+            srgbToLinear(parseInt(hex.substr(0,2),16)/255),
+            srgbToLinear(parseInt(hex.substr(2,2),16)/255),
+            srgbToLinear(parseInt(hex.substr(4,2),16)/255),
+            alpha
+          ],
+          metallicFactor: 0,
+          roughnessFactor: 0.85
+        },
+        doubleSided: true,
+        alphaMode: alpha < 1 ? 'BLEND' : 'OPAQUE'
+      });
+      matIndex[key] = materials.length-1;
+    }
+
+    meshes.push({ name: part.name, primitives: [{
+      attributes: { POSITION:aPos, NORMAL:aNor },
+      indices: aIdx, material: matIndex[key], mode: 4
+    }]});
+    nodes.push({ mesh: meshes.length-1, name: part.name });
+  }
+
+  if(!meshes.length) return null;
+
+  var total = offset, bin = new Uint8Array(total), at = 0;
+  for(i=0;i<blobs.length;i++){ bin.set(blobs[i], at); at += blobs[i].length; }
+
+  var doc = {
+    asset: { version:'2.0', generator:'Plume — 3D sketchbook' },
+    scene: 0,
+    scenes: [{ name: name, nodes: nodes.map(function(_,q){ return q; }) }],
+    nodes: nodes,
+    meshes: meshes,
+    materials: materials,
+    accessors: accessors,
+    bufferViews: views,
+    buffers: [{ byteLength: total,
+                uri: 'data:application/octet-stream;base64,' + b64of(bin) }]
+  };
+  return { gltf: JSON.stringify(doc), name: name };
+};
+
+/* glTF's baseColorFactor is linear; the colour a person picked is sRGB */
+function srgbToLinear(c){
+  return c <= 0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4);
+}
+
 EX.download = function(format, opts){
   opts = opts || {};
   var parts = EX.collect(opts);
@@ -381,6 +510,19 @@ EX.download = function(format, opts){
   if(!st.triangles) return null;
 
   var name = safeName(opts.name, 'plume-' + Date.now());
+  if(format === 'gltf'){
+    /* glTF is metric and Y-up, so it wants world units untouched rather than
+       the millimetre scaling OBJ and STL use */
+    var gopts = { scale:1, zUp:false };
+    for(var ok in opts) if(opts.hasOwnProperty(ok) && ok !== 'scale' && ok !== 'zUp'){
+      gopts[ok] = opts[ok];
+    }
+    var gparts = EX.collect(gopts);
+    var g = EX.gltfSource(gparts, {name:name});
+    if(!g) return null;
+    EX.saveBlob(new Blob([g.gltf], {type:'model/gltf+json'}), name + '.gltf');
+    return EX.stats(gparts);
+  }
   if(format === 'stl'){
     if(opts.ascii){
       EX.saveBlob(new Blob([EX.stlSource(parts, {name:name})], {type:'model/stl'}),

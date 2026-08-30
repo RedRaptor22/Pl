@@ -690,6 +690,7 @@ G.bendMesh = function(guide, worldPath){
   geom.computeBoundingSphere();
   geom.computeBoundingBox();
   delete geom.userData._adj;               // adjacency is unchanged, bounds are not
+  delete geom.userData._grid;              // but the vertex grid is keyed on them
   G.invalidateMask();
   guide.bendPath = worldPath.map(function(p){ return p.clone(); });
   return true;
@@ -762,7 +763,7 @@ G.loft = function(strokes, tension){
    8. Primitives  (A.8) — FACT: Cube, Pyramid, Sphere, Tube, always at (0,0,0),
    with a segment-count slider that turns a Tube into a cylinder or cone.
    ========================================================================== */
-G.PRIMITIVES = ['cube','pyramid','sphere','tube'];
+G.PRIMITIVES = ['cube','pyramid','sphere','torus','tube'];
 
 G.primitive = function(kind, segments, taper){
   var seg = Math.max(3, Math.round(segments || 24));
@@ -772,6 +773,14 @@ G.primitive = function(kind, segments, taper){
     case 'cube':    geom = new THREE.BoxGeometry(2,2,2, 1,1,1); break;
     case 'pyramid': geom = new THREE.ConeGeometry(1.5, 2.4, 4, 1); break;
     case 'sphere':  geom = new THREE.SphereGeometry(1.4, seg, Math.max(3, seg>>1)); break;
+    /* Feather offers a torus among its readymade guides, and it is the one
+       shape here you cannot get by bending a swept guide into a ring — the
+       tube of a torus closes on itself in both directions. Taper drives the
+       thickness of the ring rather than a cone, since a torus has no ends. */
+    case 'torus':   geom = new THREE.TorusGeometry(
+                      1.4, 0.42 * P.clamp(tp, 0.15, 1), Math.max(6, seg>>1), seg);
+                    geom.rotateX(Math.PI/2);      // lying flat, like the grid
+                    break;
     default:        geom = new THREE.CylinderGeometry(1.2*tp, 1.2, 2.6, seg, 1); break;
   }
   /* the surface shader reads uvw in swept mode only, but the attribute has to
@@ -1314,6 +1323,189 @@ function adjacencyOf(geom){
   geom.userData._adj = adj;
   return adj;
 }
+
+/* ---- finding a guide again, and snapping a loose point back onto it -------
+   A curve drawn on a guide belongs to that surface, but Smooth averages a
+   point with its neighbours and Liquify shoves it bodily, and both of them
+   work in free space. Paint applied to a barrel came away from it: measured
+   at 6mm under Smooth and 48mm under Liquify, from a stroke that started
+   exactly on the surface at 0.00mm.
+
+   Putting it back needs a nearest-point-on-surface query per point per move,
+   and a brute-force sweep of ~6000 vertices x ~130 points x every pointermove
+   is why this was left undone. A uniform grid over the vertices, cached on the
+   geometry beside the adjacency table, turns each query into a look at one
+   cell and its neighbours. */
+G.byId = function(id){
+  if(id === null || id === undefined) return null;
+  if(G.active && G.active.id === id) return G.active;
+  for(var i=0;i<G.resources.length;i++){
+    if(G.resources[i].id === id) return G.resources[i];
+  }
+  return null;
+};
+
+/* A uniform grid over the guide's TRIANGLES, cached on the geometry beside the
+   adjacency table.
+
+   Indexing vertices instead was the obvious thing and it is wrong. A guide is a
+   coarse mesh — a swept surface here is 520 vertices carrying 896 triangles —
+   so a point can lie exactly ON a large triangle while the nearest vertex is
+   67mm away and belongs to a different one. Refining over the triangles that
+   touch the nearest vertex then lands the point somewhere else on the surface
+   entirely: still on the guide, but slid 21mm along it, which corrupts the
+   drawing rather than repairing it. Triangles are what the query is actually
+   about, so triangles are what the grid holds. */
+/* cell -> one integer. 2048 per axis is far more than any grid here needs and
+   keeps the product inside an exact float64 integer. */
+function KEY(x, y, z){
+  return (((x + 1024) * 2048) + (y + 1024)) * 2048 + (z + 1024);
+}
+
+function gridOf(geom){
+  if(geom.userData._grid) return geom.userData._grid;
+  var pos = geom.attributes.position, idx = geom.index;
+  var triCount = ((idx ? idx.count : pos.count) / 3) | 0;
+  var box = new THREE.Box3(), v = new THREE.Vector3(), i;
+  for(i=0;i<pos.count;i++) box.expandByPoint(v.fromBufferAttribute(pos, i));
+  var size = box.getSize(new THREE.Vector3());
+  var cells = P.clamp(Math.round(Math.cbrt(Math.max(triCount,1))), 2, 32);
+  var step = {
+    x: Math.max(size.x/cells, 1e-6),
+    y: Math.max(size.y/cells, 1e-6),
+    z: Math.max(size.z/cells, 1e-6)
+  };
+  function ix(val, lo, st){ return Math.floor((val - lo) / st); }
+  /* A Map on a packed integer key, not an object on a string one: a query
+     scans a few dozen cells per point and a stroke asks two hundred times a
+     move, so building "3_7_4" that many times is most of the cost. */
+  var map = new Map(), a = new THREE.Vector3(), b2 = new THREE.Vector3(),
+      c2 = new THREE.Vector3();
+  for(i=0;i<triCount;i++){
+    var t = i*3;
+    var ia = idx ? idx.getX(t)   : t,
+        ib = idx ? idx.getX(t+1) : t+1,
+        ic = idx ? idx.getX(t+2) : t+2;
+    a.fromBufferAttribute(pos, ia);
+    b2.fromBufferAttribute(pos, ib);
+    c2.fromBufferAttribute(pos, ic);
+    /* every cell the triangle's own bounding box touches, so a long triangle is
+       findable from anywhere along it rather than only near its corners */
+    var x0 = ix(Math.min(a.x,b2.x,c2.x), box.min.x, step.x),
+        x1 = ix(Math.max(a.x,b2.x,c2.x), box.min.x, step.x),
+        y0 = ix(Math.min(a.y,b2.y,c2.y), box.min.y, step.y),
+        y1 = ix(Math.max(a.y,b2.y,c2.y), box.min.y, step.y),
+        z0 = ix(Math.min(a.z,b2.z,c2.z), box.min.z, step.z),
+        z1 = ix(Math.max(a.z,b2.z,c2.z), box.min.z, step.z);
+    for(var gx=x0; gx<=x1; gx++)
+    for(var gy=y0; gy<=y1; gy++)
+    for(var gz=z0; gz<=z1; gz++){
+      var k = KEY(gx, gy, gz);
+      var bucket = map.get(k);
+      if(bucket) bucket.push(i); else map.set(k, [i]);
+    }
+  }
+  var g = {
+    map: map, step: step, min: box.min.clone(),
+    minStep: Math.min(step.x, step.y, step.z),
+    rings: cells + 2,
+    lo: [0,0,0], hi: [cells, cells, cells],
+    /* a triangle straddling cells sits in several buckets; the stamp keeps the
+       search from testing it once per bucket */
+    seen: new Int32Array(triCount), stamp: 0,
+    cellOf: function(p, o){
+      o[0] = ix(p.x, box.min.x, step.x);
+      o[1] = ix(p.y, box.min.y, step.y);
+      o[2] = ix(p.z, box.min.z, step.z);
+      return o;
+    }
+  };
+  geom.userData._grid = g;
+  return g;
+}
+
+var _snapInv = new THREE.Matrix4();
+var _snapLocal = new THREE.Vector3(), _snapC = new THREE.Vector3(),
+    _snapBest = new THREE.Vector3(), _snapCell = [0,0,0];
+var _snapTri = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+
+/* Nearest point on a guide's surface to an arbitrary world point — exact, not
+   an approximation: rings of cells are scanned outwards and the search only
+   stops once the best hit is closer than anything an unscanned cell could
+   still hold. */
+G.snapToSurface = function(p, guide, out, ctx){
+  out = out || new THREE.Vector3();
+  var g = guide || G.active;
+  if(!g || !g.mesh || !g.mesh.geometry.attributes.position) return out.copy(p);
+  var geom = g.mesh.geometry, pos = geom.attributes.position, idx = geom.index;
+  /* Walking the parent chain and inverting the world matrix costs more than the
+     search does, and re-projecting a stroke asks for the same guide two hundred
+     times in a row. snapContext hoists both out of the loop. */
+  if(ctx && ctx.guide === g){
+    _snapLocal.copy(p).applyMatrix4(ctx.inv);
+  } else {
+    g.mesh.updateMatrixWorld();
+    _snapInv.copy(g.mesh.matrixWorld).invert();
+    _snapLocal.copy(p).applyMatrix4(_snapInv);
+  }
+
+  var grid = gridOf(geom);
+  grid.cellOf(_snapLocal, _snapCell);
+  var bestD = Infinity, found = false, r, gx, gy, gz, list, i, d;
+  var stamp = ++grid.stamp, seen = grid.seen;
+  /* the ring never has to reach past the grid itself */
+  var reach = 0, ax;
+  for(ax=0; ax<3; ax++){
+    reach = Math.max(reach, Math.abs(_snapCell[ax] - grid.lo[ax]),
+                            Math.abs(_snapCell[ax] - grid.hi[ax]));
+  }
+  var maxR = Math.min(grid.rings, reach);
+
+  for(r=0; r<=maxR; r++){
+    var xa = Math.max(_snapCell[0]-r, grid.lo[0]), xb = Math.min(_snapCell[0]+r, grid.hi[0]);
+    var ya = Math.max(_snapCell[1]-r, grid.lo[1]), yb = Math.min(_snapCell[1]+r, grid.hi[1]);
+    var za = Math.max(_snapCell[2]-r, grid.lo[2]), zb = Math.min(_snapCell[2]+r, grid.hi[2]);
+    for(gx=xa; gx<=xb; gx++)
+    for(gy=ya; gy<=yb; gy++)
+    for(gz=za; gz<=zb; gz++){
+      /* only the shell: the inside was covered on an earlier ring */
+      if(r > 0 && Math.abs(gx-_snapCell[0]) < r &&
+                  Math.abs(gy-_snapCell[1]) < r &&
+                  Math.abs(gz-_snapCell[2]) < r) continue;
+      list = grid.map.get(KEY(gx, gy, gz));
+      if(!list) continue;
+      for(i=0;i<list.length;i++){
+        if(seen[list[i]] === stamp) continue;
+        seen[list[i]] = stamp;
+        var t = list[i]*3;
+        var ia = idx ? idx.getX(t)   : t,
+            ib = idx ? idx.getX(t+1) : t+1,
+            ic = idx ? idx.getX(t+2) : t+2;
+        _snapTri[0].fromBufferAttribute(pos, ia);
+        _snapTri[1].fromBufferAttribute(pos, ib);
+        _snapTri[2].fromBufferAttribute(pos, ic);
+        closestPtTriangle(_snapLocal, _snapTri[0], _snapTri[1], _snapTri[2], _snapC);
+        d = _snapC.distanceToSquared(_snapLocal);
+        if(d < bestD){ bestD = d; _snapBest.copy(_snapC); found = true; }
+      }
+    }
+    if(found && Math.sqrt(bestD) <= r * grid.minStep) break;
+  }
+  if(!found) return out.copy(p);         // no geometry anywhere: leave it alone
+  return out.copy(_snapBest).applyMatrix4(ctx && ctx.guide === g ? ctx.world
+                                                                 : g.mesh.matrixWorld);
+};
+
+/* Prepared once per stroke, handed to every snapToSurface call for it. */
+G.snapContext = function(guide){
+  if(!guide || !guide.mesh) return null;
+  guide.mesh.updateMatrixWorld();
+  return {
+    guide: guide,
+    world: guide.mesh.matrixWorld.clone(),
+    inv: guide.mesh.matrixWorld.clone().invert()
+  };
+};
 
 /* Nearest point on the guide SURFACE to a ray — the clamp-to-silhouette
    fallback. Two stages: a brute-force sweep for the nearest vertex (~6k tests

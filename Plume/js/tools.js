@@ -182,6 +182,10 @@ function newStroke(){
       : 'none',
     seedRef: null,
     group: S.ensureGroup().id,        // a curve is drawn INTO a group
+    /* and ONTO a guide, when there is one. Remembering which lets the tools
+       that move points afterwards put them back on the surface they belong to
+       instead of leaving them floating beside it. */
+    guide: G.hasActive() ? G.active.id : null,
     pts: [], mesh: null, selected: false
   };
 }
@@ -884,9 +888,30 @@ var dirtyStrokes = [];
 function markDirty(st){
   if(dirtyStrokes.indexOf(st) < 0) dirtyStrokes.push(st);
 }
+/* A curve painted on a guide belongs to that surface. Smooth averages a point
+   with its two neighbours, which cuts the corner off a curved surface, and
+   Liquify pushes points bodily; both work in free space. Measured on a barrel
+   guide, paint that started at 0.00mm off the surface ended up 6.4mm off after
+   a Smooth pass and 47.7mm off after a Liquify one.
+
+   Snapping the moved points back is exactly what the Clamp setting already
+   promises while drawing — "strokes leaving the guide clamp to its nearest
+   point" — applied to the tools that move them afterwards, and switched off
+   with the same toggle. */
+function reprojectToGuide(st){
+  if(!G.clampOffSurface || !st || st.guide === null || st.guide === undefined) return;
+  var g = G.byId(st.guide);
+  /* an image guide is a plane a stroke cannot leave in the first place, and it
+     opts out of clamping by name */
+  if(!g || !g.mesh || g.noClamp) return;
+  var ctx = G.snapContext(g);
+  for(var i=0;i<st.pts.length;i++) G.snapToSurface(st.pts[i].p, g, st.pts[i].p, ctx);
+}
+
 P.flushDirtyStrokes = function(){
   if(!dirtyStrokes.length) return;
   for(var i=0;i<dirtyStrokes.length;i++){
+    reprojectToGuide(dirtyStrokes[i]);
     S.freezeFrames(dirtyStrokes[i]);
     S.rebuild(dirtyStrokes[i]);
   }

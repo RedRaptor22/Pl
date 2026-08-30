@@ -522,6 +522,7 @@ UI.init = function(){
   }
   on($('btnOBJ'), 'click', function(){ exportGeometry('obj', '.obj + .mtl'); });
   on($('btnSTL'), 'click', function(){ exportGeometry('stl', '.stl'); });
+  on($('btnGLTF'), 'click', function(){ exportGeometry('gltf', '.gltf'); });
   on($('btnImport'), 'click', function(){ $('fileInput').click(); });
   on($('fileInput'), 'change', function(){
     var f = this.files && this.files[0];

@@ -502,6 +502,157 @@ function run(W){
   ck('switching to a glow brush does replace the material',
      reb.mesh.material !== mat0);
 
+  function penRaw2(type, x, y, buttons){
+    P.elStage.dispatchEvent(new W.PointerEvent(type, {pointerId:99, pointerType:'pen',
+      clientX:x, clientY:y, buttons:buttons, pressure:buttons?0.7:0,
+      tiltX:0, tiltY:0, bubbles:true, cancelable:true}));
+  }
+
+  /* ---- a curve painted on a guide stays ON that guide ----
+     Smooth averages a point with its two neighbours, which cuts the corner off
+     a curved surface, and Liquify shoves points bodily; both work in free
+     space. Paint that started exactly on a guide came away from it — measured
+     at 6.4mm under Smooth and 47.7mm under Liquify. Clamp already promises
+     this while drawing; it now covers the tools that move points afterwards.
+
+     Distance to the surface is measured with the app's own snapToSurface: how
+     far a point has to travel to land back on the guide IS how far off it is. */
+  (function paintStaysOnItsGuide(){
+    function offBy(st, g){
+      var worst = 0, snapped = new THREE.Vector3();
+      for(var q=0;q<st.pts.length;q++){
+        P.Guides.snapToSurface(st.pts[q].p, g, snapped);
+        worst = Math.max(worst, snapped.distanceTo(st.pts[q].p));
+      }
+      return worst / P.MM;                 // millimetres
+    }
+    function build(){
+      reset();
+      P.TOOL.stableOn = false;
+      P.TOOL.autoGuide = true; P.setTool('draw'); P.TOOL.sizeMM = 30;
+      pen([{x:CX-220,y:CY+60},{x:CX-70,y:CY-40},{x:CX+130,y:CY-20},{x:CX+300,y:CY+80}]);
+      P.TOOL.autoGuide = false;
+      P.TOOL.brush = 'wide'; P.TOOL.sizeMM = 90;
+      pen([{x:CX-180,y:CY+30},{x:CX,y:CY-10},{x:CX+180,y:CY+30}]);
+      return { g: P.Guides.active, st: P.Strokes.list[0] };
+    }
+    var w = build();
+    ck('paint lands exactly on its guide to begin with',
+       !!w.g && !!w.st && offBy(w.st, w.g) < 0.01,
+       (w.st ? offBy(w.st, w.g).toFixed(3) : '?') + 'mm off');
+
+    P.setTool('smooth');
+    penRaw2('pointerdown', CX-140, CY, 1);
+    for(var sq=1; sq<=30; sq++) penRaw2('pointermove', CX-140+sq*10, CY+(sq%5), 1);
+    penRaw2('pointerup', CX+160, CY, 0);
+    P.flushDirtyStrokes();
+    ck('and it is still on the guide after Smooth', offBy(w.st, w.g) < 0.5,
+       offBy(w.st, w.g).toFixed(3) + 'mm off, was 6.4mm before this was fixed');
+
+    w = build();
+    P.Strokes.setSelected(w.st, true); P.onSceneChange();
+    P.setTool('liquify');
+    penRaw2('pointerdown', CX-60, CY, 1);
+    for(sq=1; sq<=22; sq++) penRaw2('pointermove', CX-60+sq*8, CY+sq*3, 1);
+    penRaw2('pointerup', CX+120, CY+66, 0);
+    P.flushDirtyStrokes();
+    ck('and still on it after Liquify', offBy(w.st, w.g) < 0.5,
+       offBy(w.st, w.g).toFixed(3) + 'mm off, was 47.7mm before this was fixed');
+    P.Strokes.clearSelection();
+
+    /* a curve drawn in free space has no guide to be held to */
+    reset(); P.TOOL.autoGuide = false; P.setTool('draw');
+    pen([{x:CX-100,y:CY},{x:CX,y:CY-30},{x:CX+100,y:CY}]);
+    ck('a curve drawn with no guide is bound to none',
+       P.Strokes.list[0].guide === null);
+
+    /* and switching Clamp off gives the free-space behaviour back */
+    w = build();
+    P.Guides.clampOffSurface = false;
+    P.setTool('smooth');
+    penRaw2('pointerdown', CX-140, CY, 1);
+    for(sq=1; sq<=30; sq++) penRaw2('pointermove', CX-140+sq*10, CY+(sq%5), 1);
+    penRaw2('pointerup', CX+160, CY, 0);
+    P.flushDirtyStrokes();
+    ck('with Clamp off the tools move paint freely again', offBy(w.st, w.g) > 0.5,
+       offBy(w.st, w.g).toFixed(2) + 'mm off');
+    P.Guides.clampOffSurface = true;
+    reset();
+  })();
+
+  /* ---- glTF, the format Feather names first ---- */
+  (function gltfExport(){
+    reset(); P.TOOL.autoGuide = false; P.setTool('draw');
+    P.TOOL.brush = 'pen'; P.TOOL.sizeMM = 40;
+    P.TOOL.color.set('#c0392b'); P.TOOL.opacity = 1;
+    pen([{x:CX-160,y:CY-40},{x:CX,y:CY-80},{x:CX+160,y:CY-40}]);
+    P.TOOL.color.set('#2980b9'); P.TOOL.opacity = 0.5;
+    pen([{x:CX-160,y:CY+60},{x:CX,y:CY+100},{x:CX+160,y:CY+60}]);
+
+    var gparts = P.Export.collect({scale:1, zUp:false});
+    var out = P.Export.gltfSource(gparts, {name:'suite'});
+    ck('glTF exports something', !!out && typeof out.gltf === 'string');
+    var doc = null;
+    try { doc = JSON.parse(out.gltf); } catch(e){ doc = null; }
+    ck('and it is valid JSON at version 2.0',
+       !!doc && doc.asset && doc.asset.version === '2.0');
+    if(!doc) return;
+
+    ck('one mesh per curve', doc.meshes.length === gparts.length,
+       doc.meshes.length + ' for ' + gparts.length);
+    ck('one material per colour', doc.materials.length === 2,
+       doc.materials.length + '');
+
+    var raw = W.atob(doc.buffers[0].uri.split(',')[1]);
+    ck('the buffer is embedded and the declared length is honest',
+       /^data:application\/octet-stream;base64,/.test(doc.buffers[0].uri) &&
+       raw.length === doc.buffers[0].byteLength,
+       raw.length + ' vs ' + doc.buffers[0].byteLength);
+
+    var over = 0, gq;
+    for(gq=0; gq<doc.bufferViews.length; gq++){
+      var bv = doc.bufferViews[gq];
+      if(bv.byteOffset + bv.byteLength > doc.buffers[0].byteLength) over++;
+    }
+    var SZ = {5126:4, 5125:4, 5123:2}, NC = {VEC3:3, VEC4:4, SCALAR:1}, accBad = 0;
+    for(gq=0; gq<doc.accessors.length; gq++){
+      var ac = doc.accessors[gq], vw = doc.bufferViews[ac.bufferView];
+      if(ac.count * NC[ac.type] * SZ[ac.componentType] > vw.byteLength) accBad++;
+    }
+    ck('every view and accessor fits inside the buffer',
+       over === 0 && accBad === 0, over + ' views, ' + accBad + ' accessors over');
+
+    /* indices must address real vertices, or an importer shows nothing */
+    var bytes = new Uint8Array(raw.length);
+    for(gq=0; gq<raw.length; gq++) bytes[gq] = raw.charCodeAt(gq);
+    var idxBad = 0;
+    for(gq=0; gq<doc.meshes.length; gq++){
+      var pr = doc.meshes[gq].primitives[0];
+      var ia = doc.accessors[pr.indices], pa = doc.accessors[pr.attributes.POSITION];
+      var vv = doc.bufferViews[ia.bufferView];
+      var dv = new W.DataView(bytes.buffer, vv.byteOffset, vv.byteLength);
+      for(var iq=0; iq<ia.count; iq++){
+        if(dv.getUint32(iq*4, true) >= pa.count) idxBad++;
+      }
+    }
+    ck('every index addresses a real vertex', idxBad === 0, idxBad + ' bad');
+
+    var pAcc = doc.accessors[doc.meshes[0].primitives[0].attributes.POSITION];
+    ck('POSITION carries the min/max the spec requires', !!pAcc.min && !!pAcc.max);
+    /* glTF is metric and a Plume unit is already a metre, so a sketch a few
+       hundred millimetres across must not come out in the hundreds */
+    var span = Math.max(pAcc.max[0]-pAcc.min[0], pAcc.max[1]-pAcc.min[1],
+                        pAcc.max[2]-pAcc.min[2]);
+    ck('it is written in metres, not millimetres', span > 0 && span < 50,
+       span.toFixed(3) + ' units across');
+    var blend = 0;
+    for(gq=0; gq<doc.materials.length; gq++){
+      if(doc.materials[gq].alphaMode === 'BLEND') blend++;
+    }
+    ck('the half-opaque curve is declared BLEND', blend === 1, blend + ' blended');
+    reset();
+  })();
+
   /* ================= C.10 mirror ================= */
   group('C.10  Mirror');
   reset(); P.TOOL.mirror = 'x';
@@ -691,9 +842,33 @@ function run(W){
   ck('primitive is staged at the origin', !!P.stagedGuide &&
      P.stagedGuide.obj.position.length() === 0);
   var kinds = P.Guides.PRIMITIVES;
-  ck('cube, pyramid, sphere and tube are all offered',
-     kinds.length === 4 && kinds.indexOf('cube') >= 0 && kinds.indexOf('pyramid') >= 0 &&
-     kinds.indexOf('sphere') >= 0 && kinds.indexOf('tube') >= 0, kinds.join(', '));
+  /* Feather's readymade guides are cube, pyramid, sphere and torus; the tube is
+     ours. The torus is the one shape here you cannot reach by bending a swept
+     guide, because its tube closes on itself in both directions. */
+  ck('cube, pyramid, sphere, torus and tube are all offered',
+     kinds.length === 5 && kinds.indexOf('cube') >= 0 && kinds.indexOf('pyramid') >= 0 &&
+     kinds.indexOf('sphere') >= 0 && kinds.indexOf('torus') >= 0 &&
+     kinds.indexOf('tube') >= 0, kinds.join(', '));
+  (function torusIsARing(){
+    P.Tools.primPreview('torus', 24, 1);
+    P.Tools.primCommit();
+    var tg = P.Guides.active;
+    ck('the torus commits as a guide', !!tg && tg.kind === 'primitive');
+    var tb = new THREE.Box3().setFromObject(tg.mesh);
+    var tsz = tb.getSize(new THREE.Vector3());
+    /* a ring lying flat: wide in x and z, shallow in y, and hollow through the
+       middle — a sphere or a cube would fail both halves of this */
+    ck('it lies flat, wider than it is tall',
+       tsz.y < tsz.x * 0.5 && Math.abs(tsz.x - tsz.z) < tsz.x * 0.05,
+       tsz.x.toFixed(2) + ' x ' + tsz.y.toFixed(2) + ' x ' + tsz.z.toFixed(2));
+    var pos = tg.mesh.geometry.attributes.position, nearAxis = 0;
+    for(var tq=0; tq<pos.count; tq++){
+      if(Math.hypot(pos.getX(tq), pos.getZ(tq)) < 0.3) nearAxis++;
+    }
+    ck('and it is hollow — no geometry on its axis', nearAxis === 0,
+       nearAxis + ' vertices near the centre');
+  })();
+  reset(); P.setTool('prim');
   P.Tools.primPreview('tube', 6, 0);
   ck('segment and taper sliders rebuild it',
      P.stagedGuide.primSeg === 6 && P.stagedGuide.primTaper === 0);

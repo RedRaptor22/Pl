@@ -572,7 +572,7 @@
 <!-- ============================ top left ============================ -->
 <div id="topleft" class="panel">
   <button class="ico" id="btnHome" data-tip="Reset view<br><i>F — or press-and-hold empty space</i>"><svg><use href="#i-grid"/></svg></button>
-  <button class="ico" id="btnExportTop" data-tip="Export — PNG, OBJ/STL or .plume file"><svg><use href="#i-export"/></svg></button>
+  <button class="ico" id="btnExportTop" data-tip="Export — PNG, glTF/OBJ/STL or .plume file"><svg><use href="#i-export"/></svg></button>
   <button class="ico" id="btnMenu" data-tip="Settings"><svg><use href="#i-menu"/></svg></button>
 </div>
 <div id="helpBtn" class="panel">
@@ -686,6 +686,7 @@
       <button class="small filled" data-prim="cube">Cube</button>
       <button class="small filled" data-prim="pyramid">Pyr</button>
       <button class="small filled" data-prim="sphere">Sph</button>
+      <button class="small filled" data-prim="torus">Torus</button>
       <button class="small filled" data-prim="tube">Tube</button>
     </span>
     <button class="small on" id="btnCtxDone">Done</button>
@@ -851,6 +852,7 @@
     <button class="small" id="btnClear">Clear</button>
     <button class="small" id="btnOBJ" data-tip="Export the geometry as .obj, with a .mtl for the colours.<br><i>Millimetres. Selection only, if anything is selected.</i>">OBJ</button>
     <button class="small" id="btnSTL" data-tip="Export the geometry as binary .stl — for printing or CAD.<br><i>Millimetres, no colour.</i>">STL</button>
+    <button class="small" id="btnGLTF" data-tip="Export the geometry as .gltf, colours and transparency included.<br><i>One self-contained file. Metres, Y-up — what Blender and most 3D viewers want.</i>">glTF</button>
   </div>
   <div id="saveInfo" class="empty">Autosaves to this device.</div>
 </div>
